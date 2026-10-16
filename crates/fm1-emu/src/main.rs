@@ -2,6 +2,7 @@
 //!
 //! Usage:
 //!   fm1-emu --bin app.bin [--flash decrypted.bin] [--entry 0x02000000] [--steps N] [--trace K] [--quiet]
+//!   fm1-emu ... --flaky-core1 1e-6 [--seed 7]   # core 1 misreads RAM now and then (fm1_soc::flaky)
 //!
 //! Loads the image at the XIP base (0x02000000), boots from `--entry` and
 //! reports: instructions retired, per-class histogram, unknown-class halts
@@ -55,6 +56,10 @@ struct Args {
     keys: Vec<String>,
     /// save the LCD at these times (ms) as work/lcd_<ms>.bmp
     snap: Vec<u64>,
+    /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
+    flaky_core1: Option<f64>,
+    /// the flaky core's generator seed (the same seed, the same misreads)
+    seed: u64,
 }
 
 fn main() -> ExitCode {
@@ -182,7 +187,7 @@ fn main() -> ExitCode {
         None => {
             eprintln!(
                 "usage: fm1-emu --bin <app.bin> [--flash decrypted.bin] [--entry 0x02000000] \
-                 [--steps N] [--trace K] [--ram bytes] [--quiet]"
+                 [--steps N] [--trace K] [--ram bytes] [--quiet] [--flaky-core1 RATE [--seed N]]"
             );
             return ExitCode::from(2);
         }
@@ -254,6 +259,7 @@ fn main() -> ExitCode {
     image.resize(image.len().max(1) , 0);
 
     let mut soc = Soc::new(args.ram, image);
+    soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed));
     if let Some(f) = &flash_image {
         soc.flash.load(f);
     }
@@ -475,7 +481,12 @@ fn main() -> ExitCode {
             if ci == 0 {
                 if cpu.irq_levels.is_empty() { busy[0] += 1 } else { busy[cpu.irq_levels.len().min(2)] += 1 }
             }
-            match cpu.step(&mut soc) {
+            let stepped = if cpu.core_id == 1 && soc.flaky_core1.is_some() {
+                cpu.step(&mut fm1_soc::machine::Core1Loads(&mut soc))
+            } else {
+                cpu.step(&mut soc)
+            };
+            match stepped {
                 Ok(()) => {
                     if let (Some(a), Some(old)) = (args.watch, watch_val) {
                         let now = soc.read32(a);
@@ -575,6 +586,9 @@ fn main() -> ExitCode {
             by.sort_by(|a, b| b.1.cmp(a.1));
             let by: Vec<String> = by.iter().take(8).map(|((c, n), k)| format!("c{c} irq {n} x{k}")).collect();
             println!("interrupts by source: {}", by.join(", "));
+            if let Some(f) = &soc.flaky_core1 {
+                println!("flaky core 1 (seed {}): {} misreads in {} RAM loads", args.seed, f.misreads, f.loads);
+            }
             if let Some(w) = &args.wav {
                 match write_wav(w, &soc.periph.audio) {
                     Ok(()) => println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0),
@@ -780,6 +794,8 @@ fn parse_args() -> Option<Args> {
         wav: None,
         keys: Vec::new(),
         snap: Vec::new(),
+        flaky_core1: None,
+        seed: 1,
     };
     let mut have_bin = false;
     while i < a.len() {
@@ -850,6 +866,14 @@ fn parse_args() -> Option<Args> {
             }
             "--keys" => {
                 args.keys.extend(a.get(i + 1)?.split(',').map(|k| k.trim().to_string()).filter(|k| !k.is_empty()));
+                i += 2;
+            }
+            "--flaky-core1" => {
+                args.flaky_core1 = Some(a.get(i + 1)?.parse::<f64>().ok().filter(|r| (0.0..=1.0).contains(r))?);
+                i += 2;
+            }
+            "--seed" => {
+                args.seed = a.get(i + 1)?.parse().ok()?;
                 i += 2;
             }
             "--snap" => {

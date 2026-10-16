@@ -19,6 +19,9 @@
 //! MIDI: every MIDI input of this computer plays the synth through its MIDI IN jack
 //! (`--midi none` turns that off, `--midi NAME` takes the inputs whose name contains NAME);
 //! `--midi-ch N` sends channel messages to channel N (M-VAVE's firmware listens on 2).
+//!
+//! `--flaky-core1 RATE [--seed N]`: core 1 misreads RAM now and then, as on some units
+//! (fm1_soc::flaky), for trying a firmware's fallback to one core.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use fm1_core::{Bus, Cpu};
@@ -58,6 +61,10 @@ struct Opts {
     midi: String,
     /// channel messages sent to this channel (1-16; 0 = as sent)
     midi_ch: u8,
+    /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
+    flaky_core1: Option<f64>,
+    /// its generator's seed
+    seed: u64,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, image path): each image is
@@ -83,7 +90,8 @@ fn catalog() -> Vec<(String, String, String, String)> {
 fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0 };
+                       name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+                       flaky_core1: None, seed: 1 };
     let mut i = 1;
     while i < a.len() {
         match a[i].as_str() {
@@ -117,6 +125,8 @@ fn parse() -> Option<Opts> {
             "--mhz" => o.mhz = a.get(i + 1)?.parse().ok()?,
             "--bench" => o.bench = Some(a.get(i + 1)?.parse().ok()?),
             "--shot" => o.shot = Some(a.get(i + 1)?.parse().ok()?),
+            "--flaky-core1" => o.flaky_core1 = Some(a.get(i + 1)?.parse::<f64>().ok().filter(|r| (0.0..=1.0).contains(r))?),
+            "--seed" => o.seed = a.get(i + 1)?.parse().ok()?,
             _ => return None,
         }
         i += 2;
@@ -160,6 +170,7 @@ impl Machine {
         let mut soc = Soc::new(RAM_SIZE, image);
         soc.periph.hz = o.mhz * 1_000_000;
         soc.periph.skip_idle = true;
+        soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed));
         let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
         cpu.jit_on = std::env::var("FM1_NO_JIT").is_err();
         // the SPL hands cpu0 over in user mode (see fm1-emu)
@@ -306,6 +317,9 @@ fn bench(o: &Opts, ms: u64) {
     println!("icache: {} decodes for {} instructions", m.cpu.decodes, insns);
     if let Some(c1) = &m.cpu1 {
         println!("cpu1: {} instructions ({:.1} M per emulated s)", c1.insn_count, c1.insn_count as f64 / 1e3 / ms as f64);
+    }
+    if let Some(f) = &m.soc.flaky_core1 {
+        println!("flaky core 1: {} misreads in {} RAM loads", f.misreads, f.loads);
     }
     if let Ok(path) = std::env::var("FM1_BENCH_WAV") {
         let bytes: Vec<u8> = m.soc.periph.audio.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -617,7 +631,7 @@ const DRAG_PER_CLICK: f32 = 12.0;
 
 fn main() {
     let Some(o) = parse() else {
-        eprintln!("usage: fm1-live [--fw ID | --fw list | --bin work/felucca_xip.bin] [--entry 0x02000120] [--mhz 240] [--bench MS] [--midi all|none|NAME] [--midi-ch N]");
+        eprintln!("usage: fm1-live [--fw ID | --fw list | --bin work/felucca_xip.bin] [--entry 0x02000120] [--mhz 240] [--bench MS] [--midi all|none|NAME] [--midi-ch N] [--flaky-core1 RATE [--seed N]]");
         std::process::exit(2);
     };
     if let Some(ms) = o.shot {

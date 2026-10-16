@@ -26,6 +26,7 @@
 use fm1_core::Bus;
 
 pub mod script;
+pub mod flaky;
 pub mod fwsc;
 mod lcd;
 pub mod machine;
@@ -170,6 +171,8 @@ pub struct Soc {
     /// FM1_GPIO_TRACE: GPIO register writes by address (debugging port use).
     pub gpio_writes: Option<std::collections::BTreeMap<u32, u64>>,
     unknown_log: Vec<UnknownAccess>,
+    /// `--flaky-core1`: core 1's RAM loads misread now and then (flaky.rs); None = a good unit.
+    pub flaky_core1: Option<flaky::FlakyCore1>,
 }
 
 fn dbg_line(addr: u32) -> &'static str {
@@ -223,6 +226,31 @@ impl Soc {
             xip_flash: true,
             gpio_writes: std::env::var("FM1_GPIO_TRACE").ok().map(|_| Default::default()),
             unknown_log: Vec::new(),
+            flaky_core1: None,
+        }
+    }
+
+    /// A load by core 1: what `read32` returns, unless a flaky core 1 misreads it (RAM only).
+    pub fn core1_read32(&mut self, addr: u32) -> u32 {
+        let v = self.read32(addr);
+        self.core1_misread(addr, 4, v)
+    }
+
+    pub fn core1_read16(&mut self, addr: u32) -> u16 {
+        let v = self.read16(addr);
+        self.core1_misread(addr, 2, v as u32) as u16
+    }
+
+    pub fn core1_read8(&mut self, addr: u32) -> u8 {
+        let v = self.read8(addr);
+        self.core1_misread(addr, 1, v as u32) as u8
+    }
+
+    #[inline]
+    fn core1_misread(&mut self, addr: u32, size: u32, v: u32) -> u32 {
+        match self.flaky_core1.as_mut() {
+            Some(f) if (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() => f.load(addr, size, v),
+            _ => v,
         }
     }
 

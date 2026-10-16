@@ -144,6 +144,8 @@ it interprets (`--mhz` lowers the clock if that can't keep up). It plays every M
 `--midi-ch N`) and loads a DX7 bank into M-VAVE's firmware with `--syx bank.syx`.
 `fm1-emu` is the batch runner for tests and debugging (WAV and screen output, breakpoints,
 memory dumps).
+Both take `--flaky-core1 RATE [--seed N]`: the second core misreads RAM now and then, as on
+some units, to test a firmware's fallback to one core ([docs/stock-firmware.md](docs/stock-firmware.md#a-flaky-core-1---flaky-core1-fm1_socflaky)).
 
 The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
 target), the whole site with `tools/build_site.sh`.

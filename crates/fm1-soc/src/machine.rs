@@ -22,12 +22,15 @@ pub struct Core1Bus<'a> {
 
 impl Bus for Core1Bus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
-        self.soc.read8(a)
+        self.soc.core1_read8(a)
     }
     fn read16(&mut self, a: u32) -> u16 {
-        self.soc.read16(a)
+        self.soc.core1_read16(a)
     }
     fn read32(&mut self, a: u32) -> u32 {
+        self.soc.core1_read32(a)
+    }
+    fn fetch32(&mut self, a: u32) -> u32 {
         self.soc.read32(a)
     }
     fn write8(&mut self, a: u32, v: u8) {
@@ -47,6 +50,10 @@ impl Bus for Core1Bus<'_> {
         self.soc.periph.any_pending()
     }
     fn jit_mem(&mut self) -> Option<fm1_core::JitMem> {
+        // a flaky core 1 runs interpreted: compiled code reads RAM without the bus
+        if self.soc.flaky_core1.is_some() {
+            return None;
+        }
         self.soc.jit_mem()
     }
     fn code_writes(&self) -> Option<u64> {
@@ -72,6 +79,67 @@ impl Bus for Core1Bus<'_> {
     }
     fn next_tick_due(&self) -> bool {
         self.budget <= 1
+    }
+}
+
+/// cpu1's loads through the SoC, for a runner that steps it against the SoC itself (fm1-emu):
+/// the SoC as it is, but for a flaky core 1's misreads (`Soc::flaky_core1`).
+pub struct Core1Loads<'a>(pub &'a mut Soc);
+
+impl Bus for Core1Loads<'_> {
+    fn read8(&mut self, a: u32) -> u8 {
+        self.0.core1_read8(a)
+    }
+    fn read16(&mut self, a: u32) -> u16 {
+        self.0.core1_read16(a)
+    }
+    fn read32(&mut self, a: u32) -> u32 {
+        self.0.core1_read32(a)
+    }
+    fn fetch32(&mut self, a: u32) -> u32 {
+        self.0.read32(a)
+    }
+    fn write8(&mut self, a: u32, v: u8) {
+        self.0.write8(a, v)
+    }
+    fn write16(&mut self, a: u32, v: u16) {
+        self.0.write16(a, v)
+    }
+    fn write32(&mut self, a: u32, v: u32) {
+        self.0.write32(a, v)
+    }
+    fn tick(&mut self) -> bool {
+        self.0.tick()
+    }
+    fn irq_pending(&self) -> bool {
+        self.0.irq_pending()
+    }
+    fn jit_mem(&mut self) -> Option<fm1_core::JitMem> {
+        None // (as Core1Bus's: interpreted, every load through the bus)
+    }
+    fn tick_room(&self) -> u64 {
+        self.0.tick_room()
+    }
+    fn add_ticks(&mut self, n: u64) {
+        self.0.add_ticks(n)
+    }
+    fn hw_lock(&mut self, core: u32, set: bool) -> bool {
+        self.0.hw_lock(core, set)
+    }
+    fn next_tick_due(&self) -> bool {
+        self.0.next_tick_due()
+    }
+    fn idle(&mut self, core: u32) {
+        self.0.idle(core)
+    }
+    fn irq_window(&mut self) {
+        self.0.irq_window()
+    }
+    fn code_writes(&self) -> Option<u64> {
+        self.0.code_writes()
+    }
+    fn code_mark(&mut self, lo: u32, hi: u32) {
+        self.0.code_mark(lo, hi)
     }
 }
 
@@ -217,4 +285,86 @@ pub fn run_dual(
         run_cpu1(c1, soc, dt)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::flaky::{FlakyCore1, MISREAD_BIT};
+
+    /// RAM code: `13 05` r3 = [r1++=4], eight times, then `80 00` rts; the words it loads are 0.
+    fn soc_with_loads() -> Soc {
+        let mut soc = Soc::new(1 << 20, vec![0; 16]);
+        for i in 0..8 {
+            soc.write16(RAM_BASE + 2 * i, 0x0513);
+        }
+        soc.write16(RAM_BASE + 16, 0x0080);
+        soc
+    }
+
+    fn core_at_ram(id: u32) -> Cpu {
+        let mut c = Cpu::new(RAM_BASE);
+        c.core_id = id;
+        c.regs[1] = RAM_BASE + 0x100;
+        c
+    }
+
+    #[test]
+    fn flaky_core1_misreads_loads_not_fetches_nor_core0() {
+        let mut soc = soc_with_loads();
+        soc.flaky_core1 = Some(FlakyCore1::new(1.0, 1));
+        // core 1, stepped against the SoC (fm1-emu): every load misreads, the code still runs
+        let mut c1 = core_at_ram(1);
+        for _ in 0..8 {
+            c1.step(&mut Core1Loads(&mut soc)).unwrap();
+            assert_eq!(c1.regs[3], MISREAD_BIT);
+        }
+        assert_eq!(c1.pc, RAM_BASE + 16);
+        // core 1 in blocks (fm1-live, the browser), the JIT asked for: the same
+        let mut c1 = core_at_ram(1);
+        c1.jit_on = true;
+        let mut bus = Core1Bus { soc: &mut soc, budget: 1 << 20 };
+        assert!(bus.jit_mem().is_none(), "a flaky core 1 runs interpreted");
+        let mut n = 0;
+        while c1.pc != RAM_BASE + 16 && n < 100 {
+            n += match c1.run_fast(&mut bus, 8).unwrap() {
+                (0, _) => {
+                    c1.step(&mut bus).unwrap();
+                    1
+                }
+                (k, _) => k,
+            };
+            assert_eq!(c1.regs[3], MISREAD_BIT);
+        }
+        assert_eq!(c1.regs[1], RAM_BASE + 0x120);
+        assert_eq!(soc.flaky_core1.as_ref().unwrap().misreads, 16);
+        // core 0 reads what is there
+        let mut c0 = core_at_ram(0);
+        for _ in 0..8 {
+            c0.step(&mut soc).unwrap();
+            assert_eq!(c0.regs[3], 0);
+        }
+        assert_eq!(soc.flaky_core1.as_ref().unwrap().loads, 16);
+    }
+
+    #[test]
+    fn flaky_core1_only_in_ram() {
+        let mut soc = Soc::new(1 << 20, 0x1234_5678u32.to_le_bytes().to_vec());
+        soc.flaky_core1 = Some(FlakyCore1::new(1.0, 1));
+        let mut bus = Core1Loads(&mut soc);
+        assert_eq!(bus.read32(crate::XIP_BASE), 0x1234_5678, "flash is read right");
+        assert_eq!(bus.read32(RAM_BASE), MISREAD_BIT);
+        assert_eq!(bus.fetch32(RAM_BASE), 0, "an instruction fetch is right");
+        assert_eq!(soc.flaky_core1.as_ref().unwrap().loads, 1);
+    }
+
+    #[test]
+    fn good_core1_reads_what_is_there() {
+        let mut soc = soc_with_loads();
+        let mut c1 = core_at_ram(1);
+        soc.write32(RAM_BASE + 0x100, 0xdead_beef);
+        c1.step(&mut Core1Loads(&mut soc)).unwrap();
+        assert_eq!(c1.regs[3], 0xdead_beef);
+        assert!(Core1Bus { soc: &mut soc, budget: 1 }.jit_mem().is_some());
+    }
 }

@@ -46,6 +46,12 @@ pub trait Bus {
     fn read8(&mut self, addr: u32) -> u8;
     fn read16(&mut self, addr: u32) -> u16;
     fn read32(&mut self, addr: u32) -> u32;
+    /// An instruction fetch (decoding, not a load): a bus that models faulty loads
+    /// (fm1_soc's flaky core 1) answers it with the true contents.
+    #[inline(always)]
+    fn fetch32(&mut self, addr: u32) -> u32 {
+        self.read32(addr)
+    }
     fn write8(&mut self, addr: u32, value: u8);
     fn write16(&mut self, addr: u32, value: u16);
     fn write32(&mut self, addr: u32, value: u32);
@@ -337,8 +343,8 @@ impl Cpu {
         if hit && (0x0200_0000..0x0400_0000).contains(&pc) {
             return Ok(slot);
         }
-        let lo = bus.read32(pc) as u64;
-        let hi = bus.read32(pc + 4) as u64;
+        let lo = bus.fetch32(pc) as u64;
+        let hi = bus.fetch32(pc + 4) as u64;
         let win = (hi << 32) | lo;
         if hit && self.icache_x[slot].map_or(false, |x| x.win == win) {
             return Ok(slot);
@@ -2005,15 +2011,15 @@ impl Cpu {
     /// nibbles of `if (...) {` count, verified on 2057 corpus blocks).
     fn block_end<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32) -> u32 {
         for _ in 0..units {
-            let lo = bus.read32(pc) as u64;
-            let hi = bus.read32(pc + 4) as u64;
+            let lo = bus.fetch32(pc) as u64;
+            let hi = bus.fetch32(pc + 4) as u64;
             let Ok(insn) = decode_any((hi << 32) | lo, pc) else { return pc };
             pc += insn.entry.len as u32;
             if insn.entry.syntax.trim_end().ends_with('#') {
                 // a dual-issue pair (`x #` + the next instruction) is one unit
                 // (memset at 0x02042f0e: `{ r2 -= 1 #; b[r3++=1] = r1; goto }` = 2 units)
-                let lo = bus.read32(pc) as u64;
-                let hi = bus.read32(pc + 4) as u64;
+                let lo = bus.fetch32(pc) as u64;
+                let hi = bus.fetch32(pc + 4) as u64;
                 if let Ok(second) = decode_any((hi << 32) | lo, pc) {
                     pc += second.entry.len as u32;
                 }
@@ -4152,7 +4158,7 @@ fn is_flag_producer(s: &str) -> bool {
 /// Does the instruction at pc read the flags (`+ c`, `- !c`, a `psr` read)? A producer right
 /// before one stays off the JIT (which does not model the flags) on the careful path.
 fn next_reads_flags<B: Bus>(bus: &mut B, pc: u32) -> bool {
-    let win = (bus.read32(pc + 4) as u64) << 32 | bus.read32(pc) as u64;
+    let win = (bus.fetch32(pc + 4) as u64) << 32 | bus.fetch32(pc) as u64;
     match decode_any(win, pc) {
         Ok(i) => {
             let s = i.entry.syntax;
