@@ -53,6 +53,12 @@ a { color: var(--ink); }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
 #midiact { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
 #midiact.on { background: var(--amber); }
+#remoteact { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+#remoteact.on { background: var(--amber); }
+#remotestat:empty { display: none; }
+/* Try Hard: the words, and its installer in a frame beside them */
+.remote-cols { display: grid; gap: 16px 32px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); align-items: start; }
+#tryhard-installer { width: 100%; height: 430px; border: 1px solid var(--rule); border-radius: 10px; background: var(--room); }
 code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--ink); }
 kbd { display: inline-block; min-width: 1.7em; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px;
       border-radius: 4px; background: var(--well); color: var(--ink); font: 600 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;

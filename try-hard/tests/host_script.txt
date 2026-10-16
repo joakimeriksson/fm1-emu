@@ -1,0 +1,12 @@
+# try-hard/build.sh --host: the panel over time (Dinghy's tests/host.c script: T keys MASK, T btn ID, T midi ST D1 D2)
+# The page says hello on channel 16 and lights PLAY (12) and the key C4 (21); keys go out.
+300 midi 0xBF 127 84
+400 midi 0x9F 12 127
+400 midi 0x9F 21 127
+600 keys 0x80
+900 keys 0
+1300 midi 0xBF 127 84
+1500 btn 12
+2300 midi 0xBF 127 84
+3300 midi 0xBF 127 84
+4000 end

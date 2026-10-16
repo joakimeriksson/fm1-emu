@@ -5,7 +5,7 @@ name: Test and deploy
 
 on:
   push:
-    branches: [master]
+    branches: [master, 'try-hard*']
   pull_request:
   workflow_dispatch:
 
@@ -39,6 +39,46 @@ jobs:
       - name: README firmware table
         run: node tools/readme_firmwares.mjs --check
 
+      # Try Hard (try-hard/): the gears mesh, then its package with JieLi's toolchain and three AC79 SDK
+      # files (Linux x86-64 only), for the installer on the page.
+      - name: Try Hard's gears mesh
+        run: try-hard/build.sh --test
+
+      - name: Cache JieLi toolchain
+        id: jieli
+        uses: actions/cache@v4
+        with:
+          path: ~/.jieli
+          key: jieli-toolchain-v1
+
+      - name: JieLi toolchain
+        if: steps.jieli.outputs.cache-hit != 'true'
+        run: sh try-hard/build/dinghy/tools/get_toolchain.sh
+
+      - name: Cache AC79 SDK files
+        id: ac79
+        uses: actions/cache@v4
+        with:
+          path: ~/fw-AC79_AIoT_SDK
+          key: ac79-sdk-V1.2.1-files
+
+      - name: AC79 SDK (the three files a package carries)
+        if: steps.ac79.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse --branch AC79NN_SDK_V1.2.1_2023-12-13               https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git ~/fw-AC79_AIoT_SDK
+          cd ~/fw-AC79_AIoT_SDK && git sparse-checkout set cpu/wl82/tools
+
+      - name: Try Hard's package
+        run: |
+          python3 -m pip install --break-system-packages -q Pillow
+          try-hard/build.sh
+
+      - name: Try Hard's package as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: try-hard-package
+          path: try-hard/build/try-hard.fwsc
+
       - name: Build the site
         run: tools/build_site.sh _site
 
@@ -56,15 +96,15 @@ jobs:
       - name: Test the FM-1 SID player page
         run: node fm1-sid/web/smoke.mjs _site/fm1-sid
 
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v5
-      - if: github.event_name != 'pull_request'
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     needs: build
     runs-on: ubuntu-latest
     environment:

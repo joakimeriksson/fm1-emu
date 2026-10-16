@@ -1,0 +1,149 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-only
+     Try Hard's installer: puts try-hard.fwsc (next to this page) on an FM-1 over USB-MIDI, with Felucca's
+     update code (fm1ota.js, fm1pkg.js: Leo Kuroshita, Hügelton Instruments, GPL-3.0). The emulator's page shows
+     it in a frame; it also works on its own. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Try Hard installer</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --room: #18191b; --ink: #e9e6de; --dim: #8c8a85; --amber: #f2a33a; --well: #232427; --line: #3a3b3f;
+          --ok: #6fd08a; --bad: #ff7b6b; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--room); color: var(--ink); font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 620px; padding: 16px; }
+  html.framed main { padding: 0; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  html.framed h1 { display: none; }
+  p { margin: 0 0 10px; color: #bdbab3; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 12px 0; }
+  button { font: inherit; font-weight: 600; border: 0; border-radius: 18px; padding: 7px 18px; cursor: pointer;
+           background: var(--amber); color: #2a1a03; }
+  button:disabled { opacity: .45; cursor: default; }
+  button:focus-visible, a:focus-visible, .file:focus-within { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .file { cursor: pointer; color: var(--ink); background: var(--well); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  .file input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  progress { width: 100%; height: 6px; accent-color: var(--amber); }
+  #status { min-height: 1.5em; color: var(--ink); }
+  #status.ok { color: var(--ok); }
+  #status.bad { color: var(--bad); }
+  .small { font-size: 12.5px; color: var(--dim); }
+  a { color: var(--ink); }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--dim); }
+  pre { color: var(--dim); font-size: 11.5px; white-space: pre-wrap; max-height: 140px; overflow: auto; margin: 6px 0 0; }
+</style>
+<script>if (window.self !== window.top) document.documentElement.classList.add("framed");</script>
+</head>
+<body>
+<main>
+  <h1>Try Hard · installer</h1>
+  <p>Connect the FM-1 to this computer with a USB data cable, then press Install. Chrome or Edge (Web MIDI with SysEx).
+    Don't unplug it while it writes; it restarts into Try Hard by itself.</p>
+  <div class="row">
+    <button id="go" disabled>Install Try Hard</button>
+    <span id="pkg" class="small">looking for the package…</span>
+  </div>
+  <progress id="bar" max="100" value="0"></progress>
+  <p id="status" role="status"></p>
+  <p class="small">Going back: any other firmware, or M-VAVE's own, installs over Try Hard as usual, for example from
+    <a href="https://thefirmwarehub.com/" target="_blank" rel="noopener">the FM-1 Firmware Hub</a>. If an update is cut off,
+    switch the FM-1 on holding <b>OCT−</b>: the USB rescue, where Install works again.
+    Installing firmware is at your own risk.</p>
+  <details>
+    <summary>Another build, the log</summary>
+    <div class="row"><label class="file">Open a try-hard .fwsc… <input type="file" id="open" accept=".fwsc"></label></div>
+    <pre id="log"></pre>
+  </details>
+  <p class="small">Try Hard: <a href="https://github.com/joakimeriksson/fm1-emu/tree/master/try-hard" target="_blank" rel="noopener">source</a>
+    (GPL-3.0), on <a href="https://github.com/rgrvmusic/fm1-dinghy" target="_blank" rel="noopener">Dinghy</a> and Felucca's platform
+    (Leo Kuroshita, Hügelton Instruments; SLOOP, isod89). The installer uses Felucca's update code.</p>
+</main>
+<script type="module">
+import { Updater } from "./fm1ota.js";
+import { productOf, logicalImage } from "./fm1pkg.js";
+
+const $ = (id) => document.getElementById(id);
+const IDENT = /^FM-1_95\d$/;                    // Try Hard's package identity (try-hard/build.sh)
+let image = null, product = null, writing = false;
+const say = (text, cls = "") => { $("status").textContent = text; $("status").className = cls; };
+const log = (t) => { $("log").textContent += t + "\n"; $("log").scrollTop = 1e9; };
+// the emulator's page pauses its remote panel while this writes (its LED messages would cross the update)
+const tell = (busy) => { try { parent.postMessage({ type: "try-hard-install", busy }, "*"); } catch { /* alone */ } };
+
+function use(bytes, from) {
+  const id = productOf(bytes);
+  if (!IDENT.test(id)) throw new Error(`${from} is ${id || "no FM-1 package"}, not Try Hard`);
+  image = logicalImage(bytes);
+  product = id;
+  $("pkg").textContent = `${from} · ${id} · ${(bytes.length / 1024).toFixed(0)} KB`;
+  $("go").disabled = writing || !navigator.requestMIDIAccess;
+}
+if (!navigator.requestMIDIAccess) say("This browser has no Web MIDI: open the page in Chrome or Edge.", "bad");
+fetch("try-hard.fwsc").then(async (r) => {
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  use(new Uint8Array(await r.arrayBuffer()), "try-hard.fwsc");
+}).catch((e) => { $("pkg").textContent = `no package here (${e.message}): the site's build puts it next to this page`; });
+$("open").addEventListener("change", async () => {
+  const f = $("open").files[0];
+  $("open").value = "";
+  if (!f) return;
+  try { use(new Uint8Array(await f.arrayBuffer()), f.name); } catch (e) { say(e.message, "bad"); }
+});
+
+const STEPS = { start: "Starting", verify: "Checking the package", loader: "Switching to update mode", write: "Writing",
+  reboot: "Restarting", done: "Done: Try Hard runs. Pick “FM-1 remote” on the emulator page." };
+const ERRORS = {
+  notfound: "No FM-1 found. Check the cable (a data cable), close other apps that use MIDI, and press Install again.",
+  model: "The connected device is not an FM-1.",
+  lost: "The USB connection was lost. Plug it in again and press Install: it continues.",
+  stopped: "It stopped. Plug the cable in again and press Install.",
+  noloader: "The FM-1 in update mode was not found. Plug it in again and press Install (it stays in update mode until done).",
+  noreturn: "The FM-1 did not come back: switch it off and on.",
+  mismatch: "Written, but the FM-1 reports another firmware: ",
+};
+$("go").addEventListener("click", async () => {
+  if (writing || !image) return;
+  let midi;
+  try { midi = await navigator.requestMIDIAccess({ sysex: true }); }
+  catch { say("MIDI (SysEx) access was not given. Allow MIDI for this site and press Install again.", "bad"); return; }
+  writing = true;
+  $("go").disabled = true;
+  tell(true);
+  addEventListener("beforeunload", stay);
+  const total = 74 + 1167;
+  const step = (k, a) => {
+    log(`${k} ${a ?? ""}`);
+    if (STEPS[k]) say(STEPS[k], k === "done" ? "ok" : "");
+    if (k === "verify") $("bar").value = (a / total) * 100;
+    if (k === "write") $("bar").value = ((74 + a) / total) * 100;
+    if (k === "done") $("bar").value = 100;
+  };
+  // what this browser sees: every port, so a "not found" says why (no ports, another name, no answer)
+  log(`MIDI inputs: ${[...midi.inputs.values()].map((p) => `"${p.name}" (${p.state}/${p.connection})`).join(", ") || "none"}`);
+  log(`MIDI outputs: ${[...midi.outputs.values()].map((p) => `"${p.name}" (${p.state}/${p.connection})`).join(", ") || "none"}`);
+  try {
+    const up = new Updater(midi, log);
+    const ota = await up.find((id) => /^ota-/i.test(id.model));        // an update that was cut off: finish it
+    if (ota) {
+      ota.link.close();
+      if (!(await up.resume(image, step, product))) say(ERRORS.stopped, "bad");
+    } else {
+      await up.install(image, product, step);
+    }
+  } catch (e) {
+    say(ERRORS[e?.code] ? ERRORS[e.code] + (e.detail || "") : `Error: ${e?.message}`, "bad");
+    log(String(e?.stack || e));
+  }
+  writing = false;
+  $("go").disabled = !image;
+  tell(false);
+  removeEventListener("beforeunload", stay);
+});
+function stay(e) { e.preventDefault(); e.returnValue = "Writing: don't close the page."; }
+</script>
+</body>
+</html>

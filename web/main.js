@@ -528,7 +528,8 @@ function midiMessage(e) {
     midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
   }
 }
-// listen to the wanted inputs only; the list follows devices coming and going
+// listen to the wanted inputs only (and, with the remote on, to every input for an FM-1 running Try
+// Hard); the list follows devices coming and going
 function midiConnect() {
   if (!midi) return;
   const want = midiSel.value;
@@ -536,8 +537,14 @@ function midiConnect() {
   for (const o of [...midiSel.options]) if (o.value !== "" && o.value !== "*" && !names.includes(o.value)) o.remove();
   for (const n of names) if (![...midiSel.options].some((o) => o.value === n)) midiSel.add(new Option(n, n));
   if ([...midiSel.options].some((o) => o.value === want)) midiSel.value = want;
-  for (const input of midi.inputs.values())
-    input.onmidimessage = want === "*" || want === input.name ? midiMessage : null;
+  for (const input of midi.inputs.values()) {
+    const played = want === "*" || want === input.name;
+    input.onmidimessage = !played && !remoteOn ? null : (e) => {
+      if (remoteOn && remote.take(input, e.data)) return;
+      if (played) midiMessage(e);
+    };
+  }
+  remote.connect();
 }
 async function midiOpen() {
   if (midi || !navigator.requestMIDIAccess) return midiConnect();
@@ -564,6 +571,126 @@ midiSel.addEventListener("change", () => {
 midiChSel.addEventListener("change", () => {
   midiCh = Number(midiChSel.value);
   store("fm1.midich", midiCh);
+});
+
+// ---------------------------------------------------------------- a real FM-1 as the panel (Try Hard)
+// An FM-1 running Try Hard (try-hard/) sends its keys, buttons, encoders and MASTER over USB-MIDI on
+// channel 16 and says hello once a second; this page plays them on the emulated panel, says hello
+// back and sends the emulated LEDs to it. Protocol: try-hard/PROTOCOL.md. Its messages never reach
+// the emulated MIDI IN.
+// (the SMK-37's page has none of these: stand-ins)
+const remoteSel = document.getElementById("remote") || document.createElement("select");
+const remoteAct = document.getElementById("remoteact") || document.createElement("span");
+const remoteStat = document.getElementById("remotestat") || document.createElement("span");
+let remoteOn = false, remotePaused = false;
+const remote = {
+  CH: 15, HELLO: 127, T: 84,
+  links: new Map(),                  // input id -> { input, output, seen, msb }
+  ledSent: new Int8Array(41).fill(-1),
+  actOff: 0,
+  // a message from an input: true when it was the remote's (then it goes no further)
+  take(input, d) {
+    if (d.length < 3 || (d[0] & 0x0f) !== this.CH || d[0] < 0x80 || d[0] >= 0xf0) return false;
+    let link = this.links.get(input.id);
+    const st = d[0] & 0xf0;
+    if (!link) {
+      if (st !== 0xb0 || d[1] !== this.HELLO || d[2] !== this.T) return false;
+      link = { input, output: null, seen: 0, msb: 0 };
+      this.links.set(input.id, link);
+      this.connect();
+      this.ledSent.fill(-1);                       // (all LEDs again for the new one)
+    }
+    link.seen = performance.now();
+    if (board !== 0) return true;                  // (the FM-1's panel only)
+    if (st === 0x90 || st === 0x80) {
+      if (d[1] < 41) setKey(d[1], st === 0x90 && d[2] > 0);
+    } else if (st === 0xb0) {
+      const cc = d[1];
+      if (cc >= 16 && cc < 23) {
+        const i = encPanel[cc - 16];
+        if (i >= 0) turn(i, d[2] - 64);
+      } else if (cc === 7) {
+        link.msb = d[2];
+        setPot(d[2] << 3);
+      } else if (cc === 39) {
+        setPot((link.msb << 3) | (d[2] >> 4));
+      } else if (cc === this.HELLO) {
+        this.status();
+        return true;
+      }
+    }
+    remoteAct.classList.add("on");
+    clearTimeout(this.actOff);
+    this.actOff = setTimeout(() => remoteAct.classList.remove("on"), 120);
+    return true;
+  },
+  // each linked input's output: the port of the same name
+  connect() {
+    if (!midi) return;
+    for (const [id, link] of this.links) {
+      if (![...midi.inputs.values()].some((i) => i.id === id && i.state !== "disconnected")) { this.links.delete(id); continue; }
+      link.output = [...midi.outputs.values()].find((o) => o.name === link.input.name && o.state !== "disconnected") || null;
+    }
+    this.status();
+  },
+  send(bytes) {
+    if (remotePaused) return;
+    for (const link of this.links.values()) try { link.output?.send(bytes); } catch { /* gone: connect() drops it */ }
+  },
+  // once a second: hello, all LEDs again (one lost message heals), and who went quiet
+  tick() {
+    if (!remoteOn) return;
+    const now = performance.now();
+    for (const [id, link] of this.links) if (now - link.seen > 3500) this.links.delete(id);
+    this.send([0xb0 | this.CH, this.HELLO, this.T]);
+    this.ledSent.fill(-1);
+    this.leds();
+    this.status();
+  },
+  // the emulated LEDs to the FM-1: only what changed
+  leds() {
+    if (!remoteOn || !this.links.size || !frame || board !== 0) return;
+    for (let i = 0; i < 41; i++) {
+      const on = frame.leds[i] > 0.04 ? 1 : 0;      // (the share of time it is driven: ~0.08 is full, as the panel draws it)
+      if (on === this.ledSent[i]) continue;
+      this.ledSent[i] = on;
+      this.send([0x90 | this.CH, i, on ? 127 : 0]);
+    }
+  },
+  status() {
+    const names = [...this.links.values()].map((l) => l.input.name);
+    remoteStat.textContent = !remoteOn ? "" : remotePaused ? "installing…" :
+      names.length ? `linked: ${names.join(", ")}` : "waiting for an FM-1 running Try Hard";
+  },
+};
+// the matrix encoder (what Try Hard sends: SELECT, ALGO, K1..K4, PRESETS) -> the panel's knob
+const encPanel = new Int8Array(7).fill(-1);
+for (let i = 0; i < 7; i++) encPanel[ui.panel_enc_id(i)] = i;
+setInterval(() => remote.tick(), 1000);
+async function remoteSet(on, ask = true) {
+  remoteOn = on;
+  store("fm1.remote", on ? "1" : "");
+  remoteSel.value = on ? "on" : "";
+  if (!on) {
+    remote.send([0xb0 | remote.CH, 123, 0]);       // its LEDs off
+    remote.links.clear();
+    remote.status();
+    midiConnect();
+    return;
+  }
+  remote.status();
+  if (!ask) return;                                // (a choice from an earlier visit: access is asked on Start)
+  await midiOpen();
+  remote.tick();
+}
+remoteSel.addEventListener("change", () => { remoteSel.blur(); remoteSet(remoteSel.value === "on"); });
+if (!navigator.requestMIDIAccess || DEVICE !== "fm1") remoteSel.disabled = true;
+else if (stored("fm1.remote")) remoteSet(true, false);
+// the installer (try-hard/, in a frame below) writes over the same USB port: keep quiet meanwhile
+addEventListener("message", (e) => {
+  if (e.origin !== location.origin || e.data?.type !== "try-hard-install") return;
+  remotePaused = !!e.data.busy;
+  remote.status();
 });
 
 // ---------------------------------------------------------------- is the device keeping up?
@@ -750,6 +877,7 @@ function onWorklet(e) {
   // Preserve an update not yet drawn when a status-only message arrives.
   if (!m.lcd && frame?.lcd) m.lcd = frame.lcd;
   frame = m;
+  remote.leds();
   perf.add(m);
   const now = performance.now();
   if (!last || now - last.t > 1000) {
@@ -771,7 +899,7 @@ startBtn.addEventListener("click", async () => {
   status.textContent = "starting audio…";
   await startAudio();
   await boot();
-  if (midiSel.value) midiOpen();                  // (an input picked on an earlier visit)
+  if (midiSel.value || remoteOn) midiOpen();      // (an input or the remote picked on an earlier visit)
   await ac.resume();
   startBtn.hidden = true;
   // a phone on its side: the synth fills the screen, so bring all of it into view

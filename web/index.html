@@ -34,6 +34,9 @@
       <span id="midiact" aria-hidden="true"></span></label>
     <label id="midichl" title="Played notes and controllers go to this channel (M-VAVE's firmware listens on 2, Felucca's parts on 1–4)">Channel
       <select id="midich" aria-label="MIDI channel"><option value="0">as sent</option></select></label>
+    <label id="remotein" title="A real FM-1 running Try Hard plays this one: its keys, buttons, knobs and MASTER, over USB (see “A real FM-1 as the panel” below)">FM-1 remote
+      <select id="remote" aria-label="FM-1 remote panel"><option value="">off</option><option value="on">Try Hard</option></select>
+      <span id="remoteact" aria-hidden="true"></span> <span id="remotestat" class="dim" aria-live="polite"></span></label>
     <label class="file">Open .fwsc… <input type="file" id="open"></label>
     <label class="file" title="A DX7 32-voice bank for M-VAVE's firmware">DX7 bank… <input type="file" id="bank"></label>
     <span id="bankname" class="dim"></span>
@@ -66,6 +69,7 @@
       <a href="#start-here">Quick start</a>
       <a href="#playing">Playing</a>
       <a href="#midi-in">MIDI in</a>
+      <a href="#remote-panel">A real FM-1 as the panel</a>
       <a href="#firmwares">Firmwares</a>
       <a href="#stock">M-VAVE's own firmware</a>
       <a href="#how">How it works</a>
@@ -154,6 +158,27 @@
         <li><b>ChoralRoot, Hortator, SLOOP ALG and X0X</b> make no sound from a plain note-on. X0X's own MIDI
           code says it is untested on hardware.</li>
       </ul>
+    </section>
+
+    <section id="remote-panel" class="span" aria-labelledby="h-remote">
+      <h2 id="h-remote">A real FM-1 as the panel: Try Hard</h2>
+      <div class="remote-cols">
+        <div>
+          <p><b>Try Hard</b> is a firmware that turns your FM-1 into this page's front panel. It makes no sound and
+            runs no synth: every key, button, encoder and the MASTER knob goes over USB to this page, which plays
+            the firmware it runs here, and the page sends its LEDs back. So you can play any firmware on the list
+            with real keys and knobs, without installing it. Its screen shows a clockwork your playing drives.</p>
+          <ol>
+            <li>Install Try Hard on the FM-1 (here, in Chrome or Edge).</li>
+            <li>Leave it connected by USB. Choose <b>FM-1 remote: Try Hard</b> above, pick a firmware and press Start.</li>
+            <li>The FM-1's screen says <i>linked to the emulator</i>. Play it.</li>
+          </ol>
+          <p class="dim">The FM-1 speaks plain MIDI on channel 16
+            (<a href="https://github.com/joakimeriksson/fm1-emu/blob/master/try-hard/PROTOCOL.md">the messages</a>), and any
+            firmware installs over it again as usual.</p>
+        </div>
+        <iframe id="tryhard-installer" src="try-hard/" title="Try Hard installer" allow="midi" loading="lazy"></iframe>
+      </div>
     </section>
 
     <section id="plugin" class="span" aria-labelledby="h-plugin">

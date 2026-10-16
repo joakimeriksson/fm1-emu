@@ -24,3 +24,6 @@ work/session.html
 # the browser build (web/build.sh)
 web/dist/
 _site/
+
+# Try Hard: Dinghy checkout, package, host renders (try-hard/build.sh)
+try-hard/build/

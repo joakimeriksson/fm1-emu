@@ -27,6 +27,10 @@ Also here: **[FM-1 SID](fm1-sid/)**, a firmware that turns the FM-1 into a Commo
 synth, with a step sequencer and stereo chorus, delay and reverb, that also plays C64 tunes
 ([its page](https://joakimeriksson.github.io/fm1-emu/fm1-sid/) plays all of HVSC).
 
+And **[Try Hard](try-hard/)**: a firmware that makes a real FM-1 the page's front panel. Its keys, buttons, knobs
+and MASTER play the emulated firmware over USB-MIDI, and the page sends its LEDs back; its screen is a clockwork of
+meshing gears. Install it from the page ("A real FM-1 as the panel"), then choose *FM-1 remote: Try Hard*.
+
 ## What runs
 
 47 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
