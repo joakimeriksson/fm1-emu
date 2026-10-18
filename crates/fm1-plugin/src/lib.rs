@@ -64,10 +64,16 @@ pub struct Fm1Params {
 
 /// The emulated clock. The emulator runs one instruction a cycle at the chip's nominal 240 MHz,
 /// while the AC791N runs some instructions in dual-issue pairs, so a firmware that runs out of
-/// time can be given more. Each step costs host CPU (X0X on an M4 Pro: ~2.3x real time at 240,
-/// 1.7x at 320, 1.3x at 400).
+/// time can be given more. A firmware that idles in loops the emulator cannot skip costs host
+/// CPU in proportion to the clock, so a lower one lets a heavy firmware keep up on a slower
+/// computer (on an M1 Pro, CS-1 runs at 1.2x real time at 240 MHz and 1.65x at 160; FM-106 at
+/// 0.9x and 1.1x), as long as the firmware still has the time it needs.
 #[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Clock {
+    #[name = "120 MHz"]
+    Mhz120,
+    #[name = "160 MHz"]
+    Mhz160,
     #[name = "240 MHz"]
     Mhz240,
     #[name = "320 MHz"]
@@ -79,6 +85,8 @@ pub enum Clock {
 impl Clock {
     pub fn mhz(self) -> u64 {
         match self {
+            Clock::Mhz120 => 120,
+            Clock::Mhz160 => 160,
             Clock::Mhz240 => 240,
             Clock::Mhz320 => 320,
             Clock::Mhz400 => 400,

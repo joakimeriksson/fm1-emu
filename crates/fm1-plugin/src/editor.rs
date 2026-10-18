@@ -120,7 +120,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 bar.separator();
                 bar.label("MIDI channel");
                 bar.add(widgets::ParamSlider::for_param(&params.channel, setter).with_width(90.0));
-                bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Raise it if a firmware runs out of time; each step costs this computer's CPU. Changing it restarts the firmware");
+                bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Lower it if this computer can't keep up with a heavy firmware (\"frames late\"); raise it if a firmware runs out of time. Changing it restarts the firmware");
                 bar.add(widgets::ParamSlider::for_param(&params.clock, setter).with_width(90.0));
                 bar.separator();
                 let status = if !ui.msg.is_empty() {

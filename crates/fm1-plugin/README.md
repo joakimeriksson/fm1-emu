@@ -95,10 +95,13 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
 - **MIDI** from the host goes to the MIDI IN jack. **MIDI channel** moves channel messages to one
   channel; M-VAVE's own firmware listens on 2.
 - **Master** is the panel's MASTER pot, and a host parameter you can automate.
-- **CPU clock** is the emulated chip's clock: 240 MHz (the default, the chip's nominal clock),
-  320 or 400. The emulator runs one instruction a cycle, while the chip runs some in pairs, so a
-  firmware that runs out of time can be given more. A higher clock costs host CPU in
-  proportion; changing it restarts the firmware, keeping its flash.
+- **CPU clock** is the emulated chip's clock: 240 MHz by default (the chip's nominal clock),
+  or 120, 160, 320 or 400. Most of a firmware's cost grows with the clock, so a lower one lets a
+  heavy firmware keep up on a slower computer (on an M1 Pro, CS-1 goes from 1.2x real time at
+  240 MHz to 1.65x at 160, FM-106 from 0.9x to 1.1x), as long as the firmware still gets its work
+  done. A higher one gives a firmware that runs out of time more; the emulator runs one
+  instruction a cycle, while the chip runs some in pairs. Changing it restarts the firmware,
+  keeping its flash.
 - **The panel** works as on the page:
   - a key or button is held while pressed, and a drag across the keys plays a glissando;
   - a knob turns when you drag it up or down, or scroll over it;
@@ -124,8 +127,8 @@ counted, so the host's stamps still line up when it takes frames again.
 
 **Load:** one instance takes about one CPU core. The slowest firmwares run at 1.4–1.7x real time
 on an Apple Silicon Mac (most at 3–6x) at the default 240 MHz, so keep two or three heavy
-instances per project. A higher CPU clock costs in proportion (X0X on an M4 Pro: 2.3x real
-time at 240, 1.7x at 320, 1.3x at 400).
+instances per project. The CPU clock moves the cost (X0X on an M4 Pro: 2.3x real time at
+240, 1.7x at 320, 1.3x at 400); a heavy firmware that comes late can run at 160 or 120.
 
 `cargo test --release` (here) runs a firmware on the machine's thread. It checks that a stamped
 note sounds on time, and that the firmware boots and draws its screen when nothing takes its
