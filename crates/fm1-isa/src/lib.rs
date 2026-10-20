@@ -316,6 +316,16 @@ mod tests {
     }
 
     #[test]
+    fn sp_from_any_register() {
+        // `64 e0 80 Ne`: sp = rN, the register in bits 28-31 (FM1 Open's `sp = r5` is `5e`)
+        for n in 0..16u64 {
+            let i = decode_win(0x0e80_e064 | n << 28, 0).unwrap();
+            assert_eq!(i.syntax(), "sp = R");
+            assert_eq!(i.entry.slots[0].value(i.raw), n as i64);
+        }
+    }
+
+    #[test]
     fn alias_spellings_are_matched() {
         // merged family: primary keeps the most common spelling
         let i = le("0000").unwrap();

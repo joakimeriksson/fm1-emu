@@ -739,6 +739,11 @@ impl Soc {
                         self.paused[core] = true;
                     } else if value & 8 != 0 {
                         self.paused[core] = false;
+                        if core == 1 {
+                            // M-VAVE's FM1 Open SDK releases core 1 here (C1_CON |= 8), not at 0x10008
+                            self.cpu1_release = true;
+                            self.periph.next_due = 0;
+                        }
                     }
                     self.sfr_set(addr, value & !0x14);
                 } else {
