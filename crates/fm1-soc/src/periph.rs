@@ -438,7 +438,9 @@ impl Periph {
             let words = self.alnk_len.max(2);
             due.audio_half = Some((self.alnk_adr.wrapping_add(self.alnk_half * words * 4), words));
             self.alnk_half ^= 1;
-            self.alnk_pend |= 0x80;
+            // channel 3 (out) finished a half; with channel 0 on as well (CON1 bits 0-3, M-VAVE's FM1 Open SDK:
+            // "RX supplies the interrupt clock"), its pending rises with it (CON2 bit 4)
+            self.alnk_pend |= 0x80 | if self.alnk_con1 & 0xf != 0 { 0x10 } else { 0 };
             self.alnk_next += self.half_period();
             self.audio_halves += 1;
         }
