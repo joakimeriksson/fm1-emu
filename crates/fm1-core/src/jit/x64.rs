@@ -14,7 +14,7 @@
 //! host (the interpreter); conversions to integers saturate as Rust's `as` does (cvttss2si alone
 //! gives 0x8000_0000 for NaN and out of range); min / max through the interpreter's executor.
 
-use super::{h_op, h_ram_ok, h_read, h_write, off_hold, off_pc, off_reg, off_rets, off_sp, JitMem, RamGuard, OFF_BRK, OFF_SLOT};
+use super::{h_op, h_ram_ok, h_read, h_write, off_hold, off_pc, off_reg, off_rets, off_sp, JitMem, RamGuard, OFF_BRK, OFF_SLOT, OFF_VERSION, UNCHECKED};
 use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
 use crate::{Base, Bus, Cond, Fast, Op, RmwOp};
 
@@ -360,9 +360,18 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards
         let len = len.min((mem.ram_len as usize).checked_sub(off)?);
         // SAFETY: jit_mem provides a live RAM allocation, and the range is checked above.
         let bytes = unsafe { std::slice::from_raw_parts(mem.ram.add(off), len) }.into();
-        guards.push(Box::new(RamGuard { pc: pc0, bytes, version: None }));
+        guards.push(Box::new(RamGuard { pc: pc0, bytes, version: UNCHECKED }));
         let guard = guards.last_mut().unwrap().as_mut();
         let valid = g.a.label();
+        // (the AArch64 code's inline check: current at this call's count, brk clear)
+        let slow = g.a.label();
+        g.a.cmp_m_i8(m(CTX, OFF_BRK as i32), 0);
+        g.a.jcc(Cc::Ne, slow);
+        g.a.ld64(RAX, m(CTX, OFF_VERSION as i32));
+        g.a.mov_ri64(RCX, guard as *mut RamGuard as u64);
+        g.a.cmp_rm64(RAX, m(RCX, 0));
+        g.a.jcc(Cc::E, valid);
+        g.a.bind(slow);
         g.a.mov_rr64(RDI, CTX);
         g.a.mov_ri64(RSI, guard as *mut RamGuard as u64);
         g.call(h_ram_ok::<B> as *const () as u64);

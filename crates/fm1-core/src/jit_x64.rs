@@ -159,6 +159,7 @@ impl Asm {
     pub fn alu_ri64(&mut self, op: Alu, d: Reg, imm: i8) { self.rr(None, true, &[0x83], op as u8, d, false); self.b(imm as u8); }
     /// cmp r32, [mem]
     pub fn cmp_rm(&mut self, r: Reg, mem: Mem) { self.rm(None, false, &[0x3b], r, mem, false); }
+    pub fn cmp_rm64(&mut self, r: Reg, mem: Mem) { self.rm(None, true, &[0x3b], r, mem, false); }
     /// cmp dword [mem], imm8
     pub fn cmp_m_i8(&mut self, mem: Mem, imm: i8) { self.rm(None, false, &[0x83], 7, mem, false); self.b(imm as u8); }
     /// cmp byte [mem], imm8
@@ -287,6 +288,8 @@ mod tests {
             ("cvtsi2ss xmm0, rax", Box::new(|a| a.cvtsi2ss(0, RAX, true)), &[0xf3, 0x48, 0x0f, 0x2a, 0xc0]),
             ("jmp r11", Box::new(|a| a.jmp_r(R11)), &[0x41, 0xff, 0xe3]),
             ("call r11", Box::new(|a| a.call_r(R11)), &[0x41, 0xff, 0xd3]),
+            ("cmp rax, qword ptr [rcx]", Box::new(|a| a.cmp_rm64(RAX, m(RCX, 0))), &[0x48, 0x3b, 0x01]),
+            ("cmp rax, qword ptr [rbp + 40]", Box::new(|a| a.cmp_rm64(RAX, m(RBP, 40))), &[0x48, 0x3b, 0x45, 0x28]),
             ("push rbx", Box::new(|a| a.push(RBX)), &[0x53]),
             ("push r15", Box::new(|a| a.push(R15)), &[0x41, 0x57]),
             ("pop r12", Box::new(|a| a.pop(R12)), &[0x41, 0x5c]),

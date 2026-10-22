@@ -63,12 +63,17 @@ pub struct Ctx {
     _pad: u32,
     /// the chain slot of the exit taken back to Rust (null: not a chainable exit)
     slot: *mut u64,
-    code_version: Option<u64>,
+    /// the bus's count of writes to code words when the call began (NO_VERSION: it keeps none);
+    /// a helper that sees it change sets `brk`, so while `brk` is clear it still holds
+    code_version: u64,
 }
 const OFF_BRK: u32 = 24;
 const OFF_SLOT: u32 = 32;
+const OFF_VERSION: u32 = 40;
 const _: () = assert!(std::mem::offset_of!(Ctx, brk) == OFF_BRK as usize);
 const _: () = assert!(std::mem::offset_of!(Ctx, slot) == OFF_SLOT as usize);
+const _: () = assert!(std::mem::offset_of!(Ctx, code_version) == OFF_VERSION as usize);
+const NO_VERSION: u64 = u64::MAX;
 
 // ------------------------------------------------------------------ executable memory
 // macOS (Apple silicon): a MAP_JIT mapping, writable or executable per thread, toggled around a
@@ -274,7 +279,7 @@ impl Jit {
 pub(crate) unsafe fn run<B: Bus>(code: *const u8, cpu: &mut Cpu, bus: &mut B, mem: &JitMem, extra: u32, cap: u32) -> (u32, *mut u64) {
     // instructions this call may run: their ticks ((k - 1) + extra) must all fit tick_room
     let limit = (bus.tick_room() + 1).saturating_sub(extra as u64).min(1 << 30).min(cap as u64) as u32;
-    let mut ctx = Ctx { cpu: cpu as *mut Cpu, bus: bus as *mut B as *mut (), extra, synced: 0, brk: 0, _pad: 0, slot: std::ptr::null_mut(), code_version: bus.code_writes() };
+    let mut ctx = Ctx { cpu: cpu as *mut Cpu, bus: bus as *mut B as *mut (), extra, synced: 0, brk: 0, _pad: 0, slot: std::ptr::null_mut(), code_version: bus.code_writes().unwrap_or(NO_VERSION) };
     let f: CodeFn = unsafe { std::mem::transmute(code) };
     let k = f(cpu as *mut Cpu, &mut ctx, mem.ram, mem.xip, limit, mem.ram_code);
     if k > 0 {
@@ -324,7 +329,7 @@ fn h_read<B: Bus>(ctx: *mut Ctx, addr: u32, idx: u32, w: u32) -> u32 {
         2 => bus.read16(addr) as u32,
         _ => bus.read32(addr),
     };
-    if bus.next_tick_due() || bus.code_writes() != ctx.code_version {
+    if bus.next_tick_due() || bus.code_writes().unwrap_or(NO_VERSION) != ctx.code_version {
         ctx.brk = 1;
     }
     v
@@ -342,7 +347,7 @@ fn h_write<B: Bus>(ctx: *mut Ctx, addr: u32, v: u32, idx: u32, w: u32) {
         2 => bus.write16(addr, v as u16),
         _ => bus.write32(addr, v),
     }
-    if bus.next_tick_due() || bus.code_writes() != ctx.code_version {
+    if bus.next_tick_due() || bus.code_writes().unwrap_or(NO_VERSION) != ctx.code_version {
         ctx.brk = 1;
     }
 }
@@ -362,7 +367,7 @@ fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx: u32, next
         cpu.profile_helper(unsafe { &*op });
     }
     let j = cpu.exec_fast(bus, unsafe { *op }, next_pc);
-    if bus.next_tick_due() || bus.code_writes() != ctx.code_version {
+    if bus.next_tick_due() || bus.code_writes().unwrap_or(NO_VERSION) != ctx.code_version {
         ctx.brk = 1;
     }
     match j {
@@ -374,11 +379,17 @@ fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx: u32, next
 
 // Each RAM body owns an immutable snapshot. Even an old incoming chain remains safe
 // after its block has been rebuilt: it must validate the code it actually executes.
+#[repr(C)]
 struct RamGuard {
+    /// the count of code-word writes the bytes were last found current at (UNCHECKED: not yet,
+    /// or the bus keeps no count); the generated code compares it with `Ctx::code_version`
+    /// itself and calls `h_ram_ok` only when they differ
+    version: u64,
     pc: u32,
     bytes: Box<[u8]>,
-    version: Option<u64>,
 }
+const _: () = assert!(std::mem::offset_of!(RamGuard, version) == 0);
+const UNCHECKED: u64 = u64::MAX - 1;
 
 code_abi! {
 fn h_ram_ok<B: Bus>(ctx: *mut Ctx, guard: *mut RamGuard) -> u32 {
@@ -386,10 +397,10 @@ fn h_ram_ok<B: Bus>(ctx: *mut Ctx, guard: *mut RamGuard) -> u32 {
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let guard = unsafe { &mut *guard };
     let version = bus.code_writes();
-    if version.is_some() && guard.version == version { return 1; }
+    if version == Some(guard.version) { return 1; }
     let valid = crate::ram_code(bus, guard.pc)
         .is_some_and(|now| now.len() >= guard.bytes.len() && now[..guard.bytes.len()] == *guard.bytes);
-    if valid { guard.version = version; }
+    if valid { guard.version = version.unwrap_or(UNCHECKED); }
     valid as u32
 }
 }
@@ -713,9 +724,21 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
         let len = len.min((mem.ram_len as usize).checked_sub(off)?);
         // SAFETY: jit_mem provides a live RAM allocation, and the range is checked above.
         let bytes = unsafe { std::slice::from_raw_parts(mem.ram.add(off), len) }.into();
-        guards.push(Box::new(RamGuard { pc: pc0, bytes, version: None }));
+        guards.push(Box::new(RamGuard { pc: pc0, bytes, version: UNCHECKED }));
         let guard = guards.last_mut().unwrap().as_mut();
         let valid = g.a.label();
+        // found current at the count of code writes this call began with, and nothing in the
+        // call has changed it (brk clear): valid without leaving the generated code (h_ram_ok
+        // was a call on every entry to a block in RAM: 7% of Melodee's time on a Pixel 7 Pro)
+        let slow = g.a.label();
+        g.a.ldr(9, CTX, OFF_BRK);
+        g.a.cbnz(9, slow);
+        g.a.ldr_x(9, CTX, OFF_VERSION);
+        g.a.mov64(10, guard as *mut RamGuard as u64);
+        g.a.ldr_x(10, 10, 0);
+        g.a.cmp_x(9, 10);
+        g.a.b_cond(AC::Eq, valid);
+        g.a.bind(slow);
         g.a.mov_x(0, CTX);
         g.a.mov64(1, guard as *mut RamGuard as u64);
         g.call(h_ram_ok::<B> as *const () as u64);
