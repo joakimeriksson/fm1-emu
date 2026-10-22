@@ -198,6 +198,7 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
     }
     let mut c1 = Cpu::new(if in_code { entry } else { RAM_BASE + 0x22b6 });
     c1.core_id = 1;
+    c1.stop_checks = true; // (run_cpu1's probe stops it: see there)
     c1.usp = RAM_BASE + 0x15eb4;
     c1.sp = RAM_BASE + 0x16eb4;
     Some(c1)
@@ -215,20 +216,35 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
     // goes round in well under this); then, busy, in big stretches
     let mut probing = 512u64;
     while left > 0 {
-        if soc.periph.any_pending() {
-            if let Some((irq, prio)) = soc.pending_irq_for(1) {
-                if c1.irq_ready(prio) {
-                    let handler = soc.read32(VEC_BASE + 4 * irq as u32);
-                    c1.interrupt(handler, prio);
-                }
+        let irq = if soc.periph.any_pending() { soc.pending_irq_for(1) } else { None };
+        if let Some((irq, prio)) = irq {
+            if c1.irq_ready(prio) {
+                let handler = soc.read32(VEC_BASE + 4 * irq as u32);
+                c1.interrupt(handler, prio);
             }
         }
+        // Probing with nothing pending for core 1, the calls below (a block each) run back to
+        // back in one stretch (`Cpu::stop_pc`), which returns only where one of them ends and
+        // this loop could decide otherwise: back where it started, after anything that may have
+        // touched a peripheral (which alone could make an interrupt pending: time stands still
+        // while core 1 runs), or with `probing` or `left` spent. The same calls, checked at the
+        // same points. (Melodee 1.4.5's core 1 polls in most slices, about 22 blocks a pass; a
+        // call each was 12% of a Pixel 7 Pro's time.)
+        let stretch = probing > 0 && irq.is_none() && c1.jit_on;
         let busy = if probing > 0 { 0 } else { left.min(256) };
-        let mut bus = Core1Bus { soc: &mut *soc, budget: busy.max(64) + 1 };
+        // (a stretch: its last call may end up to 32 past what is left, and its ticks never run out)
+        let span = if stretch { probing.min(left) + 32 } else { busy };
+        let mut bus = Core1Bus { soc: &mut *soc, budget: span.max(64) + 1 };
         // (probing: the block at pc, to its last instruction or to where the probe began if that
         // lies inside it, whether it runs compiled or not)
-        let chunk = if probing > 0 { c1.block_len_to(&mut bus, probe.0).max(1) as u64 } else { busy };
-        let k = match c1.run_fast(&mut bus, chunk as u32) {
+        let chunk = if stretch || probing == 0 { span } else { c1.block_len_to(&mut bus, probe.0).max(1) as u64 };
+        if stretch {
+            c1.stop_pc = probe.0;
+            c1.stop_io = 0;
+        }
+        let k = c1.run_fast(&mut bus, chunk as u32);
+        c1.stop_pc = 0;
+        let k = match k {
             Ok((0, _)) => {
                 if let Err(e) = c1.step(&mut bus) {
                     return Err(format!("cpu1: {e:?} at pc {:#010x}", c1.pc));

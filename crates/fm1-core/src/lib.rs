@@ -115,6 +115,19 @@ fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&'static [u8]> {
     Some(unsafe { std::slice::from_raw_parts(m.ram.add(off as usize), (m.ram_len - off) as usize) })
 }
 
+/// How many of a block's ops (the first at pc) come before `stop`, if an instruction of it after
+/// the first begins there; else all of them.
+fn len_to(ops: &[BOp], pc: u32, stop: u32) -> u32 {
+    let mut at = pc;
+    for (k, op) in ops.iter().enumerate() {
+        if k > 0 && at == stop {
+            return k as u32;
+        }
+        at = at.wrapping_add(op.len as u32);
+    }
+    ops.len() as u32
+}
+
 /// a == b (equal lengths). RAM blocks are checked against memory on every entry: in wasm,
 /// 8 bytes at a time, since its `memcmp` (compiler_builtins) goes a byte at a time (a fifth of
 /// Melodee's time in the browser: its audio code runs from RAM); natively the platform's
@@ -253,6 +266,24 @@ pub struct Cpu {
     /// they would for a pair in flight. Cleared when that instruction retires (`finish`).
     /// (u32: compiled code stores it.)
     pub hold_irq: u32,
+    /// A runner's stop (fm1-soc's `run_cpu1` probing core 1's polling loop), 0 for none. While
+    /// set, a `run_fast` call is a stretch: the calls the runner would make one at a time, each
+    /// the block at pc up to this pc if it lies inside (`block_len_to`), run back to back, and
+    /// it returns only where one of them ends and the runner could decide otherwise: back here,
+    /// once `stop_io` is set or code ran interpreted (either may have touched a peripheral, and
+    /// so made an interrupt pending), or with the budget less 32 spent (the last 32: room for
+    /// the call begun before then to end where it would).
+    pub stop_pc: u32,
+    /// Set (while `stop_pc` is) by compiled code's helpers: a bus access off its inline paths,
+    /// or an op through the interpreter's executor. (u32: compiled code reads it.)
+    pub stop_io: u32,
+    /// Set by compiled code that leaves inside a block (after a write to code): how many of its
+    /// instructions are left, so a stretch knows where that block's call ends. (u32: compiled
+    /// code stores it.)
+    pub stop_rest: u32,
+    /// Compile the checks for `stop_pc` / `stop_io` into this core's blocks (set before its
+    /// JIT is made; core 1's).
+    pub stop_checks: bool,
 }
 
 impl Cpu {
@@ -426,9 +457,18 @@ impl Cpu {
                 synced = n;
             }};
         }
+        // a runner's stretch (see `stop_pc`): `bound` is where the runner's call in progress
+        // ends (n), `interpreted` says code ran other than compiled since the stretch began
+        let stretch = self.stop_pc != 0;
+        let mut bound = 0u32;
+        let mut interpreted = false;
         loop {
             // (and per op below: the budget holds to the instruction)
             if n >= budget {
+                sync!();
+                return Ok((n, false));
+            }
+            if stretch && n == bound && n > 0 && (pc == self.stop_pc || self.stop_io != 0 || interpreted || n >= budget - 32) {
                 sync!();
                 return Ok((n, false));
             }
@@ -443,25 +483,48 @@ impl Cpu {
                 sync!();
                 return Ok((n, false));
             };
+            // a stretch: the next call begins here; it may run on in compiled code (which leaves
+            // only where calls end: see jit.rs's `compile`) if it is this block whole, else only
+            // to its end
+            let mut whole = false;
+            if stretch && n == bound {
+                let to = len_to(&self.bops[start as usize..(start + len) as usize], pc, self.stop_pc);
+                bound = n + to;
+                whole = to == len;
+            }
+            let limit = if stretch { bound } else { budget };
             #[cfg(native_jit)]
             if self.jit_on && !careful {
                 if let Some(mem) = jit_mem {
                     if self.jit.is_none() {
-                        self.jit = jit::Jit::new(self.profile).map(Box::new);
+                        self.jit = jit::Jit::new(self.profile).map(|mut j| {
+                            j.stops = self.stop_checks;
+                            Box::new(j)
+                        });
                     }
                     let code = match self.jit.as_mut() {
                         Some(j) => j.entry::<B>(id, &self.bops[start as usize..(start + len) as usize], pc, &mem),
                         None => None,
                     };
-                    if let Some((code, _)) = code {
+                    if let Some((code, plen)) = code {
                         // (the code checks itself that its ticks fall before anything is due)
                         let extra = if n == 0 { 0 } else { 1 };
                         sync!();
+                        // a stretch's call of a block compiled whole runs on to wherever the code
+                        // leaves (`stop_rest`: how far inside a block it did)
+                        let open = whole && plen == len && self.jit.as_ref().is_some_and(|j| j.stops);
+                        if open {
+                            self.stop_rest = 0;
+                        }
+                        let cap = if open { budget } else { limit } - n;
                         // SAFETY: code was compiled for this bus type and memory map
-                        let (k, slot) = unsafe { jit::run(code, self, bus, &mem, extra, budget - n) };
+                        let (k, slot) = unsafe { jit::run(code, self, bus, &mem, extra, cap) };
                         if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
                         if k > 0 {
                             n += k;
+                            if open {
+                                bound = n + self.stop_rest;
+                            }
                             pc = self.pc;
                             // (it left between the two instructions of a glued pair)
                             careful = self.hold_irq != 0;
@@ -510,12 +573,14 @@ impl Cpu {
                         sync!();
                         // (the budget as the interpreter keeps it, to the instruction: each block
                         // of the region runs only while it fits, else the interpreter goes on)
-                        let cap = budget - n;
+                        let cap = limit - n;
                         // SAFETY: code was compiled for this bus type and memory map
                         let k = unsafe { jit_wasm::run(code, at, self, bus, extra, cap) };
                         if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
                         if k > 0 {
                             n += k;
+                            // (a stretch: its helpers don't say whether they reached a peripheral)
+                            interpreted = true;
                             pc = self.pc;
                             // (it left between the two instructions of a glued pair, or inside an
                             // if-else block's then-part)
@@ -527,6 +592,7 @@ impl Cpu {
             }
             #[cfg(not(any(native_jit, target_arch = "wasm32")))]
             let _ = (id, &jit_mem);
+            interpreted = true;
             for i in start..start + len {
                 // SAFETY: build_block pushed start..start+len into bops and
                 // bops is only cleared together with the block table
@@ -534,7 +600,7 @@ impl Cpu {
                 // the budget, to the instruction: where a call stops does not depend on where
                 // blocks begin, so compiled code (which runs a block only while it fits) and
                 // the interpreter stop at the same one, and cores interleave the same
-                if n >= budget {
+                if n >= limit {
                     if i > start && !careful && unsafe { self.bops.get_unchecked(i as usize - 1) }.glue {
                         self.hold_irq = 1;
                     }
@@ -581,14 +647,7 @@ impl Cpu {
     /// looks for the way back to where it began, which may lie inside a block.)
     pub fn block_len_to<B: Bus>(&mut self, bus: &mut B, stop: u32) -> u32 {
         let Ok(Some((_, start, len))) = self.block_at(bus, self.pc) else { return 0 };
-        let mut at = self.pc;
-        for k in 0..len {
-            if k > 0 && at == stop {
-                return k;
-            }
-            at = at.wrapping_add(self.bops[(start + k) as usize].len as u32);
-        }
-        len
+        len_to(&self.bops[start as usize..(start + len) as usize], self.pc, stop)
     }
 
     /// The block of micro-ops starting at pc (XIP code only): built on first
