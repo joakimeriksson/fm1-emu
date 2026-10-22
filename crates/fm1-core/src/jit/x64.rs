@@ -557,6 +557,15 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards
                 g.a.ld(RAX, m(CPU, off_rets() as i32));
                 g.exit_reg(RAX, count);
             }
+            Fast::GotoR { r } => {
+                g.ld_reg(RAX, r);
+                g.exit_reg(RAX, count);
+            }
+            Fast::CallR { r } => {
+                g.ld_reg(RAX, r);
+                g.a.st_imm(m(CPU, off_rets() as i32), next_pc);
+                g.exit_reg(RAX, count);
+            }
             // ---- memory
             Fast::Ld { d, b, off, w, signed } => {
                 match b {

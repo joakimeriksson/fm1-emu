@@ -1040,6 +1040,12 @@ impl Cpu {
                 self.rets = next_pc;
                 return Some(target);
             }
+            Fast::GotoR { r } => return Some(self.regs[(r & 15) as usize]),
+            Fast::CallR { r } => {
+                let target = self.regs[(r & 15) as usize];
+                self.rets = next_pc;
+                return Some(target);
+            }
             Fast::Rts => return Some(self.rets),
             Fast::A4 { d, s, op, rk, rv } => {
                 let rhs = match rk { 0 => self.regs[(rv & 15) as usize], 1 => rv, _ => 1u32 << (self.regs[(rv & 15) as usize] & 31) };
@@ -4810,7 +4816,7 @@ impl Fast {
             Fast::BrR { a, b, .. } => (m(a) | m(b), 0),
             Fast::BitBr { r, mk, mv, .. } => (m(r) | rhs(mk, mv), 0),
             Fast::DecBr { r, .. } => (m(r), m(r)),
-            Fast::Tb { r, .. } => (m(r), 0),
+            Fast::Tb { r, .. } | Fast::GotoR { r } | Fast::CallR { r } => (m(r), 0),
             Fast::Goto { .. } | Fast::Call { .. } | Fast::Rts | Fast::Nop | Fast::SpAdd { .. }
             | Fast::PushRet | Fast::PopRet | Fast::PopRets => (0, 0),
             Fast::PushRets { n } => (range(n), 0),
@@ -4830,7 +4836,7 @@ impl Fast {
         matches!(
             self,
             Fast::BrI { .. } | Fast::BrR { .. } | Fast::Goto { .. } | Fast::Call { .. } | Fast::Rts
-                | Fast::BitBr { .. } | Fast::DecBr { .. } | Fast::PopPc { .. } | Fast::PopRet | Fast::PopMask { .. }
+                | Fast::GotoR { .. } | Fast::CallR { .. } | Fast::BitBr { .. } | Fast::DecBr { .. } | Fast::PopPc { .. } | Fast::PopRet | Fast::PopMask { .. }
                 | Fast::IfBlk { .. } | Fast::BrIEq { .. } | Fast::BrINe { .. } | Fast::Tb { .. }
         )
     }
@@ -5008,6 +5014,9 @@ enum Fast {
     FOp { d: u8, a: u8, b: u8, op: u8 },
     Goto { target: u32 },
     Call { target: u32 },
+    /// `goto R` / `call R`: to the address in a register
+    GotoR { r: u8 },
+    CallR { r: u8 },
     Rts,
     /// `R = R op x` from the 4-byte ALU decoder: rk 0 = register, 1 =
     /// immediate, 2 = `1 << R`.
@@ -5701,6 +5710,10 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
             }
         }
         "call #i" => Some(Fast::Call { target: target(0)? }),
+        // (Melodee 1.4.5 calls through a register about 550,000 times a second: each one left
+        // the block for `step` until these)
+        "goto R" => Some(Fast::GotoR { r: r(0)? }),
+        "call R" => Some(Fast::CallR { r: r(0)? }),
         "rts" => Some(Fast::Rts),
         "{rets} = [sp++]" => Some(Fast::PopRets),
         "tbb [R]" | "tbh [R]" => Some(Fast::Tb { r: r(0)?, half: s.starts_with("tbh") }),

@@ -908,6 +908,16 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
                 g.a.ldr(9, CPU, off_rets());
                 g.exit_reg(9, count);
             }
+            Fast::GotoR { r } => {
+                g.ld_reg(9, r);
+                g.exit_reg(9, count);
+            }
+            Fast::CallR { r } => {
+                g.ld_reg(9, r);
+                g.a.mov32(0, next_pc);
+                g.a.str(0, CPU, off_rets());
+                g.exit_reg(9, count);
+            }
             // ---- memory
             Fast::Ld { d, b, off, w, signed } => {
                 match b {
@@ -1317,6 +1327,7 @@ mod tests {
             Fast::Mov2 { dh: 0, dl: 1, sh: 1, sl: 2 }, Fast::SpAdd { v: 0xffff_fff0 }, Fast::RFromSp { d: 0, v: 8 },
             Fast::BrIEq { a: 1, v: 3, target: 0x40 }, Fast::BrINe { a: 1, v: 3, target: 0x40 },
             Fast::Goto { target: 0x40 }, Fast::Call { target: 0x40 }, Fast::Rts,
+            Fast::GotoR { r: 1 }, Fast::CallR { r: 1 }, Fast::GotoR { r: 15 }, Fast::CallR { r: 15 },
             Fast::LdW { d: 0, b: 8, off: 4 }, Fast::LdWSp { d: 0, off: 8 }, Fast::LdBu { d: 0, b: 10, off: 3 },
             Fast::StW { s: 1, b: 8, off: 4 }, Fast::StWSp { s: 1, off: 8 },
             Fast::PopRets, Fast::PushRet, Fast::PopRet]);
