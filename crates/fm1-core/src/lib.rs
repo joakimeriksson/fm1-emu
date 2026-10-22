@@ -1422,6 +1422,19 @@ impl Cpu {
                 st_w(bus, w, a, self.regs[(s & 15) as usize]);
                 self.regs[b] = self.regs[b].wrapping_add(inc);
             }
+            Fast::LdPair { p, b, off } => {
+                // (the address before either load: a pair that holds the base overwrites it)
+                let a = match b { Base::Reg(r) => self.regs[(r & 15) as usize], Base::Sp => self.sp }.wrapping_add(off);
+                let lo = 2 * (p & 7) as usize;
+                self.regs[lo] = bus.read32(a);
+                self.regs[lo + 1] = bus.read32(a.wrapping_add(4));
+            }
+            Fast::StPair { p, b, off } => {
+                let a = match b { Base::Reg(r) => self.regs[(r & 15) as usize], Base::Sp => self.sp }.wrapping_add(off);
+                let lo = 2 * (p & 7) as usize;
+                bus.write32(a, self.regs[lo]);
+                bus.write32(a.wrapping_add(4), self.regs[lo + 1]);
+            }
             _ => unreachable!("exec_rare: a hot op"),
         }
         None
@@ -4891,6 +4904,8 @@ impl Fast {
                 let pb = if post { m(base) } else { 0 };
                 if store { (mask | m(base), pb) } else { (m(base), mask | pb) }
             }
+            Fast::LdPair { p, b, .. } => (base(b), m(2 * (p & 7)) | m(2 * (p & 7) + 1)),
+            Fast::StPair { p, b, .. } => (base(b) | m(2 * (p & 7)) | m(2 * (p & 7) + 1), 0),
             Fast::IfBlk { .. } | Fast::SetIe { .. } | Fast::IcfgWr { .. } | Fast::Raw { .. } => return None,
         })
     }
@@ -5150,6 +5165,10 @@ enum Fast {
     /// execute's routes decoded from the raw word (pair loads / stores, pre / post-increment
     /// accesses, 64-bit ops, rev8, rets pops): `exec_raw`
     Raw { route: u8, raw: u32 },
+    /// `rH_rL = d[B+off]` / `d[B+off] = rH_rL`: route 16 without a base update, the pair's low
+    /// register (2p) at the lower address
+    LdPair { p: u8, b: Base, off: u32 },
+    StPair { p: u8, b: Base, off: u32 },
     /// `{rets} = [sp++]`
     PopRets,
     /// `tbb [R]` / `tbh [R]`: the jump table right after the instruction
@@ -5296,7 +5315,28 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
             }
             _ => Fast::Raw { route: 32, raw: raw as u32 },
         }),
-        16 | 21 | 22 | 27 | 39 | 40 | 41 => Some(Fast::Raw { route: route as u8, raw: raw as u32 }),
+        // (pair loads and stores without a base update, and the DSP group's min / max, as
+        // micro-ops the JITs compile: in Melodee's and Felucca's audio code, with the others below,
+        // the most frequent ops left for the interpreter's executor. Not a dual-issue pair's head:
+        // as a micro-op it could be glued to the next instruction, which moved interrupts in Skiff
+        // and NMSFM; the raw arm keeps them where they were)
+        16 => Some({
+            let m = decode_pair_mem(raw);
+            if m.pre || m.post || m.index.is_some() || insn.entry.syntax.trim_end().ends_with('#') {
+                Fast::Raw { route: 16, raw: raw as u32 }
+            } else {
+                let (p, b, off) = (m.pair as u8, m.base.map_or(Base::Sp, |b| Base::Reg(b as u8)), m.off as u32);
+                if m.store { Fast::StPair { p, b, off } } else { Fast::LdPair { p, b, off } }
+            }
+        }),
+        41 if !insn.entry.syntax.trim_end().ends_with('#') && matches!(dsp_raw(raw), Some(Dsp::MinMax)) => Some(Fast::MinMax {
+            d: ((raw >> 28) & 0xf) as u8,
+            a: ((raw >> 20) & 0xf) as u8,
+            b: ((raw >> 24) & 0xf) as u8,
+            // (exec_raw's: bit 0 min, bit 16 signed; MinMax's 0 smin, 1 smax, 2 umin, 3 umax)
+            kind: match (raw & 1 != 0, (raw >> 16) & 1 != 0) { (true, true) => 0, (false, true) => 1, (true, false) => 2, (false, false) => 3 },
+        }),
+        21 | 22 | 27 | 39 | 40 | 41 => Some(Fast::Raw { route: route as u8, raw: raw as u32 }),
         26 if insn.entry.len == 4 => Some(Fast::PushMask { mask: ((raw >> 16) & 0xffff) as u16 }),
         28 if insn.entry.len == 4 => Some(Fast::PopMask { mask: ((raw >> 16) & 0xffff) as u16 }),
         35 => {

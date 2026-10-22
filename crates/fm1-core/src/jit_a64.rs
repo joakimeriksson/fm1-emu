@@ -113,6 +113,12 @@ impl Asm {
     pub fn cmp(&mut self, rn: Reg, rm: Reg) { self.subs(ZR, rn, rm); }
     pub fn cmp_x(&mut self, rn: Reg, rm: Reg) { self.e(0xeb00_0000 | rm << 16 | rn << 5 | ZR); }
     pub fn neg(&mut self, rd: Reg, rm: Reg) { self.sub(rd, ZR, rm); }
+    pub fn mvn(&mut self, rd: Reg, rm: Reg) { self.e(0x2a20_03e0 | rm << 16 | rd); }
+    pub fn rev(&mut self, rd: Reg, rn: Reg) { self.e(0x5ac0_0800 | rn << 5 | rd); }
+    pub fn sdiv(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x1ac0_0c00 | rm << 16 | rn << 5 | rd); }
+    pub fn udiv(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x1ac0_0800 | rm << 16 | rn << 5 | rd); }
+    /// rd = ra - rn * rm
+    pub fn msub(&mut self, rd: Reg, rn: Reg, rm: Reg, ra: Reg) { self.e(0x1b00_8000 | rm << 16 | ra << 10 | rn << 5 | rd); }
     pub fn and(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x0a00_0000 | rm << 16 | rn << 5 | rd); }
     pub fn orr(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x2a00_0000 | rm << 16 | rn << 5 | rd); }
     pub fn orr_lsl(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x2a00_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }
@@ -174,6 +180,7 @@ impl Asm {
     pub fn str_u(&mut self, rt: Reg, rn: Reg, wm: Reg) { self.e(0xb820_4800 | wm << 16 | rn << 5 | rt); }
     pub fn strh_u(&mut self, rt: Reg, rn: Reg, wm: Reg) { self.e(0x7820_4800 | wm << 16 | rn << 5 | rt); }
     pub fn strb_u(&mut self, rt: Reg, rn: Reg, wm: Reg) { self.e(0x3820_4800 | wm << 16 | rn << 5 | rt); }
+    pub fn strb(&mut self, rt: Reg, rn: Reg, off: u32) { debug_assert!(off < 4096); self.e(0x3900_0000 | off << 10 | rn << 5 | rt); }
     /// `stp xt1, xt2, [sp, #-imm]!`
     pub fn stp_pre(&mut self, rt1: Reg, rt2: Reg, rn: Reg, off: i32) { self.e(0xa980_0000 | (((off / 8) as u32) & 0x7f) << 15 | rt2 << 10 | rn << 5 | rt1); }
     pub fn stp(&mut self, rt1: Reg, rt2: Reg, rn: Reg, off: i32) { self.e(0xa900_0000 | (((off / 8) as u32) & 0x7f) << 15 | rt2 << 10 | rn << 5 | rt1); }

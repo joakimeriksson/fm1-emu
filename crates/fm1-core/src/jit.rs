@@ -23,7 +23,7 @@
 //!   pc is stored at exit.
 
 #[cfg(target_arch = "aarch64")]
-use crate::jit_a64::{Asm, Cond as AC, Label, Reg, SP};
+use crate::jit_a64::{Asm, Cond as AC, Label, Reg, SP, ZR};
 #[cfg(target_arch = "aarch64")]
 use crate::{Base, Cond, Op, RmwOp};
 use crate::{Bus, Cpu, Fast};
@@ -520,6 +520,10 @@ fn stop_io(ctx: &mut Ctx) {
     if cpu.stop_pc != 0 {
         cpu.stop_io = 1;
     }
+}
+#[cfg(target_arch = "aarch64")]
+fn off_ie() -> u32 {
+    std::mem::offset_of!(Cpu, ie) as u32
 }
 fn off_stop_pc() -> u32 {
     std::mem::offset_of!(Cpu, stop_pc) as u32
@@ -1031,6 +1035,84 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
                 g.a.csel(0, 0, 1, c);
                 g.st_reg(0, d);
             }
+            Fast::Un { d, s, k } => {
+                g.ld_reg(0, s);
+                match k {
+                    0 => g.a.mvn(0, 0),
+                    1 => g.a.neg(0, 0),
+                    // (i32::MIN stays i32::MIN, as wrapping_abs)
+                    2 => {
+                        g.a.cmp_imm(0, 0);
+                        g.a.cneg(0, 0, AC::Lt);
+                    }
+                    3 => g.a.rev(0, 0),
+                    4 => g.a.clz(0, 0),
+                    5 => {
+                        g.a.mov32(1, 32767);
+                        g.a.cmp(0, 1);
+                        g.a.csel(0, 1, 0, AC::Gt);
+                        g.a.mov32(1, (-32768i32) as u32);
+                        g.a.cmp(0, 1);
+                        g.a.csel(0, 1, 0, AC::Lt);
+                    }
+                    _ => {
+                        g.a.cmp_imm(0, 0);
+                        g.a.csel(0, ZR, 0, AC::Lt);
+                        g.a.mov32(1, 65535);
+                        g.a.cmp(0, 1);
+                        g.a.csel(0, 1, 0, AC::Gt);
+                    }
+                }
+                g.st_reg(0, d);
+            }
+            Fast::Div { d, a, b, k } => {
+                // sdiv / udiv give 0 for a divisor of 0 and i32::MIN for i32::MIN / -1, as the
+                // interpreter; a remainder is a - q * b, and 0 for a divisor of 0
+                g.ld_reg(0, a);
+                g.ld_reg(1, b);
+                if k == 0 || k == 2 {
+                    g.a.sdiv(2, 0, 1);
+                } else {
+                    g.a.udiv(2, 0, 1);
+                }
+                if k >= 2 {
+                    g.a.msub(2, 2, 1, 0);
+                    g.a.cmp_imm(1, 0);
+                    g.a.csel(2, ZR, 2, AC::Eq);
+                }
+                g.st_reg(2, d);
+            }
+            // (`sti` stays with the executor: it opens the bus's interrupt window)
+            Fast::SetIe { on: false } if off_ie() < 4096 => g.a.strb(ZR, CPU, off_ie()),
+            Fast::LdPair { p, b, off } => {
+                match b {
+                    Base::Reg(r) => g.ld_reg(0, r),
+                    Base::Sp => g.a.ldr(0, CPU, off_sp()),
+                }
+                // (the address kept across both loads, as the interpreter takes it before either)
+                g.add_imm(KEEP, 0, off);
+                g.a.mov(0, KEEP);
+                g.load(4, false, idx);
+                g.st_reg(0, 2 * (p & 7));
+                g.add_imm(0, KEEP, 4);
+                g.load(4, false, idx);
+                g.st_reg(0, 2 * (p & 7) + 1);
+                bus_used = true;
+            }
+            Fast::StPair { p, b, off } => {
+                match b {
+                    Base::Reg(r) => g.ld_reg(0, r),
+                    Base::Sp => g.a.ldr(0, CPU, off_sp()),
+                }
+                g.add_imm(KEEP, 0, off);
+                g.a.mov(0, KEEP);
+                g.ld_reg(1, 2 * (p & 7));
+                g.store(4, idx);
+                g.add_imm(0, KEEP, 4);
+                g.ld_reg(1, 2 * (p & 7) + 1);
+                g.store(4, idx);
+                bus_used = true;
+            }
             // ---- branches (always a block's last op)
             Fast::BrI { a, v, cond, target } => {
                 let t = g.a.label();
@@ -1541,7 +1623,12 @@ mod tests {
                 let s2 = (c % 16) as u8;
                 let base = 8 + (b % 3) as u8;
                 let w = [1u8, 2, 4][(c % 3) as usize];
-                block.push(match rnd() % 12 {
+                let p = [0u8, 1, 2, 3, 6, 7][(b % 6) as usize];
+                block.push(match rnd() % 16 {
+                    12 => Fast::Un { d, s: s1, k: (c % 7) as u8 },
+                    13 => Fast::Div { d, a: s1, b: s2, k: (c % 4) as u8 },
+                    14 => Fast::LdPair { p, b: Base::Reg(base), off: 4 * (c % 4) },
+                    15 => Fast::StPair { p, b: if a & 1 != 0 { Base::Sp } else { Base::Reg(base) }, off: 4 * (c % 4) },
                     0 => Fast::Alu3 { d, a: s1, b: s2, op: ops[(a >> 8) as usize % ops.len()] },
                     1 => Fast::Alu3I { d, a: s1, v: c, op: ops[(a >> 8) as usize % ops.len()] },
                     2 => Fast::Alu2 { d, b: s2, op: ops[(a >> 8) as usize % ops.len()] },
@@ -1700,6 +1787,15 @@ mod tests {
             cases.push(Fast::FOp { d: 0, a: 1, b: 1, op: fop });
         }
         for kind in 0..4 { cases.push(Fast::MinMax { d: 0, a: 1, b: 2, kind }); }
+        for k in 0..7 { cases.push(Fast::Un { d: 0, s: 1, k }); cases.push(Fast::Un { d: 1, s: 1, k }); }
+        for k in 0..4 { cases.push(Fast::Div { d: 0, a: 1, b: 2, k }); cases.push(Fast::Div { d: 2, a: 2, b: 2, k }); }
+        for on in [false, true] { cases.push(Fast::SetIe { on }); }
+        for (p, b) in [(0, Base::Reg(8)), (1, Base::Reg(9)), (3, Base::Reg(10)), (2, Base::Sp)] {
+            for off in [0u32, 4, 6, 0xffff_fffc] { cases.push(Fast::LdPair { p, b, off }); cases.push(Fast::StPair { p, b, off }); }
+        }
+        // (a pair that holds its own base: the address is taken before the first load)
+        cases.push(Fast::LdPair { p: 4, b: Base::Reg(8), off: 4 });
+        cases.push(Fast::StPair { p: 4, b: Base::Reg(9), off: 0 });
         for part in 0..3 { for signed in [false, true] { cases.push(Fast::Ext { d: 0, s: 1, part, signed }); } }
         for n in [0, 1, 31] { cases.push(Fast::ShlI { d: 0, s: 1, n }); cases.push(Fast::SarI { d: 0, s: 1, n }); }
         for mk in 0..3 { for ne in [false, true] { cases.push(Fast::BitBr { r: 1, mk, ne, mv: if mk == 1 { 0x10 } else { 2 }, target: 0x40 }); } }
@@ -1756,13 +1852,17 @@ mod tests {
                 cpu.regs[11] = rnd() % 16;
                 cpu.sp = 192; cpu.rets = 0x0200_1234;
                 if let Fast::DecBr { ref mut v, .. } = fast { *v = cpu.regs[3].wrapping_sub(1); }
+                // (a divisor of 0 and i32::MIN for the divisions and abs now and then)
+                if round % 6 == 1 { cpu.regs[2] = 0; }
+                if round % 6 == 2 { cpu.regs[1] = 0x8000_0000; cpu.regs[2] = u32::MAX; }
+                cpu.ie = round % 2 == 0;
                 let mut expected = Cpu::new(0);
-                expected.regs = cpu.regs; expected.sp = cpu.sp; expected.rets = cpu.rets;
+                expected.regs = cpu.regs; expected.sp = cpu.sp; expected.rets = cpu.rets; expected.ie = cpu.ie;
                 expected.pc = expected.exec_fast(&mut reference, fast, 2).unwrap_or(2);
                 let code = hot(&mut jit, j * 24 + round, 0, &[op(fast)], &mem);
                 assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 1) }.0, 1, "{fast:?}");
                 let regs = |c: &Cpu| c.regs.map(|r| format!("{r:08x}"));
-                assert_eq!((regs(&cpu), cpu.sp, cpu.rets, cpu.pc), (regs(&expected), expected.sp, expected.rets, expected.pc),
+                assert_eq!((regs(&cpu), cpu.sp, cpu.rets, cpu.pc, cpu.ie), (regs(&expected), expected.sp, expected.rets, expected.pc, expected.ie),
                     "case {j} round {round}: {fast:?}");
                 assert_eq!(bus.data, reference.data, "case {j} round {round}: {fast:?}");
             }
