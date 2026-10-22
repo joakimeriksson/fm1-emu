@@ -193,7 +193,26 @@ pub struct Jit {
     guards: Vec<Box<RamGuard>>,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
     profile: bool,
+    /// the compiled bodies dynamic jumps go to (see `DynEntry`); a Box: its address is in the code
+    dyn_tab: Box<[DynEntry]>,
 }
+
+/// Where a dynamic jump (`rts`, `call R`, a table branch, a pop into pc) goes on in compiled
+/// code: `exit_reg` enters the body straight away when the entry for its target holds one, as
+/// `chain` does for a fixed target, instead of leaving for Rust's loop only for it to enter that
+/// body next (Melodee 1.4.5: `run_fast` was 11% of a Pixel 7 Pro's time). Rust fills an entry
+/// when an exit lands on a compiled block (`set_dyn`). Direct-mapped on pc; an entry's pc
+/// u32::MAX (odd: no instruction's) is empty.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DynEntry {
+    pc: u32,
+    _pad: u32,
+    body: u64,
+}
+const DYN_BITS: u32 = 12;
+const DYN_EMPTY: DynEntry = DynEntry { pc: u32::MAX, _pad: 0, body: 0 };
+const _: () = assert!(std::mem::size_of::<DynEntry>() == 16 && std::mem::offset_of!(DynEntry, body) == 8);
 
 #[derive(Clone, Copy)]
 enum Entry {
@@ -218,7 +237,18 @@ const HOT: u32 = 32;
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { cache: CodeCache::new(64 << 20)?, state: Vec::new(), guards: Vec::new(), profile })
+        Some(Jit {
+            cache: CodeCache::new(64 << 20)?,
+            state: Vec::new(),
+            guards: Vec::new(),
+            profile,
+            dyn_tab: vec![DYN_EMPTY; 1 << DYN_BITS].into_boxed_slice(),
+        })
+    }
+
+    /// Dynamic jumps to pc enter `body` from now on.
+    pub(crate) fn set_dyn(&mut self, pc: u32, body: *const u8) {
+        self.dyn_tab[(pc >> 1) as usize & ((1 << DYN_BITS) - 1)] = DynEntry { pc, _pad: 0, body: body as u64 };
     }
 
     /// The compiled code of block `id` (prefix length), compiling it once it is hot.
@@ -238,7 +268,7 @@ impl Jit {
                 let e = if plen == 0 {
                     Entry::No
                 } else {
-                    match compile::<B>(&ops[..plen], pc0, mem, &mut self.guards, self.profile) {
+                    match compile::<B>(&ops[..plen], pc0, mem, &mut self.guards, self.profile, self.dyn_tab.as_ptr() as u64) {
                         Some((code, body)) => match self.cache.write(&code) {
                             // SAFETY: body is a byte offset inside the code just written
                             Some(p) => Entry::Code(p, unsafe { p.add(body) }, plen as u32),
@@ -269,6 +299,7 @@ impl Jit {
         self.state.clear();
         self.cache.used = 0;
         self.guards.clear();
+        self.dyn_tab.fill(DYN_EMPTY);
     }
 }
 
@@ -436,6 +467,8 @@ struct Gen<'a> {
     h_read: u64,
     h_write: u64,
     h_op: u64,
+    /// the Jit's dynamic-jump table (`DynEntry`)
+    dyn_tab: u64,
 }
 
 fn off_reg(r: u8) -> u32 {
@@ -554,9 +587,26 @@ impl Gen<'_> {
         self.a.add_imm(0, DONE, count);
         self.a.b(self.exit);
     }
-    /// Leave with pc = w(reg).
+    /// Leave with pc = w(reg); or, nothing due (brk) and interrupts not held (hold_irq), into
+    /// the target's compiled body when the dynamic-jump table has it (`DynEntry`)
     fn exit_reg(&mut self, reg: Reg, count: u32) {
-        self.a.str(reg, CPU, off_pc());
+        let out = self.a.label();
+        self.a.mov(12, reg);
+        self.a.ldr(13, CTX, OFF_BRK);
+        self.a.cbnz(13, out);
+        self.a.ldr(13, CPU, off_hold());
+        self.a.cbnz(13, out);
+        self.a.mov64(10, self.dyn_tab);
+        self.a.ubfx(11, 12, 1, DYN_BITS);
+        self.a.add_lsl_x(10, 10, 11, 4);
+        self.a.ldr(13, 10, 0);
+        self.a.cmp(13, 12);
+        self.a.b_cond(AC::Ne, out);
+        self.a.ldr_x(9, 10, 8);
+        self.a.add_imm(DONE, DONE, count);
+        self.a.br(9);
+        self.a.bind(out);
+        self.a.str(12, CPU, off_pc());
         self.a.add_imm(0, DONE, count);
         self.a.b(self.exit);
     }
@@ -677,7 +727,7 @@ impl Gen<'_> {
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
 #[cfg(target_arch = "aarch64")]
-fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool) -> Option<(Vec<u8>, usize)> {
+fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool, dyn_tab: u64) -> Option<(Vec<u8>, usize)> {
     for o in [off_reg(15), off_sp(), off_rets(), off_pc(), off_hold()] {
         if o >= 16384 {
             return None;
@@ -692,6 +742,7 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
         h_read: h_read::<B> as *const () as u64,
         h_write: h_write::<B> as *const () as u64,
         h_op: if profile { h_op::<B, true> as *const () as u64 } else { h_op::<B, false> as *const () as u64 },
+        dyn_tab,
     };
     // prologue (entry from Rust); chained blocks enter at the body
     g.a.stp_pre(29, 30, SP, -FRAME);
@@ -1287,6 +1338,32 @@ mod tests {
         bus.write8(32, 1); cpu.regs[0] = 0;
         assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 1);
         assert_eq!(cpu.pc, 32); assert_eq!(cpu.regs[0], 0);
+    }
+    #[test]
+    fn dynamic_jump_enters_a_compiled_body() {
+        let mut bus = Memory::new(); let mem = bus.jit_mem().unwrap();
+        let mut cpu = Cpu::new(0); let mut j = Jit::new(false).unwrap();
+        cpu.regs[1] = 32;
+        let from = hot(&mut j, 0, 0, &[op(Fast::GotoR { r: 1 })], &mem);
+        hot(&mut j, 1, 32, &[op(Fast::MovI { d: 0, v: 42 })], &mem);
+        // not in the table yet: back to Rust at the target
+        assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 1);
+        assert_eq!((cpu.pc, cpu.regs[0]), (32, 0));
+        j.set_dyn(32, j.body(1).unwrap());
+        assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 2);
+        assert_eq!((cpu.pc, cpu.regs[0]), (34, 42));
+        // the budget, and interrupts held, keep it out
+        cpu.regs[0] = 0;
+        assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 1) }.0, 1);
+        assert_eq!((cpu.pc, cpu.regs[0]), (32, 0));
+        cpu.hold_irq = 1;
+        assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 1);
+        assert_eq!((cpu.pc, cpu.regs[0]), (32, 0));
+        cpu.hold_irq = 0;
+        // another pc in the same entry is not taken for it
+        cpu.regs[1] = 32 + (2 << DYN_BITS);
+        assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 1);
+        assert_eq!((cpu.pc, cpu.regs[0]), (32 + (2 << DYN_BITS), 0));
     }
     #[test]
     fn code_store_exits_before_following_instruction() {

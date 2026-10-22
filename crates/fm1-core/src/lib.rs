@@ -465,11 +465,16 @@ impl Cpu {
                             pc = self.pc;
                             // (it left between the two instructions of a glued pair)
                             careful = self.hold_irq != 0;
-                            if !slot.is_null() {
-                                // a chainable exit came back: link it once its target is compiled
-                                if let Some(body) = self.jit_body_at(pc, bus.code_writes().is_some() && !mem.ram_code.is_null()) {
+                            let body = self.jit_body_at(pc, bus.code_writes().is_some() && !mem.ram_code.is_null());
+                            if let Some(body) = body {
+                                if !slot.is_null() {
+                                    // a chainable exit came back: link it now its target is compiled
                                     // SAFETY: slots are leaked u64s owned by the compiled code
                                     unsafe { *slot = body as u64 };
+                                } else if let Some(j) = self.jit.as_mut() {
+                                    // a dynamic jump's (or a stop's): the compiled code enters
+                                    // this body itself next time
+                                    j.set_dyn(pc, body);
                                 }
                             }
                             continue;

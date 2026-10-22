@@ -103,6 +103,7 @@ impl Asm {
     pub fn add(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x0b00_0000 | rm << 16 | rn << 5 | rd); }
     pub fn add_x(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x8b00_0000 | rm << 16 | rn << 5 | rd); }
     pub fn add_lsl(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x0b00_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }
+    pub fn add_lsl_x(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x8b00_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }
     pub fn add_lsr(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x0b40_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }
     pub fn add_x_lsl(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x8b00_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }
     pub fn eor_lsr(&mut self, rd: Reg, rn: Reg, rm: Reg, sh: u32) { self.e(0x4a40_0000 | rm << 16 | sh << 10 | rn << 5 | rd); }

@@ -14,8 +14,8 @@
 //! host (the interpreter); conversions to integers saturate as Rust's `as` does (cvttss2si alone
 //! gives 0x8000_0000 for NaN and out of range); min / max through the interpreter's executor.
 
-use super::{h_op, h_ram_ok, h_read, h_write, off_hold, off_pc, off_reg, off_rets, off_sp, JitMem, RamGuard, OFF_BRK, OFF_SLOT, OFF_VERSION, UNCHECKED};
-use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
+use super::{h_op, h_ram_ok, h_read, h_write, off_hold, off_pc, off_reg, off_rets, off_sp, JitMem, RamGuard, DYN_BITS, OFF_BRK, OFF_SLOT, OFF_VERSION, UNCHECKED};
+use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Mem, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
 use crate::{Base, Bus, Cond, Fast, Op, RmwOp};
 
 const CPU: Reg = RBX;
@@ -37,6 +37,8 @@ struct Gen<'a> {
     h_read: u64,
     h_write: u64,
     h_op: u64,
+    /// the Jit's dynamic-jump table (`DynEntry`)
+    dyn_tab: u64,
 }
 
 fn icond(c: Cond) -> Cc {
@@ -125,8 +127,26 @@ impl Gen<'_> {
         self.a.st_imm(m(CPU, off_pc() as i32), pc);
         self.leave(count);
     }
-    /// Leave with pc = reg.
+    /// Leave with pc = reg; or, as the AArch64 code, into the target's compiled body when the
+    /// dynamic-jump table has it and nothing is due or held
     fn exit_reg(&mut self, reg: Reg, count: u32) {
+        debug_assert!(![RCX, R10, R11].contains(&reg));
+        let out = self.a.label();
+        self.a.cmp_m_i8(m(CTX, OFF_BRK as i32), 0);
+        self.a.jcc(Cc::Ne, out);
+        self.a.cmp_m_i8(m(CPU, off_hold() as i32), 0);
+        self.a.jcc(Cc::Ne, out);
+        self.a.mov_rr(RCX, reg);
+        self.a.sh_i(Sh::Shr, RCX, 1);
+        self.a.alu_ri(Alu::And, RCX, (1 << DYN_BITS) - 1);
+        self.a.sh_i(Sh::Shl, RCX, 4);
+        self.a.mov_ri64(R10, self.dyn_tab);
+        self.a.cmp_rm(reg, mx(R10, RCX));
+        self.a.jcc(Cc::Ne, out);
+        self.a.ld64(R11, Mem { base: R10, index: Some((RCX, 1)), disp: 8 });
+        self.add_imm(DONE, count);
+        self.a.jmp_r(R11);
+        self.a.bind(out);
         self.a.st(m(CPU, off_pc() as i32), reg);
         self.leave(count);
     }
@@ -318,7 +338,7 @@ impl Gen<'_> {
 }
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
-pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool) -> Option<(Vec<u8>, usize)> {
+pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool, dyn_tab: u64) -> Option<(Vec<u8>, usize)> {
     let mut a = Asm::new();
     let exit = a.label();
     let mut g = Gen {
@@ -328,6 +348,7 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards
         h_read: h_read::<B> as *const () as u64,
         h_write: h_write::<B> as *const () as u64,
         h_op: if profile { h_op::<B, true> as *const () as u64 } else { h_op::<B, false> as *const () as u64 },
+        dyn_tab,
     };
     // prologue (entry from Rust: rdi cpu, rsi ctx, rdx ram, rcx xip, r8d limit, r9 code flags);
     // chained blocks enter at the body. Six pushes and the frame keep rsp 16-byte aligned for
