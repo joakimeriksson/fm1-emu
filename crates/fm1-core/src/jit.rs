@@ -480,6 +480,28 @@ struct Gen<'a> {
     dyn_tab: u64,
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
+    rc: RegCache,
+}
+
+/// Guest registers kept in host registers within a block. `ld_reg` loads one into its host
+/// register at its first use and `st_reg` only marks it changed; whatever leaves the block's
+/// straight line writes the changed ones back first: an exit or a chain (`flush`), and a helper
+/// call, which reloads them afterwards (`call`: the helper may read or set any of them, and the
+/// pool is caller-saved). An op's lowering branches only to leave, so every path through a block
+/// sees the same assignment. (Each operand was a load and each result a store, and audio code
+/// feeds one op's result straight into the next: the store-to-load wait was most of its time.)
+#[cfg(target_arch = "aarch64")]
+const POOL: [Reg; 8] = [5, 6, 7, 8, 14, 15, 16, 17];
+#[cfg(target_arch = "aarch64")]
+#[derive(Default)]
+struct RegCache {
+    /// the guest register each pool register holds
+    guest: [Option<u8>; 8],
+    /// changed since it was loaded (memory is behind)
+    dirty: [bool; 8],
+    /// last use, for choosing which to give up when all are taken
+    used: [u32; 8],
+    clock: u32,
 }
 
 fn off_reg(r: u8) -> u32 {
@@ -554,11 +576,70 @@ impl Gen<'_> {
             self.a.cmp(x, y);
         }
     }
+    /// w = guest register r (see `RegCache`)
     fn ld_reg(&mut self, w: Reg, r: u8) {
-        self.a.ldr(w, CPU, off_reg(r));
+        let r = r & 15;
+        let i = match self.slot(r) {
+            Some(i) => i,
+            None => {
+                let i = self.take_slot(r);
+                self.a.ldr(POOL[i], CPU, off_reg(r));
+                i
+            }
+        };
+        self.a.mov(w, POOL[i]);
     }
+    /// guest register r = w (see `RegCache`)
     fn st_reg(&mut self, w: Reg, r: u8) {
-        self.a.str(w, CPU, off_reg(r));
+        let r = r & 15;
+        let i = match self.slot(r) {
+            Some(i) => i,
+            None => self.take_slot(r),
+        };
+        self.a.mov(POOL[i], w);
+        self.rc.dirty[i] = true;
+    }
+    /// The pool register holding r, if one does (counted as a use).
+    fn slot(&mut self, r: u8) -> Option<usize> {
+        let i = self.rc.guest.iter().position(|&g| g == Some(r))?;
+        self.rc.clock += 1;
+        self.rc.used[i] = self.rc.clock;
+        Some(i)
+    }
+    /// A pool register for r: a free one, else the least recently used, written back if changed.
+    fn take_slot(&mut self, r: u8) -> usize {
+        let i = match self.rc.guest.iter().position(|g| g.is_none()) {
+            Some(i) => i,
+            None => {
+                let i = (0..POOL.len()).min_by_key(|&i| self.rc.used[i]).unwrap();
+                if self.rc.dirty[i] {
+                    self.a.str(POOL[i], CPU, off_reg(self.rc.guest[i].unwrap()));
+                }
+                i
+            }
+        };
+        self.rc.clock += 1;
+        self.rc.guest[i] = Some(r);
+        self.rc.dirty[i] = false;
+        self.rc.used[i] = self.rc.clock;
+        i
+    }
+    /// Write the changed guest registers back. The assignment stays as it is: after a side exit
+    /// the straight line goes on with them still in their host registers.
+    fn flush(&mut self) {
+        for i in 0..POOL.len() {
+            if let (Some(r), true) = (self.rc.guest[i], self.rc.dirty[i]) {
+                self.a.str(POOL[i], CPU, off_reg(r));
+            }
+        }
+    }
+    /// Load the held guest registers again (after a call: the pool is caller-saved).
+    fn reload(&mut self) {
+        for i in 0..POOL.len() {
+            if let Some(r) = self.rc.guest[i] {
+                self.a.ldr(POOL[i], CPU, off_reg(r));
+            }
+        }
     }
     /// w(dst) = w(src) + imm (any 32-bit immediate)
     fn add_imm(&mut self, dst: Reg, src: Reg, imm: u32) {
@@ -604,12 +685,16 @@ impl Gen<'_> {
             }
         }
     }
+    /// Call a helper with the guest registers in memory, where it reads and sets them.
     fn call(&mut self, f: u64) {
+        self.flush();
         self.a.mov64(9, f);
         self.a.blr(9);
+        self.reload();
     }
     /// Leave with pc = imm, `count` instructions of this block done.
     fn exit_imm(&mut self, pc: u32, count: u32) {
+        self.flush();
         self.a.mov32(9, pc);
         self.a.str(9, CPU, off_pc());
         self.a.add_imm(0, DONE, count);
@@ -618,6 +703,7 @@ impl Gen<'_> {
     /// Leave with pc = w(reg); or, nothing due (brk) and interrupts not held (hold_irq), into
     /// the target's compiled body when the dynamic-jump table has it (`DynEntry`)
     fn exit_reg(&mut self, reg: Reg, count: u32) {
+        self.flush();
         let out = self.a.label();
         self.a.mov(12, reg);
         self.a.ldr(13, CTX, OFF_BRK);
@@ -641,6 +727,7 @@ impl Gen<'_> {
     /// Continue at a fixed pc: straight into its compiled body when the slot holds one,
     /// else back to Rust, which fills the slot once that block is compiled.
     fn chain(&mut self, pc: u32, count: u32) {
+        self.flush();
         let slot: &'static mut u64 = Box::leak(Box::new(0u64));
         let back = self.a.label();
         self.a.add_imm(DONE, DONE, count);
@@ -781,6 +868,7 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
         h_op: if profile { h_op::<B, true> as *const () as u64 } else { h_op::<B, false> as *const () as u64 },
         dyn_tab,
         stops: stops.is_some(),
+        rc: RegCache::default(),
     };
     // prologue (entry from Rust); chained blocks enter at the body
     g.a.stp_pre(29, 30, SP, -FRAME);
@@ -1361,18 +1449,20 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
 mod tests {
     use super::*;
     use crate::{Base, BOp};
-    struct Memory { data: Vec<u8>, flags: Vec<u8>, version: u64 }
+    /// (`quiet`: writes don't count as code writes, which would end a block after each)
+    struct Memory { data: Vec<u8>, flags: Vec<u8>, version: u64, quiet: bool }
     impl Memory {
-        fn new() -> Self { Self { data: vec![0; 256], flags: vec![1; 65], version: 0 } }
+        fn new() -> Self { Self { data: vec![0; 256], flags: vec![1; 65], version: 0, quiet: false } }
+        fn wrote(&mut self) { if !self.quiet { self.version += 1; } }
     }
     impl Bus for Memory {
         fn read8(&mut self, a: u32) -> u8 { self.data[a as usize] }
         // (the halfword at a & !1, as the Soc reads one)
         fn read16(&mut self, a: u32) -> u16 { let a = (a & !1) as usize; u16::from_le_bytes(self.data[a..a + 2].try_into().unwrap()) }
         fn read32(&mut self, a: u32) -> u32 { u32::from_le_bytes(self.data[a as usize..a as usize+4].try_into().unwrap()) }
-        fn write8(&mut self, a: u32, v: u8) { self.data[a as usize] = v; self.version += 1; }
-        fn write16(&mut self, a: u32, v: u16) { self.data[a as usize..a as usize+2].copy_from_slice(&v.to_le_bytes()); self.version += 1; }
-        fn write32(&mut self, a: u32, v: u32) { self.data[a as usize..a as usize+4].copy_from_slice(&v.to_le_bytes()); self.version += 1; }
+        fn write8(&mut self, a: u32, v: u8) { self.data[a as usize] = v; self.wrote(); }
+        fn write16(&mut self, a: u32, v: u16) { self.data[a as usize..a as usize+2].copy_from_slice(&v.to_le_bytes()); self.wrote(); }
+        fn write32(&mut self, a: u32, v: u32) { self.data[a as usize..a as usize+4].copy_from_slice(&v.to_le_bytes()); self.wrote(); }
         fn tick_room(&self) -> u64 { 1000 }
         fn next_tick_due(&self) -> bool { false }
         fn add_ticks(&mut self, _: u64) {}
@@ -1429,6 +1519,65 @@ mod tests {
         cpu.regs[1] = 32 + (2 << DYN_BITS);
         assert_eq!(unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 10) }.0, 1);
         assert_eq!((cpu.pc, cpu.regs[0]), (32 + (2 << DYN_BITS), 0));
+    }
+    /// Blocks of several ops over all 16 registers (more than the AArch64 code keeps in host
+    /// registers, so some are given up and taken again mid-block), loads and stores among them,
+    /// against the interpreter running the same ops one after another.
+    #[test]
+    fn compiled_blocks_match_interpreter() {
+        use crate::Op;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
+        let ops = [Op::Add, Op::Sub, Op::RSub, Op::Or, Op::Xor, Op::And, Op::AndNot, Op::Mul, Op::Shl, Op::Shr, Op::Sar];
+        let mut jit = Jit::new(false).unwrap();
+        for case in 0..3000usize {
+            // results go to 0..7 and 12..15: 8..11 keep pointing into the test RAM (8..10 bases, 11 an index)
+            let dst = |x: u32| { let d = (x % 12) as u8; if d < 8 { d } else { d + 4 } };
+            let mut block = vec![];
+            for _ in 0..(2 + rnd() % 14) {
+                let (a, b, c) = (rnd(), rnd(), rnd());
+                let d = dst(a);
+                let s1 = (b % 16) as u8;
+                let s2 = (c % 16) as u8;
+                let base = 8 + (b % 3) as u8;
+                let w = [1u8, 2, 4][(c % 3) as usize];
+                block.push(match rnd() % 12 {
+                    0 => Fast::Alu3 { d, a: s1, b: s2, op: ops[(a >> 8) as usize % ops.len()] },
+                    1 => Fast::Alu3I { d, a: s1, v: c, op: ops[(a >> 8) as usize % ops.len()] },
+                    2 => Fast::Alu2 { d, b: s2, op: ops[(a >> 8) as usize % ops.len()] },
+                    3 => Fast::Mov { d, s: s1 },
+                    4 => Fast::MovI { d, v: c },
+                    5 => Fast::AddRI { d, s: s1, v: c },
+                    6 => Fast::Ld { d, b: Base::Reg(base), off: c % 8, w, signed: a & 1 != 0 },
+                    7 => Fast::St { s: s1, b: Base::Reg(base), off: c % 8, w },
+                    8 => Fast::LdW { d, b: 8, off: 4 * (c % 4) },
+                    9 => Fast::StW { s: s1, b: 8, off: 4 * (c % 4) },
+                    10 => Fast::LdPost { d, b: base, w, signed: false, inc: 2 },
+                    _ => Fast::Ext { d, s: s1, part: (c % 3) as u8, signed: a & 1 != 0 },
+                });
+            }
+            let ops_b: Vec<BOp> = block.iter().map(|&f| op(f)).collect();
+            let mut bus = Memory::new(); let mut reference = Memory::new();
+            bus.quiet = true;
+            for i in 32..256 { let v = rnd() as u8; bus.data[i] = v; reference.data[i] = v; }
+            bus.flags.iter_mut().for_each(|f| *f = 0);
+            let mem = bus.jit_mem().unwrap();
+            let mut cpu = Cpu::new(0);
+            for r in 0..16 { cpu.regs[r] = rnd(); }
+            cpu.regs[8] = 64 + (rnd() % 16) * 4; cpu.regs[9] = 65 + (rnd() % 16) * 2; cpu.regs[10] = 129 + rnd() % 32;
+            cpu.regs[11] = rnd() % 16;
+            cpu.sp = 192; cpu.rets = 0x0200_1234;
+            let mut expected = Cpu::new(0);
+            expected.regs = cpu.regs; expected.sp = cpu.sp; expected.rets = cpu.rets;
+            let mut pc = 0;
+            for &f in &block { pc = expected.exec_fast(&mut reference, f, pc + 2).unwrap_or(pc + 2); }
+            expected.pc = pc;
+            let code = hot(&mut jit, case, 0, &ops_b, &mem);
+            assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, block.len() as u32) }.0, block.len() as u32, "{block:?}");
+            let regs = |c: &Cpu| c.regs.map(|r| format!("{r:08x}"));
+            assert_eq!((regs(&cpu), cpu.pc), (regs(&expected), expected.pc), "case {case}: {block:?}");
+            assert_eq!(bus.data, reference.data, "case {case}: {block:?}");
+        }
     }
     #[test]
     fn a_runners_stretch_leaves_where_a_call_would_end() {
