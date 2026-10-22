@@ -671,6 +671,56 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards
                 g.st_reg(RAX, b);
                 bus_used = true;
             }
+            // (i 16: the immediate increment; else register i's)
+            Fast::LdPre { d, b, i, w, signed, inc } => {
+                g.ld_reg(RAX, b);
+                if i < 16 {
+                    g.ld_reg(RCX, i);
+                    g.a.alu_rr(Alu::Add, RAX, RCX);
+                } else {
+                    g.add_imm(RAX, inc);
+                }
+                g.st_reg(RAX, b);
+                g.load(w, signed, idx);
+                g.st_reg(RAX, d);
+                bus_used = true;
+            }
+            Fast::StPre { s, b, i, w, inc } => {
+                g.ld_reg(RAX, b);
+                if i < 16 {
+                    g.ld_reg(RCX, i);
+                    g.a.alu_rr(Alu::Add, RAX, RCX);
+                } else {
+                    g.add_imm(RAX, inc);
+                }
+                g.st_reg(RAX, b);
+                g.ld_reg(RCX, s);
+                g.store(w, idx);
+                bus_used = true;
+            }
+            Fast::LdPostR { d, b, i, w, signed } => {
+                // (the increment as it was before the load wrote d, kept across a helper call)
+                g.ld_reg(RCX, i);
+                g.a.st(m(RSP, KEEP), RCX);
+                g.ld_reg(RAX, b);
+                g.load(w, signed, idx);
+                g.st_reg(RAX, d);
+                g.ld_reg(RAX, b);
+                g.a.ld(RCX, m(RSP, KEEP));
+                g.a.alu_rr(Alu::Add, RAX, RCX);
+                g.st_reg(RAX, b);
+                bus_used = true;
+            }
+            Fast::StPostR { s, b, i, w } => {
+                g.ld_reg(RAX, b);
+                g.ld_reg(RCX, s);
+                g.store(w, idx);
+                g.ld_reg(RAX, b);
+                g.ld_reg(RCX, i);
+                g.a.alu_rr(Alu::Add, RAX, RCX);
+                g.st_reg(RAX, b);
+                bus_used = true;
+            }
             Fast::Rmw { b, w, op: rop, off, v } => {
                 g.ld_reg(RAX, b);
                 g.add_imm(RAX, off);

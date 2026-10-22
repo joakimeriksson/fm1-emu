@@ -5201,7 +5201,38 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
         2 => Some(Fast::Nop),
         // (the arms read bits below 32 only; route 21's table-less form carries the whole window)
         27 if insn.entry.len == 4 => Some(Fast::Raw { route: RAW_POP_RETS_MASK, raw: raw as u32 }),
-        16 | 18 | 19 | 21 | 22 | 27 | 32 | 39 | 40 | 41 => Some(Fast::Raw { route: route as u8, raw: raw as u32 }),
+        // accesses that update their base (routes 18 / 19, `[++rB=rI]` / `[rB++=rI]` 32) as the
+        // micro-ops that give exactly the arm's result, which the JITs compile inline: in an
+        // audio loop they are most of what went through the interpreter's executor (Melodee
+        // 1.4.5: 1.5 million a second). The arm stays for a load into the base (its base update
+        // comes last, the micro-ops' first or from the loaded value), route 32's store of the
+        // base or of a high half, and words idx_inc does not take
+        18 | 19 => {
+            let m = decode_inc_mem(route as u8, raw);
+            let (d, b, w, inc, signed) = (m.d as u8, m.b as u8, m.w, m.inc as u32, m.signed);
+            Some(match (m.pre, m.post, m.store) {
+                (false, false, false) => Fast::Ld { d, b: Base::Reg(b), off: inc, w, signed },
+                (false, false, true) => Fast::St { s: d, b: Base::Reg(b), off: inc, w },
+                (true, _, false) => Fast::LdPre { d, b, i: 16, w, signed, inc },
+                (true, _, true) => Fast::StPre { s: d, b, i: 16, w, inc },
+                (false, true, false) if d != b => Fast::LdPost { d, b, w, signed, inc },
+                (false, true, true) => Fast::StPost { s: d, b, w, inc },
+                _ => Fast::Raw { route: route as u8, raw: raw as u32 },
+            })
+        }
+        32 => Some(match idx_inc(raw) {
+            Some(m) if !m.high && m.d != m.b => {
+                let (d, b, i, w, signed) = (m.d as u8, m.b as u8, m.i as u8, m.w, m.signed);
+                match (m.pre, m.store) {
+                    (true, false) => Fast::LdPre { d, b, i, w, signed, inc: 0 },
+                    (true, true) => Fast::StPre { s: d, b, i, w, inc: 0 },
+                    (false, false) => Fast::LdPostR { d, b, i, w, signed },
+                    (false, true) => Fast::StPostR { s: d, b, i, w },
+                }
+            }
+            _ => Fast::Raw { route: 32, raw: raw as u32 },
+        }),
+        16 | 21 | 22 | 27 | 39 | 40 | 41 => Some(Fast::Raw { route: route as u8, raw: raw as u32 }),
         26 if insn.entry.len == 4 => Some(Fast::PushMask { mask: ((raw >> 16) & 0xffff) as u16 }),
         28 if insn.entry.len == 4 => Some(Fast::PopMask { mask: ((raw >> 16) & 0xffff) as u16 }),
         35 => {

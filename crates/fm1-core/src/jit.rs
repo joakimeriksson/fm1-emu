@@ -1031,6 +1031,53 @@ fn compile<B: Bus>(ops: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<
                 g.st_reg(0, b);
                 bus_used = true;
             }
+            // (i 16: the immediate increment; else register i's)
+            Fast::LdPre { d, b, i, w, signed, inc } => {
+                g.ld_reg(0, b);
+                if i < 16 {
+                    g.ld_reg(1, i);
+                    g.a.add(0, 0, 1);
+                } else {
+                    g.add_imm(0, 0, inc);
+                }
+                g.st_reg(0, b);
+                g.load(w, signed, idx);
+                g.st_reg(0, d);
+                bus_used = true;
+            }
+            Fast::StPre { s, b, i, w, inc } => {
+                g.ld_reg(0, b);
+                if i < 16 {
+                    g.ld_reg(1, i);
+                    g.a.add(0, 0, 1);
+                } else {
+                    g.add_imm(0, 0, inc);
+                }
+                g.st_reg(0, b);
+                g.ld_reg(1, s);
+                g.store(w, idx);
+                bus_used = true;
+            }
+            Fast::LdPostR { d, b, i, w, signed } => {
+                g.ld_reg(KEEP, i); // (the increment as it was before the load wrote d)
+                g.ld_reg(0, b);
+                g.load(w, signed, idx);
+                g.st_reg(0, d);
+                g.ld_reg(0, b);
+                g.a.add(0, 0, KEEP);
+                g.st_reg(0, b);
+                bus_used = true;
+            }
+            Fast::StPostR { s, b, i, w } => {
+                g.ld_reg(0, b);
+                g.ld_reg(1, s);
+                g.store(w, idx);
+                g.ld_reg(0, b);
+                g.ld_reg(1, i);
+                g.a.add(0, 0, 1);
+                g.st_reg(0, b);
+                bus_used = true;
+            }
             Fast::Rmw { b, w, op: rop, off, v } => {
                 g.ld_reg(0, b);
                 g.add_imm(KEEP, 0, off);
@@ -1332,11 +1379,17 @@ mod tests {
             cases.push(Fast::LdIdx { d: 0, b, i: 11, sh: 1, w, signed });
             cases.push(Fast::LdPost { d: 0, b, w, signed, inc: 4 });
             cases.push(Fast::LdPost { d: b, b, w, signed, inc: 4 });
+            for (d, i) in [(0, 11), (0, 16), (b, 11), (b, 16), (11, 11)] {
+                cases.push(Fast::LdPre { d, b, i, w, signed, inc: 0xffff_fffe });
+            }
+            for (d, i) in [(0, 11), (b, 11), (11, 11), (0, b)] { cases.push(Fast::LdPostR { d, b, i, w, signed }); }
         }
             cases.push(Fast::St { s: 1, b: Base::Reg(b), off: 2, w });
             cases.push(Fast::St { s: 1, b: Base::Sp, off: 4, w });
             cases.push(Fast::StIdx { s: 1, b, i: 11, sh: 2, w });
             cases.push(Fast::StPost { s: 1, b, w, inc: 0xffff_fffe });
+            for (s, i) in [(1, 11), (1, 16), (b, 11), (b, 16), (11, 11)] { cases.push(Fast::StPre { s, b, i, w, inc: 4 }); }
+            for (s, i) in [(1, 11), (b, 11), (11, 11), (1, b)] { cases.push(Fast::StPostR { s, b, i, w }); }
             for &op in &rmws { cases.push(Fast::Rmw { b, w, op, off: 1, v: 0x1234_80ff }); }
         } }
         for (p, l) in [(0, 0), (0, 8), (1, 1), (7, 9), (16, 16), (31, 0), (31, 1), (3, 31)] {
