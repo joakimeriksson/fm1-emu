@@ -104,6 +104,10 @@ pub trait Bus {
     }
     /// RAM bytes lo..hi hold code a block was built from: count writes to them from now on.
     fn code_mark(&mut self, _lo: u32, _hi: u32) {}
+    /// The instruction at pc is fetched (`Cpu::cost_model` only): a bus with a flash cache model
+    /// charges a miss (fm1_soc's `XipCache`)
+    #[inline(always)]
+    fn fetch_cost(&mut self, _pc: u32) {}
 }
 
 /// The RAM from `pc` to its end, when the bus can show it (its JIT memory map), and pc is in it.
@@ -303,6 +307,22 @@ pub struct Cpu {
     /// Compile the checks for `stop_pc` / `stop_io` into this core's blocks (set before its
     /// JIT is made; core 1's).
     pub stop_checks: bool,
+    /// The PC limits (fm1_soc's CPU guards, `Soc::pc_windows`): code runs inside either window;
+    /// a block entered outside both ends `run_fast` with `pc_trip` set (the runner raises the
+    /// exception after its first instruction, as the FM-1 does), and code out there is never
+    /// compiled. None: no limits.
+    pub pc_win: Option<[(u32, u32); 2]>,
+    /// `run_fast` stopped at a block outside the PC limits (the runner takes it)
+    pub pc_trip: bool,
+    /// the block running is outside the PC limits (tripped already)
+    pc_out: bool,
+    /// The FM-1's cycle costs (`op_cost8`) on top of the one tick an instruction takes, for a
+    /// clock in eighths of a cycle (fm1-live's FM1_STRICT: the interpreter only; compiled code
+    /// still counts one tick an instruction)
+    pub cost_model: bool,
+    /// Executed instructions by ISA form (`IsaEntry::syntax`), counted by `step` (fm1-live's
+    /// FM1_ISA_HIST, with FM1_NO_BLOCKS: what a firmware runs, not only what its image holds)
+    pub isa_hist: Option<Box<std::collections::HashMap<&'static str, u64>>>,
 }
 
 /// What instructions can see of a core between instructions, outside any pair, predicated
@@ -596,6 +616,15 @@ impl Cpu {
                 sync!();
                 return Ok((n, false));
             }
+            // (the PC limits: see `pc_win`)
+            let outside = self.pc_win.is_some_and(|w| !(w[0].0 <= pc && pc <= w[0].1) && !(w[1].0 <= pc && pc <= w[1].1));
+            if outside && !self.pc_out {
+                self.pc_out = true;
+                self.pc_trip = true;
+                sync!();
+                return Ok((n, false));
+            }
+            self.pc_out = outside;
             let blk = match self.block_at(bus, pc) {
                 Ok(b) => b,
                 Err(e) => {
@@ -620,7 +649,7 @@ impl Cpu {
             // (careful: inside a then-part or a rep loop with nothing else in progress, where a
             // compiled prefix that cannot reach the construct's end still runs: `prefix_inside`)
             #[cfg(native_jit)]
-            if self.jit_on && (!careful || self.only_construct()) {
+            if self.jit_on && !outside && (!careful || self.only_construct()) {
                 let inside = careful;
                 if let Some(mem) = jit_mem {
                     if self.jit.is_none() {
@@ -702,7 +731,7 @@ impl Cpu {
                 }
             }
             #[cfg(target_arch = "wasm32")]
-            if self.jit_on && !careful {
+            if self.jit_on && !outside && !careful {
                 if let Some(mem) = jit_mem {
                     if self.wjit.is_none() {
                         self.wjit = jit_wasm::Jit::new(self.profile).map(Box::new);
@@ -783,15 +812,31 @@ impl Cpu {
                 let next_pc = pc + op.len as u32;
                 if !(careful || op.careful) {
                     // plain micro-op: cannot start or end a pair, block or loop
+                    if self.cost_model {
+                        bus.fetch_cost(pc);
+                    }
                     pc = self.exec_fast(bus, op.fast, next_pc).unwrap_or(next_pc);
                     n += 1;
+                    if self.cost_model {
+                        let at = next_pc - op.len as u32;
+                        bus.add_ticks((op_cost8(&op.fast, op.len, pc != next_pc, pc < at) - 1) as u64);
+                    }
                 } else {
                     sync!();
+                    if self.cost_model {
+                        bus.fetch_cost(pc);
+                    }
                     // (it counts what it runs in insn_count itself; a swapped pair is two)
                     let r = self.exec_careful_op(bus, i, careful, next_pc, limit - n);
                     n += r & 3;
                     synced = n;
                     pc = self.pc;
+                    if self.cost_model {
+                        // (an op the plain path cannot run: its class, as far as the micro-op says)
+                        let at = next_pc - op.len as u32;
+                        let c = op_cost8(&op.fast, op.len, pc != next_pc, pc < at) * (r & 3).max(1);
+                        bus.add_ticks((c - 1) as u64);
+                    }
                     careful = r & 4 != 0;
                     if r & 8 != 0 {
                         return Ok((n, false));
@@ -1252,9 +1297,36 @@ impl Cpu {
         jumped
     }
 
+    /// Fetch/decode/execute one instruction (`step_one`), and with `cost_model` its cost.
+    pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
+        if self.isa_hist.is_some() {
+            let slot = self.fetch(bus)?;
+            if let (Some(x), Some(h)) = (self.icache_x[slot], self.isa_hist.as_mut()) {
+                *h.entry(x.entry.syntax).or_insert(0) += 1;
+            }
+        }
+        if !self.cost_model {
+            return self.step_one(bus);
+        }
+        let pc = self.pc;
+        let slot = self.fetch(bus)?;
+        let (fast, len) = (self.icache[slot].fast, self.icache[slot].len);
+        let named = self.icache_x[slot].map(|x| (x.entry.name, x.win));
+        bus.fetch_cost(pc);
+        self.step_one(bus)?;
+        let taken = self.pc != pc + len as u32;
+        let c = match (fast, named) {
+            (Some(f), _) => op_cost8(&f, len, taken, self.pc < pc),
+            (None, Some((name, raw))) => named_cost8(name, raw, taken),
+            (None, None) => if taken { 42 } else { 8 },
+        };
+        bus.add_ticks(c.saturating_sub(1) as u64);
+        Ok(())
+    }
+
     /// Fetch/decode/execute one instruction. Fetches a 6-byte window (the
     /// longest pi32v2 instruction); short instructions zero-extend.
-    pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
+    fn step_one<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let slot = self.fetch(bus)?;
         let l = self.icache[slot];
         let next_pc = self.pc + l.len as u32;
@@ -2400,6 +2472,9 @@ impl Cpu {
         match s {
             "nop" | "csync" | "lockclr" | "lockset" | "pfetch [R]"
             | "sti R" | "cli R" => {}
+            // freezes the trace unit's PC history (Felucca's and Dinghy's fault stub runs it
+            // first, so the crash report's ETM PCs are the ones before the fault): no trace here
+            "trigger" => {}
             // the core halts until an interrupt: the bus may let time pass
             "idle" => bus.idle(self.core_id),
             "sti" => self.ie = true,
@@ -6463,6 +6538,63 @@ impl Cond {
         matches!(self, Cond::FEq | Cond::FUne | Cond::FLt | Cond::FUge | Cond::FLe | Cond::FUgt
             | Cond::FGe | Cond::FUlt | Cond::FGt | Cond::FUle)
     }
+}
+
+/// What an op costs on an FM-1, in eighths of a 240 MHz cycle (`Cpu::cost_model`), from harbor's
+/// cycles probe on a real FM-1 (2026-10-24, probes/cycles.c: one instruction a statement, run from
+/// RAM): plain ALU ops ~0.6 (two a cycle), a 6-byte constant 1.08, a multiply 1.9, a divide 6.75,
+/// loads 1.25, stores 1.4, a push or pop ~1.25 + 1 a register, a goto 5.2, a conditional branch
+/// taken 6.5 forward and ~4.75 backward (a loop's branch: the core predicts it), not taken 0.85, a
+/// call or a return ~5; (probes/cycles2.c) FPU add / subtract / multiply 1.375, divide 2.66, a 64-bit
+/// multiply(-accumulate) ~3.2. `taken`: it left its fall-through; `back`: to a lower address. Not in
+/// it: XIP's cache (fm1_soc's `XipCache`) and load-use stalls.
+fn op_cost8(f: &Fast, len: u8, taken: bool, back: bool) -> u32 {
+    let br = if back { 38 } else { 52 };
+    let mask = |m: u16| m.count_ones();
+    let range = |n: u8| (n as u32).saturating_sub(3);       // {rN-r4}: N - 3 registers
+    match *f {
+        Fast::MovI { .. } if len >= 6 => 9,
+        Fast::Alu3 { op: Op::Mul, .. } | Fast::Alu3I { op: Op::Mul, .. } | Fast::Alu2 { op: Op::Mul, .. }
+        | Fast::Alu2I { op: Op::Mul, .. } => 15,
+        Fast::Div { .. } => 54,
+        Fast::Ld { .. } | Fast::LdW { .. } | Fast::LdWSp { .. } | Fast::LdBu { .. } | Fast::LdIdx { .. }
+        | Fast::LdPost { .. } | Fast::LdPre { .. } | Fast::LdPostR { .. } => 10,
+        Fast::St { .. } | Fast::StW { .. } | Fast::StWSp { .. } | Fast::StIdx { .. } | Fast::StPost { .. }
+        | Fast::StPre { .. } | Fast::StPostR { .. } => 11,
+        Fast::LdPair { .. } => 20,
+        Fast::StPair { .. } => 22,
+        Fast::Rmw { .. } => 21,
+        Fast::PushMask { mask: m } | Fast::PopMask { mask: m } => 10 + 8 * mask(m),
+        Fast::BlockMove { mask: m, .. } => 10 + 9 * mask(m),
+        Fast::PushRets { n } => 18 + 8 * range(n),
+        Fast::PopPc { n } => 50 + 8 * range(n),
+        Fast::PushRet | Fast::PopRets => 18,
+        Fast::PopRet => 50,
+        Fast::Call { .. } | Fast::CallR { .. } | Fast::Rts => 40,
+        Fast::Goto { .. } | Fast::GotoR { .. } | Fast::Tb { .. } => if back { 38 } else { 42 },
+        Fast::BrI { .. } | Fast::BrR { .. } | Fast::BrIEq { .. } | Fast::BrINe { .. } | Fast::BitBr { .. }
+        | Fast::DecBr { .. } => if taken { br } else { 7 },
+        Fast::FOp { op: 0..=2, .. } => 11,
+        Fast::FOp { op: 3, .. } => 21,
+        Fast::FOp { .. } => 9,
+        // the 64-bit products and multiply-accumulates (`f8 e1` rP = rA * rB, `fc e1` +=, `fe e1` -=)
+        Fast::Raw { raw, .. } if raw & 0xff00 == 0xe100 && matches!(raw & 0xfe, 0xf8 | 0xfc | 0xfe) => 25,
+        _ => if taken { if back { 38 } else { 42 } } else { 5 },
+    }
+}
+
+/// `op_cost8` for an instruction with no micro-op (`fast_of` None), by its ISA entry's name: the
+/// 2-byte push / pop forms (`[--sp] = {rets, rN-r4}`, `{pc, rN-r4} = [sp++]`: N - 3 registers, and
+/// rets or pc) as the 4-byte masks, a pop into pc a return too; anything else one cycle, or a
+/// taken branch's when it left its fall-through.
+fn named_cost8(name: &str, raw: u64, taken: bool) -> u32 {
+    let push = name.starts_with("sp_mov_");
+    let pop = name.contains("_mov_sp");
+    if push || pop {
+        let regs = ((raw & 0xf) as u32).saturating_sub(3) + (name.contains("rets") || name.starts_with("pc_")) as u32;
+        return 10 + 8 * regs + if taken { 40 } else { 0 };
+    }
+    if taken { 42 } else { 8 }
 }
 
 #[derive(Clone, Copy, Debug)]

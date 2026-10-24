@@ -197,6 +197,9 @@ pub struct Periph {
     pub adc_value: [u16; 16],
     // interrupt controller
     pub ilat: u32,
+    /// The CPU exception (interrupt 1) is pending: a guard tripped (`Soc::guard_trip`); taken
+    /// once (the runner clears it as it enters the handler)
+    pub exc_pending: bool,
     /// Enable/priority words at 0x1EEF100 (one nibble per source).
     pub icfg: [u32; 32],
     /// cpu1's enable/priority words at 0x1EEF300.
@@ -214,6 +217,8 @@ pub struct Periph {
     /// screen's DMA lets it: finishing at once, ~185 frames a second through the LCD model.
     pub spi1_done_at: u64,
     spi1_irq_at: u64,
+    /// SPI1's transfers' time on the wire, all told (cycles; --shot reports it against the run)
+    pub spi1_wire: u64,
     /// SARADC: a conversion finished (CON bit 7), and its IRQ 24 when CON bit 5 enabled it.
     adc_done: bool,
     adc_irq: bool,
@@ -358,6 +363,7 @@ impl Default for Periph {
             adc_con: 0,
             adc_value,
             ilat: 0,
+            exc_pending: false,
             icfg: [0; 32],
             icfg1: [0; 32],
             tick_ctl: 0,
@@ -368,6 +374,7 @@ impl Default for Periph {
             spi1_pending: false,
             spi1_done_at: 0,
             spi1_irq_at: u64::MAX,
+            spi1_wire: 0,
             adc_done: false,
             adc_irq: false,
             adc_next: u64::MAX,
@@ -761,7 +768,7 @@ impl Periph {
     /// Any interrupt source pending at all (before enables and priorities).
     #[inline(always)]
     pub fn any_pending(&self) -> bool {
-        self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending
+        self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
     }
 
@@ -787,6 +794,9 @@ impl Periph {
                 }
             }
         };
+        if self.exc_pending && core == 0 {
+            consider(1); // the CPU exception (a guard: `Soc::guard_trip`)
+        }
         if self.t5_pending {
             consider(IRQ_TIMER5);
         }
@@ -1211,12 +1221,13 @@ impl Periph {
         }
     }
 
-    /// SMK-37: an SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1):
-    /// ~12 MHz at 4 for the LCD, 6.67 MHz at 8 for the pad LEDs); with `irq` IRQ 16 at its end.
+    /// An SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1): ~12 MHz at 4
+    /// for the LCD, 6.67 MHz at 8 for the SMK-37's pad LEDs); with `irq` IRQ 16 at its end.
     pub fn spi1_start(&mut self, bytes: u32, baud: u32, irq: bool) {
         let clk = 60_000_000 / (baud as u64 + 1);
         let dur = (bytes.max(1) as u64 * 8 * self.hz / clk).max(1);
         self.spi1_done_at = self.cycles + dur;
+        self.spi1_wire += dur;
         if irq {
             self.spi1_irq_at = self.spi1_done_at;
             self.next_due = 0;

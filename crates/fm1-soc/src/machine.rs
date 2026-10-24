@@ -42,7 +42,7 @@ impl Bus for Core1Bus<'_> {
         self.soc.core1_read32(a)
     }
     fn fetch32(&mut self, a: u32) -> u32 {
-        self.soc.read32(a)
+        self.soc.fetch32(a)
     }
     fn write8(&mut self, a: u32, v: u8) {
         self.soc.write8(a, v);
@@ -114,7 +114,7 @@ impl Bus for Core1Loads<'_> {
         self.0.core1_read32(a)
     }
     fn fetch32(&mut self, a: u32) -> u32 {
-        self.0.read32(a)
+        self.0.fetch32(a)
     }
     fn write8(&mut self, a: u32, v: u8) {
         self.0.write8(a, v)
@@ -331,7 +331,7 @@ impl Bus for ProbeBus<'_> {
         if self.load(a) { self.soc.read32(a) } else { 0 }
     }
     fn fetch32(&mut self, a: u32) -> u32 {
-        if self.load(a) { self.soc.read32(a) } else { 0 }
+        if self.load(a) { self.soc.fetch32(a) } else { 0 }
     }
     fn write8(&mut self, a: u32, v: u8) {
         if self.store(a, 1, a & !3) {
@@ -508,6 +508,10 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
             soc.chip_reset(cpu);
             break;
         }
+        if soc.pc_guard_dirty {
+            soc.pc_guard_dirty = false;
+            cpu.pc_win = soc.pc_windows();
+        }
         soc.periph.in_isr = !cpu.irq_levels.is_empty();
         if soc.periph.any_pending() {
             if let Some((irq, prio)) = soc.pending_irq() {
@@ -517,6 +521,9 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
                     // the handler's first instruction may stay in compiled code (a micro-op now):
                     // TIMER4's idle skip must see "in an ISR" from that instruction on
                     soc.periph.in_isr = true;
+                    if irq == 1 {
+                        soc.periph.exc_pending = false; // (the exception: taken once)
+                    }
                 }
             }
         }
@@ -534,18 +541,31 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
                 }
             }
         }
+        let mut stepped = false;
         match cpu.run_fast(soc, n - done) {
             Ok((0, _)) => {
                 if let Err(e) = cpu.step(soc) {
                     return Err(format!("{e:?} at pc {:#010x}", cpu.pc));
                 }
                 done += 1;
+                stepped = true;
             }
             Ok((k, due)) => {
                 done += k;
                 ticked = due;
             }
             Err(e) => return Err(format!("{e:?} at pc {:#010x}", cpu.pc)),
+        }
+        if std::mem::take(&mut cpu.pc_trip) {
+            // code fetched outside the PC limits: that instruction runs, then the CPU exception
+            // (DBG_MSG bit 12; on an FM-1 harbor's probes from RAM stopped so, reti the next pc)
+            if !stepped {
+                if let Err(e) = cpu.step(soc) {
+                    return Err(format!("{e:?} at pc {:#010x}", cpu.pc));
+                }
+                done += 1;
+            }
+            soc.guard_trip(12);
         }
         if soc.cpu1_release {
             break; // core 1 starts now (run_dual)
@@ -790,6 +810,42 @@ mod tests {
             assert!(seen.len() >= 4, "both loops seen at chunk ends: {seen:x?}");
         }
         (a, sa)
+    }
+
+    #[test]
+    fn code_outside_the_pc_limits_raises_the_exception() {
+        // the PC limits as Dinghy's fm1_guard_enable sets them, around code that is not in them
+        // (harbor's probes from RAM on an FM-1, 2026-10-24): DBG_MSG bit 12 and the exception pend
+        let code = [0x20u8, 0x00].repeat(32); // csync x 32
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eee384, XIP_BASE + 0x1000); // window 0 (low, high): past the code
+        soc.write32(0x1eee380, XIP_BASE + 0x2000);
+        soc.write32(0x1eee38c, RAM_BASE); // window 1: RAM
+        soc.write32(0x1eee388, RAM_BASE + 0xfff);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_ne!(soc.read32(0x1eee244) & 1 << 12, 0);
+        assert!(soc.periph.exc_pending);
+        soc.write32(0x1eee248, 1 << 12); // DBG_MSG_CLR
+        assert_eq!(soc.read32(0x1eee244) & 1 << 12, 0);
+        // the code inside window 0: nothing
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eee384, XIP_BASE);
+        soc.write32(0x1eee380, XIP_BASE + 0xfff);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert!(!soc.periph.exc_pending);
+        assert_eq!(soc.dbg_cause, 0);
+    }
+
+    #[test]
+    fn null_page_access_raises_the_exception_once_armed() {
+        let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.read32(0x100);
+        assert!(!soc.periph.exc_pending, "not armed");
+        soc.write32(0x1eee340, 3 << 4); // DBG_EN: AXI read / write invalid
+        soc.read32(0x100);
+        assert!(soc.periph.exc_pending);
+        assert_ne!(soc.read32(0x1eee244) & 1 << 4, 0);
     }
 
     #[test]
