@@ -25,6 +25,9 @@
 
 use fm1_core::Bus;
 
+pub mod bt;
+pub mod nat;
+pub mod net;
 pub mod script;
 pub mod flaky;
 pub mod fwsc;
@@ -36,6 +39,7 @@ mod ram;
 pub mod smk;
 mod spiflash;
 pub mod usb;
+pub mod wifi;
 
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
@@ -79,6 +83,7 @@ enum Region {
     /// The power domain's register port (p33.rs).
     P33,
     Bt,
+    Wifi,
     Spi2,
     Crc,
     Rand,
@@ -177,8 +182,6 @@ impl Board {
 
 pub struct Soc {
     pub board: Board,
-    /// The BT baseband's window base (0x2FC44), as the firmware set it.
-    bt_window: u32,
     pub xip: Vec<u8>,
     pub ram: Ram,
     pub lcd: Lcd,
@@ -231,6 +234,10 @@ pub struct Soc {
     /// FM1_GPIO_TRACE: GPIO register writes by address (debugging port use).
     pub gpio_writes: Option<std::collections::BTreeMap<u32, u64>>,
     unknown_log: Vec<UnknownAccess>,
+    /// BT region (bt.rs): mailbox (fm1-base), baseband (Optimist), shared analog.
+    pub bt: bt::BtRegion,
+    /// WiFi controller (wifi.rs): register-mapped mailbox for plat_wifi_* mock.
+    pub wifi: wifi::WifiController,
     /// `--flaky-core1`: core 1's RAM loads misread now and then (flaky.rs); None = a good unit.
     pub flaky_core1: Option<flaky::FlakyCore1>,
     /// The power domain's analog registers.
@@ -346,7 +353,6 @@ impl Soc {
     pub fn new(ram_size: usize, xip: Vec<u8>) -> Self {
         Self {
             board: Board::Fm1,
-            bt_window: BT_WINDOW_BASE,
             xip,
             ram: Ram::new(ram_size),
             ovl: Ram::new(512 * 1024),
@@ -371,6 +377,8 @@ impl Soc {
             sfc_from_flash: Vec::new(),
             gpio_writes: std::env::var("FM1_GPIO_TRACE").ok().map(|_| Default::default()),
             unknown_log: Vec::new(),
+            bt: bt::BtRegion::new(BT_WINDOW_BASE),
+            wifi: wifi::WifiController::new(),
             flaky_core1: None,
             p33: Default::default(),
             usb: Default::default(),
@@ -387,7 +395,7 @@ impl Soc {
         match self.region(addr) {
             Region::Xip | Region::XipFlash | Region::Ram | Region::Ovl | Region::Sram2 => true,
             Region::Usb => self.usb.pure(addr),
-            Region::Irqc | Region::Iomap | Region::Clk | Region::Ana | Region::Bt | Region::Dbg => true,
+            Region::Irqc | Region::Iomap | Region::Clk | Region::Ana | Region::Bt | Region::Wifi | Region::Dbg => true,
             Region::Spi2 | Region::Crc | Region::P33 | Region::Alnk | Region::Uart1 | Region::Sfcenc => true,
             // the tick counter's word counts the clock
             Region::Irqc2 => addr != 0x1eef0f0,
@@ -535,6 +543,7 @@ impl Soc {
                 // FM-1's stock firmware touches the block too, as before: unknown.
                 0x16800..=0x16a1f if self.board == Board::Smk37 => Region::Usb,
                 0x20000..=0x2ffff => Region::Bt,
+                0x30000..=0x3ffff => Region::Wifi,
                 _ => Region::Unknown,
             };
         }
@@ -854,7 +863,12 @@ impl Soc {
             // within 2 KiB and below its own .bd_base + 1088, bulk buffers within 32 KiB; with
             // V13's base kept, the SMK-37 firmware's check failed and it reset.
             Region::Bt => {
-                if addr == 0x2fc44 { self.bt_window } else { 0 }
+                let offset = addr - 0x20000;
+                self.bt.read(offset)
+            }
+            Region::Wifi => {
+                let offset = addr - 0x30000;
+                self.wifi.read(offset).unwrap_or(0)
             }
             Region::Gpio | Region::Adc | Region::Alnk | Region::Irqc2 | Region::Uart1 => {
                 match self.periph.read(addr) {
@@ -979,9 +993,12 @@ impl Soc {
             Region::Ana => self.sfr_set(addr, value),
             Region::P33 => self.p33.write(addr, value),
             Region::Bt => {
-                if addr == 0x2fc44 {
-                    self.bt_window = value;
-                }
+                let offset = addr - 0x20000;
+                self.bt.write(offset, value);
+            }
+            Region::Wifi => {
+                let offset = addr - 0x30000;
+                self.wifi.write(offset, value);
             }
             Region::Clk => {
                 if addr == 0x10008 && value & 8 != 0 && self.sfr_get(addr) & 8 == 0 && !self.cpu1_released_once {
@@ -1164,6 +1181,7 @@ mod tests {
             0x11900..=0x119ff => Region::Ana,
             0x13e08..=0x13e0f => Region::P33,
             0x20000..=0x2ffff => Region::Bt,
+            0x30000..=0x3ffff => Region::Wifi,
             0x1eee240..=0x1eee24f => Region::Dbg,
             _ => Region::Unknown,
         }
@@ -1280,6 +1298,158 @@ mod tests {
         assert_eq!(soc.read32(0x0207_1000), 0xaaaa_aaaa, "the erase after the cut never happened");
         assert_eq!(soc.flash.ops, 3);
         assert!(soc.flash.cut());
+    }
+
+    /// Exercise the BLE mailbox through the Soc's MMIO interface (simulates firmware).
+    #[test]
+    fn ble_mailbox_lifecycle() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+
+        // BLE state starts OFF
+        assert_eq!(soc.read32(0x20104), 0); // BLE_OFF
+
+        // write TICK_MS then CMD=START
+        soc.write32(0x20128, 0);
+        soc.write32(0x20100, 1); // CMD_START
+        assert_eq!(soc.read32(0x20104), 1); // BLE_STARTING
+
+        // advance time past 1000ms
+        soc.write32(0x20128, 1001);
+        assert_eq!(soc.read32(0x20104), 2); // BLE_READY
+
+        // start scan
+        soc.write32(0x20100, 2); // CMD_SCAN_ON
+        soc.write32(0x20128, 1502); // +501ms
+        assert_eq!(soc.read32(0x20110), 1); // SCAN_N = 1 device
+
+        // read device name ("BLE MIDI")
+        soc.write32(0x20118, 0); // SCAN_IDX = 0
+        let w0 = soc.read32(0x2011C);
+        let w1 = soc.read32(0x20120);
+        let mut name = [0u8; 8];
+        name[..4].copy_from_slice(&w0.to_le_bytes());
+        name[4..].copy_from_slice(&w1.to_le_bytes());
+        let s = std::str::from_utf8(&name).unwrap().trim_end_matches('\0');
+        assert_eq!(s, "BLE MIDI");
+
+        // connect
+        soc.write32(0x20100, 4); // CMD_CONNECT
+        soc.write32(0x20128, 1803); // +301ms
+        assert_eq!(soc.read32(0x20108), 1); // CONN = true
+        assert_eq!(soc.read32(0x20124), 0); // DEVICE = 0
+    }
+
+    /// Exercise the WiFi mailbox + virtual network through the Soc's MMIO interface.
+    #[test]
+    fn wifi_mailbox_dhcp_dns() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.wifi.vnet.nat = None; // no real sockets in tests
+
+        // WiFi OFF
+        assert_eq!(soc.read32(0x30004), 0);
+
+        // turn on
+        soc.write32(0x30084, 0); // TICK_MS
+        soc.write32(0x30000, 1); // CMD_ON
+
+        // advance through each phase (each tick call only transitions one state)
+        soc.write32(0x30084, 501);  // past START_MS → auto-join (WIFI_JOINING)
+        soc.write32(0x30084, 1502); // past JOIN_MS → WIFI_ADDRESS
+        soc.write32(0x30084, 2003); // past ADDR_MS → WIFI_CONNECTED
+        assert_eq!(soc.read32(0x30004), 6); // WIFI_CONNECTED
+
+        // IP assigned
+        let ip = soc.read32(0x30008);
+        assert_eq!(ip, 0x2A01_A8C0); // 192.168.1.42
+
+        // scan shows 2 APs
+        soc.write32(0x30000, 3); // CMD_SCAN
+        assert_eq!(soc.read32(0x30010), 2); // SCAN_N = 2
+
+        // read first AP SSID ("Home")
+        soc.write32(0x30014, 0); // SCAN_IDX = 0
+        let w0 = soc.read32(0x30024);
+        let name_bytes = w0.to_le_bytes();
+        assert_eq!(&name_bytes, b"Home");
+
+        // now send a DHCP DISCOVER through the network frame interface
+        let mut dhcp = vec![0u8; 248];
+        dhcp[0] = 1; dhcp[1] = 1; dhcp[2] = 6;
+        dhcp[4] = 0xDE; dhcp[5] = 0xAD; dhcp[6] = 0xBE; dhcp[7] = 0xEF;
+        // chaddr
+        dhcp[28] = 0x02; dhcp[29] = 0x53; dhcp[30] = 0x49;
+        dhcp[31] = 0x4d; dhcp[32] = 0x00; dhcp[33] = 0x15;
+        // magic cookie
+        dhcp[236] = 99; dhcp[237] = 130; dhcp[238] = 83; dhcp[239] = 99;
+        dhcp[240] = 53; dhcp[241] = 1; dhcp[242] = 1; // DISCOVER
+        dhcp[243] = 0xff;
+
+        // build UDP frame: src=STA, dst=broadcast, sport=68, dport=67
+        let udp_len = 8 + dhcp.len();
+        let ip_len = 20 + udp_len;
+        let mut frame = vec![0u8; 14 + ip_len];
+        frame[0..6].copy_from_slice(&[0xff; 6]);
+        frame[6..12].copy_from_slice(&[0x02, 0x53, 0x49, 0x4d, 0x00, 0x15]);
+        frame[12] = 0x08; frame[13] = 0x00;
+        frame[14] = 0x45;
+        frame[16] = (ip_len >> 8) as u8; frame[17] = ip_len as u8;
+        frame[22] = 64; frame[23] = 17;
+        frame[26..30].copy_from_slice(&[10, 0, 2, 15]);
+        frame[30..34].copy_from_slice(&[255, 255, 255, 255]);
+        // IP checksum
+        let mut sum = 0u32;
+        for i in (14..34).step_by(2) {
+            sum += ((frame[i] as u32) << 8) | frame[i + 1] as u32;
+        }
+        while sum > 0xffff { sum = (sum & 0xffff) + (sum >> 16); }
+        let ck = !sum as u16;
+        frame[24] = (ck >> 8) as u8; frame[25] = ck as u8;
+        // UDP
+        frame[34] = 0; frame[35] = 68;
+        frame[36] = 0; frame[37] = 67;
+        frame[38] = (udp_len >> 8) as u8; frame[39] = udp_len as u8;
+        frame[42..42 + dhcp.len()].copy_from_slice(&dhcp);
+
+        // write frame through mailbox: set TX_LEN, then write words, then TX_SEND
+        soc.write32(0x30104, frame.len() as u32); // NET_TX_LEN
+        let words = (frame.len() + 3) / 4;
+        for i in 0..words {
+            let off = i * 4;
+            let mut w = 0u32;
+            for j in 0..4 {
+                if off + j < frame.len() {
+                    w |= (frame[off + j] as u32) << (j * 8);
+                }
+            }
+            soc.write32(0x30100, w); // NET_TX_DATA
+        }
+        soc.write32(0x30108, 1); // NET_TX_SEND
+
+        // check for RX response
+        let ready = soc.read32(0x3010C); // NET_RX_READY
+        assert_eq!(ready, 1, "should have a DHCP OFFER waiting");
+
+        let rx_len = soc.read32(0x30110); // NET_RX_LEN
+        assert!(rx_len > 0, "RX frame should have nonzero length");
+
+        assert_eq!(soc.wifi.vnet.stats.dhcp_acks, 1);
+    }
+
+    /// The BT region dispatches to the right sub-module by offset.
+    #[test]
+    fn bt_region_dispatch() {
+        let mut soc = Soc::new(1 << 16, vec![0xff; 0x1000]);
+        // BR/EDR (0x20000-0x200FF): returns 0
+        assert_eq!(soc.read32(0x20000), 0);
+        // mailbox (0x20100-0x2013F): the BLE state starts OFF
+        assert_eq!(soc.read32(0x20104), 0);
+        // baseband (0x28000-0x2803F): round-trips
+        soc.write32(0x28000, 0xAB);
+        assert_eq!(soc.read32(0x28000), 0xAB);
+        // analog (0x2FC00-0x2FC8F): bt_window has its boot default
+        assert_eq!(soc.read32(0x2FC44), BT_WINDOW_BASE);
+        soc.write32(0x2FC44, 0x01C0_9A18);
+        assert_eq!(soc.read32(0x2FC44), 0x01C0_9A18);
     }
 }
 

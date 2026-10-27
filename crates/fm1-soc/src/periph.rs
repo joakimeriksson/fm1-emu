@@ -66,6 +66,8 @@ pub const IRQ_SPI1: u8 = 16;
 pub const IRQ_SARADC: u8 = 24;
 pub const IRQ_SPI2: u8 = 37;
 pub const IRQ_UART1: u8 = 20;
+pub const IRQ_BLE_RX: u8 = 29;
+pub const IRQ_BLE_EVENT: u8 = 45;
 /// The UART's clock (CLK_CON1 selects PLL48M; OTCNT counts it).
 const UART_HZ: u64 = 48_000_000;
 /// Bits per MIDI byte on the wire (start, 8 data, stop) and the baud rate.
@@ -215,6 +217,9 @@ pub struct Periph {
     /// the transfer under way finishes.
     pub spi2_pending: bool,
     spi2_next: u64,
+    /// BLE baseband IRQs (Optimist's ble_hw_wl82.c): rx packet and connection event.
+    pub ble_rx_pending: bool,
+    pub ble_event_pending: bool,
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
@@ -357,6 +362,8 @@ impl Default for Periph {
             adc_next: u64::MAX,
             spi2_pending: false,
             spi2_next: u64::MAX,
+            ble_rx_pending: false,
+            ble_event_pending: false,
             usb_next: u64::MAX,
             usb_period: 0,
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
@@ -698,6 +705,7 @@ impl Periph {
     pub fn any_pending(&self) -> bool {
         self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+            || self.ble_rx_pending || self.ble_event_pending
     }
 
     /// The highest-priority source cpu0 has enabled and that is pending: (irq, prio).
@@ -747,6 +755,12 @@ impl Periph {
         }
         if self.alnk_pend & 0xf0 != 0 && self.alnk_con0 & 0x800 != 0 {
             consider(IRQ_ALNK0);
+        }
+        if self.ble_rx_pending {
+            consider(IRQ_BLE_RX);
+        }
+        if self.ble_event_pending {
+            consider(IRQ_BLE_EVENT);
         }
         for b in 0..8u8 {
             if self.ilat & (1 << b) != 0 {
