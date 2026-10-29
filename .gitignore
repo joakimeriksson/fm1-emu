@@ -19,6 +19,8 @@ work/isa_stats_new.json
 work/probe/
 work/probe_*.bin
 work/*.ppm
+work/*.mp4
+work/record/
 work/session.html
 
 # the browser build (web/build.sh)

@@ -194,6 +194,7 @@ static mut AHEAD: u32 = 0;
 static mut OUT_L: [f32; 1024] = [0.0; 1024];
 static mut OUT_R: [f32; 1024] = [0.0; 1024];
 static mut LEDS: [f32; 41] = [0.0; 41];
+static mut LCD_RGBA: [u8; 240 * 240 * 4] = [0; 240 * 240 * 4];
 static mut PADS: [u32; 16] = [0; 16];
 static mut INSNS: u64 = 0;
 
@@ -401,6 +402,27 @@ pub extern "C" fn fm1_lcd() -> *const u16 {
 #[no_mangle]
 pub extern "C" fn fm1_lcd_revision() -> u32 {
     machine().map_or(0, |m| m.soc.lcd.revision)
+}
+
+/// The 240x240 LCD as RGBA8888 (for recording / canvas putImageData).
+#[no_mangle]
+pub extern "C" fn fm1_lcd_rgba() -> *const u8 {
+    #[allow(static_mut_refs)]
+    unsafe {
+        if let Some(m) = machine() {
+            for (i, &px) in m.soc.lcd.fb.iter().enumerate() {
+                let r = ((px >> 11) & 0x1f) as u8;
+                let g = ((px >> 5) & 0x3f) as u8;
+                let b = (px & 0x1f) as u8;
+                let o = i * 4;
+                LCD_RGBA[o] = (r << 3) | (r >> 2);
+                LCD_RGBA[o + 1] = (g << 2) | (g >> 4);
+                LCD_RGBA[o + 2] = (b << 3) | (b >> 2);
+                LCD_RGBA[o + 3] = 255;
+            }
+        }
+        LCD_RGBA.as_ptr()
+    }
 }
 
 /// The LEDs' on-fractions since the last call (41 floats; SMK-37: its 19 button LEDs first).
