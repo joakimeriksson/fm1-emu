@@ -193,11 +193,24 @@ impl Machine {
             None => std::fs::read(&o.bin)?,
         };
         let mut soc = Soc::new(RAM_SIZE, image);
-        soc.periph.hz = o.mhz * 1_000_000;
+        let strict = std::env::var("FM1_STRICT").is_ok();
+        // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault) and as it is timed: each
+        // instruction its measured cost (fm1_core's op_cost8) on a clock in eighths of a cycle; the
+        // interpreter only, and no loop skip (it counts instructions)
+        soc.periph.hz = o.mhz * 1_000_000 * if strict { 8 } else { 1 };
+        soc.strict_align = strict;
+        if strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(fm1_soc::XipCache::default());
+        }
         soc.periph.skip_idle = true;
         soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
         let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
-        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err();
+        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err() && !strict;
+        cpu.cost_model = strict;
+        if std::env::var_os("FM1_ISA_HIST").is_some() {
+            cpu.isa_hist = Some(Default::default());
+        }
         // the SPL hands cpu0 over in user mode (see fm1-emu)
         cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
         // the SPL's boot-parameter struct (see fm1-emu): an all-zero pair
@@ -593,6 +606,25 @@ fn shot(o: &Opts, ms: u64) {
         m.soc.periph.hz / 1_000_000
     );
     let leds = m.soc.periph.led_take();
+    if let (Some(path), Some(h)) = (std::env::var_os("FM1_ISA_HIST"), m.cpu.isa_hist.as_ref()) {
+        // executed instructions by ISA form, as JSON {syntax: count} (FM1_NO_BLOCKS: every step)
+        let mut v: Vec<_> = h.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        let body: Vec<String> = v.iter().map(|(k, n)| format!("{:?}: {n}", k)).collect();
+        let _ = std::fs::write(&path, format!("{{{}}}\n", body.join(", ")));
+    }
+    {
+        // the screen's share of the run: a firmware whose main loop waits for whole frames gets that
+        // little else done (FM-1 SID's silent tunes on the device, 2026-10-24)
+        let p = &m.soc.periph;
+        let share = 100.0 * p.spi1_wire as f64 / p.cycles.max(1) as f64;
+        println!("LCD: on the wire {:.0}% of the run ({:.0} ms of {:.0} ms)", share,
+            p.spi1_wire as f64 * 1000.0 / p.hz as f64, p.cycles as f64 * 1000.0 / p.hz as f64);
+        if share > 50.0 {
+            println!("warning: the LCD's transfers take {share:.0}% of the time: a main loop that waits for them \
+                      has little left for anything else (send only what changed; FM1_LCD_INSTANT=1: the old instant LCD)");
+        }
+    }
     if let Some(log) = &m.skip_log {
         let mut v: Vec<_> = log.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
@@ -891,7 +923,11 @@ env: FM1_BENCH_KEYS='T[-T2]:PLAY,T:n7,T:enc0:+3,T:pot:512,T:ms:mHEX'  scripted i
      FM1_USB_SEND='MS:HEX;…'  --shot --usb: MIDI messages over USB at those times (@PATH: from a file); FM1_USB_TRACE: the bus
      FM1_USB_SIE_NS=N      --usb: each SIE register access takes N ns (default 1000)
      FM1_USB_WAV=FILE      --usb, --bench / --shot: record the USB audio as a computer would (s16le, no header);
-                           FM1_USB_RATE=HZ asks for that rate if the device lists it (default 44100)";
+                           FM1_USB_RATE=HZ asks for that rate if the device lists it (default 44100)
+     FM1_LCD_INSTANT=1     the LCD's transfers finish at once (by default they take their time at the SPI clock)
+     FM1_STRICT=1          as an FM-1 is: a misaligned 16- / 32-bit RAM access faults (EMU_MSG bit 0), and
+                           each instruction takes its measured cycles (a taken branch ~5, a call ~5, ALU
+                           ~0.6); the interpreter, no JIT: slower. FM1_STRICT_LOG: list misaligned accesses";
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

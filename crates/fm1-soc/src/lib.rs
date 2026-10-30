@@ -90,6 +90,9 @@ enum Region {
     /// SFCENC: the SFC's decryption and its plain window.
     Sfcenc,
     Dbg,
+    /// The CPU's guards (0x1EEE250..0x1EEE3FF: write limits, DBG_EN, PC limits): stored, and the PC
+    /// limits watched (`Soc::pc_windows`)
+    Guard,
     Irqc,
     /// Interrupt controller enable/priority words and software latch.
     Irqc2,
@@ -109,6 +112,56 @@ enum Region {
 // its end, and OberVave, ZP-12 and FM1-DOOM touch P33 tens of millions of times a second (a
 // watchdog kick per round of their main loop; a quarter of FM1-DOOM's time was the chain).
 const SFR_LO: u32 = 0x10000;
+/// The FM-1's flash cache as harbor's cache probe measured it on a real FM-1 (2026-10-24,
+/// probes/cache.c): 32 KB (a 32 KB footprint hits, 64 KB misses), 64-byte lines (the cost doubles
+/// with the stride up to 64), ~300 cycles a miss (1.29 us a load at a 64-byte stride). 4-way with LRU
+/// is assumed (not measured). Shared by data reads from XIP and code fetched from XIP. Its costs
+/// are in the strict clock's eighths of a cycle.
+#[derive(Clone)]
+pub struct XipCache {
+    tags: [[u32; 4]; 128],
+    age: [[u8; 4]; 128],
+    pub misses: u64,
+}
+
+impl Default for XipCache {
+    fn default() -> Self {
+        XipCache { tags: [[u32::MAX; 4]; 128], age: [[0, 1, 2, 3]; 128], misses: 0 }
+    }
+}
+
+impl XipCache {
+    /// a miss, in the strict clock's ticks (eighths of a 240 MHz cycle): ~300 cycles
+    pub const MISS_TICKS: u64 = 300 * 8;
+
+    /// The line of addr is used: true when it was not in the cache (it is now, in the way least
+    /// recently used)
+    #[inline]
+    pub fn access(&mut self, addr: u32) -> bool {
+        let line = addr >> 6;
+        let set = (line & 127) as usize;
+        let (tags, age) = (&mut self.tags[set], &mut self.age[set]);
+        let (way, miss) = match tags.iter().position(|&t| t == line) {
+            Some(w) => (w, false),
+            None => (age.iter().position(|&a| a == 3).unwrap_or(0), true),
+        };
+        if miss {
+            tags[way] = line;
+            self.misses += 1;
+        }
+        let was = age[way];
+        for a in age.iter_mut() {
+            if *a < was {
+                *a += 1;
+            }
+        }
+        age[way] = 0;
+        miss
+    }
+}
+
+/// Below this nothing answers: an access is bus-invalid (the guards' "NULL page")
+const NULL_PAGE: u32 = 0x1000;
 const SFR_HI: u32 = 0x14000;
 
 /// The region of an address in the peripheral window (8-byte cells: every block there starts
@@ -199,6 +252,21 @@ pub struct Soc {
     pub flash: SpiFlash,
     /// Console bytes written through DBG_MSG / UART-style debug boxes.
     pub console: Vec<u8>,
+    /// The guards' causes in DBG_MSG (bit 12 a PC outside its limits, 4 / 5 a read / write of
+    /// unmapped space): set as a guard trips, cleared by DBG_MSG_CLR
+    pub dbg_cause: u32,
+    /// The PC limits were written: `machine::run_blocks` gives the core `pc_windows` again
+    pub pc_guard_dirty: bool,
+    /// EMU_MSG's causes (0x1EEF0D4, write 1 to clear): bit 0 a misaligned access (`strict_align`)
+    pub emu_cause: u32,
+    /// A 16- or 32-bit RAM access that is not aligned raises the CPU exception (EMU_MSG bit 0), as
+    /// on an FM-1 (a probe, 2026-10-24: every misaligned load or store to RAM faulted; XIP reads
+    /// across). Only where loads and stores go through the bus: fm1-live's FM1_STRICT=1 runs
+    /// without the JIT for it.
+    pub strict_align: bool,
+    /// The flash cache (FM1_STRICT): XIP reads and code fetched from XIP that miss it cost a line's
+    /// fill (`XipCache`)
+    pub xip_cache: Option<XipCache>,
     /// Overlay RAM (second bank, 0x04000000), written by the app CRT.
     pub ovl: Ram,
     /// SRAM banks at 0x01f00000 (cleared by the RAM early init).
@@ -393,6 +461,11 @@ impl Soc {
             lcd: Lcd::new(),
             flash: SpiFlash::new(),
             console: Vec::new(),
+            dbg_cause: 0,
+            pc_guard_dirty: false,
+            emu_cause: 0,
+            strict_align: false,
+            xip_cache: None,
             ticks: 0,
             periph: Periph::default(),
             sfr_lo: vec![0; (SFR_LO_END / 4) as usize],
@@ -526,15 +599,17 @@ impl Soc {
         match self.region(addr) {
             Region::Xip | Region::XipFlash | Region::Ram | Region::Ovl | Region::Sram2 => true,
             Region::Usb => self.usb.pure(addr),
-            Region::Irqc | Region::Iomap | Region::Clk | Region::Ana | Region::Bt | Region::Dbg => true,
+            Region::Irqc | Region::Iomap | Region::Clk | Region::Ana | Region::Bt | Region::Dbg | Region::Guard => true,
             Region::Spi2 | Region::Crc | Region::P33 | Region::Alnk | Region::Uart1 | Region::Sfcenc => true,
             // the tick counter's word counts the clock
             Region::Irqc2 => addr != 0x1eef0f0,
             // the timers' control and period words; the counters count the clock, and other
             // words tick `Soc::ticks`
             Region::Timer => matches!(addr, 0x10800 | 0x10900 | 0x10908) || matches!(addr & !0x300, 0x10400 | 0x10408),
-            // the SMK-37's matrix rows and SPI1 busy follow the clock; its ADC is left alone too
-            Region::Gpio | Region::Adc | Region::Spi1 => fm1,
+            // the SMK-37's matrix rows and SPI1 busy follow the clock; its ADC is left alone too (SPI1
+            // busy on the FM-1 too, unless FM1_LCD_INSTANT)
+            Region::Gpio | Region::Adc => fm1,
+            Region::Spi1 => fm1 && !lcd_timed(),
             // (the FFT / vector unit's done bit comes with the clock)
             Region::Spi0 | Region::Rand | Region::HwDsp | Region::HwEq | Region::HwSrc | Region::Unknown => false,
         }
@@ -695,8 +770,45 @@ impl Soc {
             0x1eef000..=0x1eef3ff => Region::Irqc2,
             0x1eee240..=0x1eee24f => Region::Dbg,
             hwdsp::BASE..=hwdsp::END => Region::HwDsp,
+            0x1eee250..=0x1eee3ff => Region::Guard,
             _ => Region::Unknown,
         }
+    }
+
+    /// The CPU's guards (as Felucca's and Dinghy's hal/fm1_guard.h arm them). A guard that trips
+    /// sets its cause in DBG_MSG and raises the CPU exception, interrupt 1 (fm1_irq.h's fault
+    /// report reads both); fm1-emu did not have them, so code that trips one on an FM-1 (a probe
+    /// run from RAM outside the PC limits, 2026-10-24) ran on here.
+    pub fn guard_trip(&mut self, bit: u32) {
+        self.dbg_cause |= 1 << bit;
+        self.periph.exc_pending = true;
+        self.periph.next_due = 0;
+    }
+
+    /// A misaligned 16- / 32-bit RAM access (`strict_align`): EMU_MSG bit 0 and the exception
+    #[cold]
+    fn misaligned(&mut self, addr: u32, size: u32) {
+        if std::env::var_os("FM1_STRICT_LOG").is_some() {
+            eprintln!("misaligned {size}-byte access at {addr:#010x}");
+        }
+        self.emu_cause |= 1;
+        self.periph.exc_pending = true;
+        self.periph.next_due = 0;
+    }
+
+    /// A bus-invalid access (DBG_EN's bits 4 / 5: AXI read / write): a guard trip once armed
+    fn bus_invalid(&mut self, bit: u32) {
+        if self.sfr_get(0x1eee340) & (1 << bit) != 0 {
+            self.guard_trip(bit);
+        }
+    }
+
+    /// The PC limits (0x1EEE380 / 84: window 0 high / low, 88 / 8C: window 1): code may run inside
+    /// either window and an instruction fetched outside both raises the exception (DBG_MSG bit
+    /// 12). None until a firmware sets them.
+    pub fn pc_windows(&mut self) -> Option<[(u32, u32); 2]> {
+        let w = [(self.sfr_get(0x1eee384), self.sfr_get(0x1eee380)), (self.sfr_get(0x1eee38c), self.sfr_get(0x1eee388))];
+        (w[0].1 != 0 || w[1].1 != 0).then_some(w)
     }
 
     fn sfr_get(&mut self, addr: u32) -> u32 {
@@ -806,16 +918,15 @@ impl Soc {
         self.periph.spi2_start(bytes, baud, con & 0x2000 != 0);
     }
 
-    /// A SPI1 transfer finished: with CON bit 13 (interrupt enable) that is IRQ 16, the stock
-    /// LCD driver's DMA-done (its layer flush waits for the handler). The interrupt comes after
-    /// the bytes' time on the wire (`Periph::spi1_start`): FM-1 V16's driver enables it, starts
-    /// the DMA and only then marks the DMA as running, so an interrupt at the start found its
-    /// handler idle, which returned without clearing it, again and again. On the FM-1 the
-    /// transfer-done bit still reads as set at once (polls finish); the SMK-37's is busy until the
-    /// bytes have gone out.
+    /// A SPI1 transfer started: it takes the bytes' time on the wire (`Periph::spi1_start`): on the
+    /// SMK-37, on the FM-1 (FM1_LCD_INSTANT=1: done at once there), and whenever CON bit 13
+    /// (interrupt enable) is set, since its end is IRQ 16, the stock LCD driver's DMA-done (its
+    /// layer flush waits for the handler). FM-1 V16's driver enables it, starts the DMA and only
+    /// then marks the DMA as running, so an interrupt at the start found its handler idle, which
+    /// returned without clearing it, again and again.
     fn spi1_done(&mut self, bytes: u32) {
         let irq = self.sfr_get(0x11d00) & 0x2000 != 0;
-        if self.board == Board::Smk37 || irq {
+        if self.board == Board::Smk37 || irq || lcd_timed() {
             let baud = self.sfr_get(0x11d04);
             self.periph.spi1_start(bytes, baud, irq);
         }
@@ -831,6 +942,16 @@ impl Soc {
         }
         self.sfr_get(addr)
     }
+}
+
+/// The FM-1's LCD transfers take their time on the wire, as the SMK-37's (SPI1 at 60 MHz / (BAUD + 1):
+/// Felucca's and Dinghy's BAUD 4 is 12 MHz, a whole 240 x 240 frame ~77 ms). A firmware that waits for
+/// whole frames gets that little done in between, as on the FM-1 (FM-1 SID 2026-10-24: its tunes went
+/// silent on the device and played here, the transfers having finished at once). FM1_LCD_INSTANT=1: the
+/// transfers finish at once again (the model before).
+fn lcd_timed() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FM1_LCD_INSTANT").is_err())
 }
 
 impl Bus for Soc {
@@ -916,6 +1037,9 @@ impl Bus for Soc {
 
     #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
+        if self.strict_align && addr & 1 != 0 && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
+            self.misaligned(addr, 2);
+        }
         // halfwords sit at offsets 0 and 2 of the word (the old `>> 8` for
         // offset 2 returned bytes 1-2 and sheared every 16-bit pixel canvas)
         let v = self.read32(addr & !3);
@@ -926,13 +1050,41 @@ impl Bus for Soc {
     fn read32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
+            if self.strict_align && addr & 3 != 0 {
+                self.misaligned(addr, 4);
+            }
             return self.ram.read32(o as u32);
         }
         let x = addr.wrapping_sub(XIP_BASE) as usize;
         if x + 4 <= self.xip.len() {
+            if let Some(c) = self.xip_cache.as_mut() {
+                if c.access(addr) {
+                    self.periph.cycles += XipCache::MISS_TICKS;
+                }
+            }
             return u32::from_le_bytes([self.xip[x], self.xip[x + 1], self.xip[x + 2], self.xip[x + 3]]);
         }
         self.read32_slow(addr)
+    }
+
+    #[inline(always)]
+    fn fetch_cost(&mut self, pc: u32) {
+        if pc.wrapping_sub(XIP_BASE) < 0x0100_0000 {
+            if let Some(c) = self.xip_cache.as_mut() {
+                let miss = c.access(pc) as u64 + c.access(pc.wrapping_add(4)) as u64;   /* (a 6-byte one may cross a line) */
+                self.periph.cycles += miss * XipCache::MISS_TICKS;
+            }
+        }
+    }
+
+    /// An instruction fetch: never a misaligned access (`strict_align`), code is halfword-aligned
+    #[inline(always)]
+    fn fetch32(&mut self, addr: u32) -> u32 {
+        let o = addr.wrapping_sub(RAM_BASE) as usize;
+        if o + 4 <= self.ram.len() {
+            return self.ram.read32(o as u32);
+        }
+        self.read32(addr)
     }
 
     #[inline(always)]
@@ -946,6 +1098,9 @@ impl Bus for Soc {
 
     #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
+        if self.strict_align && addr & 1 != 0 && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
+            self.misaligned(addr, 2);
+        }
         // merged at (addr & 2) within the aligned word, as the slow path does
         let o = (addr & !1).wrapping_sub(RAM_BASE) as usize;
         if o + 2 <= self.ram.len() && addr & 1 == 0 {
@@ -958,6 +1113,9 @@ impl Bus for Soc {
     fn write32(&mut self, addr: u32, value: u32) {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
+            if self.strict_align && addr & 3 != 0 {
+                self.misaligned(addr, 4);
+            }
             return self.ram.write32(o as u32, value);
         }
         self.write32_slow(addr, value)
@@ -1019,10 +1177,11 @@ impl Soc {
                 if addr == 0x2fc44 { self.bt_window } else { 0 }
             }
             Region::Gpio | Region::Adc | Region::Alnk | Region::Irqc2 | Region::Uart1 => {
-                match self.periph.read(addr) {
+                let v = match self.periph.read(addr) {
                     Some(v) => v,
                     None => self.sfr_get(addr),
-                }
+                };
+                if addr == 0x1eef0d4 { v | self.emu_cause } else { v }   // (EMU_MSG: and its causes)
             }
             Region::Timer => {
                 match self.periph.read(addr) {
@@ -1035,9 +1194,9 @@ impl Soc {
             Region::Spi2 => self.sfr_get(addr) | if addr == 0x11e00 { 0x8000 } else { 0 },
             Region::Spi1 => {
                 if addr == 0x11d00 {
-                    // CON: transfer-done (the FM-1: always, so polls finish; the SMK-37: once the
-                    // bytes have gone out)
-                    let busy = self.board == Board::Smk37 && self.periph.cycles < self.periph.spi1_done_at;
+                    // CON: transfer-done, once the bytes have gone out (FM1_LCD_INSTANT=1 on the
+                    // FM-1: always)
+                    let busy = (self.board == Board::Smk37 || lcd_timed()) && self.periph.cycles < self.periph.spi1_done_at;
                     self.sfr_get(addr) | if busy { 0 } else { 0x8000 }
                 } else if addr == 0x11d10 {
                     self.sfr_get(addr)
@@ -1045,7 +1204,9 @@ impl Soc {
                     self.sfr_get(addr)
                 }
             }
-            Region::Dbg => self.sfr_get(addr),
+            // DBG_MSG: what was written, and the causes of the guards that tripped (`guard_trip`)
+            Region::Dbg => self.sfr_get(addr) | if addr == 0x1eee244 { self.dbg_cause } else { 0 },
+            Region::Guard => self.sfr_get(addr),
             Region::Crc => if addr == 0x13504 { self.crc as u32 } else { 0 },
             // JL_RAND (0x13B00 R64L, 0x13B04 R64H): a new number at every read, from a fixed
             // seed so runs repeat. Read as 0 it hung the stock firmware ~8 s after boot: a
@@ -1064,6 +1225,9 @@ impl Soc {
             Region::HwEq => self.hweq.read(addr, self.periph.cycles),
             Region::HwSrc => self.hwsrc.read(addr, self.periph.cycles),
             Region::Unknown => {
+                if addr < NULL_PAGE {
+                    self.bus_invalid(4); // a read of the NULL page (DBG_MSG bit 4, AXI read)
+                }
                 self.log_unknown(addr, 4, false, 0);
                 0
             }
@@ -1132,6 +1296,9 @@ impl Soc {
                 self.sfr_set(addr, value)
             }
             Region::Alnk | Region::Irqc2 => {
+                if addr == 0x1eef0d4 {
+                    self.emu_cause &= !value; // (EMU_MSG: write 1 to clear)
+                }
                 if !self.periph.write(addr, value) {
                     self.sfr_set(addr, value);
                 }
@@ -1205,7 +1372,17 @@ impl Soc {
                     "msg" => {
                         self.console.extend_from_slice(&value.to_le_bytes());
                     }
+                    "msg_clr" => self.dbg_cause &= !value,
                     _ => {}
+                }
+                self.sfr_set(addr, value);
+            }
+            Region::Guard => {
+                if (0x1eee380..=0x1eee38f).contains(&addr) {
+                    // (the runner hands the core its new windows before the next block: the run
+                    // stops at once, as for an event due now)
+                    self.pc_guard_dirty = true;
+                    self.periph.next_due = 0;
                 }
                 self.sfr_set(addr, value);
             }
@@ -1238,7 +1415,12 @@ impl Soc {
                 u.write(self, addr, value, cycles);
                 self.hwsrc = u;
             }
-            Region::Unknown => self.log_unknown(addr, 4, true, value),
+            Region::Unknown => {
+                if addr < NULL_PAGE {
+                    self.bus_invalid(5); // a write to the NULL page (DBG_MSG bit 5, AXI write)
+                }
+                self.log_unknown(addr, 4, true, value)
+            }
         }
     }
 }
@@ -1354,6 +1536,7 @@ mod tests {
             0x1e000..=0x1e01f | 0x1e800..=0x1eb3f => Region::HwEq,
             0x14300..=0x14323 => Region::HwSrc,
             0x1eee240..=0x1eee24f => Region::Dbg,
+            0x1eee250..=0x1eee3ff => Region::Guard,
             _ => Region::Unknown,
         }
     }
