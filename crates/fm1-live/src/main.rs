@@ -81,6 +81,8 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --oss-wifi: hardware-level WiFi emulation for cleanroom (core-fm1) firmware
+    oss_wifi: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, image path): each image is
@@ -107,11 +109,16 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, seed: None, flash: None, usb: false };
+                       flaky_core1: None, seed: None, flash: None, usb: false, oss_wifi: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
             o.usb = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--oss-wifi" {
+            o.oss_wifi = true;
             i += 1;
             continue;
         }
@@ -195,6 +202,9 @@ impl Machine {
         soc.periph.hz = o.mhz * 1_000_000;
         soc.periph.skip_idle = true;
         soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
+        if o.oss_wifi {
+            soc.enable_oss_wifi();
+        }
         let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
         cpu.jit_on = std::env::var("FM1_NO_JIT").is_err();
         // the SPL hands cpu0 over in user mode (see fm1-emu)

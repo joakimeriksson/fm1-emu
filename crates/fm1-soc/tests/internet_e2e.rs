@@ -339,6 +339,7 @@ fn ble_full_lifecycle_via_soc() {
     assert_eq!(soc.read32(0x20104), 0); // back to BLE_OFF
 }
 
+
 /// Simulate Optimist's ble_hw_wl82.c RF init and advertising start through MMIO.
 /// No firmware binary: this is the register sequence the driver makes.
 #[test]
@@ -453,4 +454,146 @@ fn ble_baseband_rf_init_and_advertise() {
     // baseband state is unaffected
     assert_eq!(soc.read32(0x28000), 0x0001); // BLE_CON unchanged
     assert_eq!(col_read(&mut soc, 0, 14), 0x8000); // still advertising
+}
+
+/// Test DMA-based WiFi TX/RX path matching the firmware's RT2800-style DMA.
+/// Exercises: DMA register setup, TX descriptor kick, frame processing,
+/// RX descriptor delivery with DMA_DONE, and INT_SOURCE_CSR.
+#[test]
+fn oss_wifi_dma_probe_auth_assoc() {
+    let mut soc = fm1_soc::Soc::new(1 << 16, vec![0; 0x1000]);
+    soc.enable_oss_wifi();
+
+    const RAM_BASE: u32 = 0x01c0_0000;
+    // Allocate test buffers in RAM (low offsets)
+    const TXD_ADDR: u32 = RAM_BASE + 0x100; // TX descriptor (16 bytes)
+    const RXD_ADDR: u32 = RAM_BASE + 0x200; // RX descriptor (16 bytes)
+    const TX_BUF: u32 = RAM_BASE + 0x1000;  // TX frame buffer
+    const RX_BUF: u32 = RAM_BASE + 0x2000;  // RX frame buffer (1600 bytes)
+
+    let sta_mac: [u8; 6] = [0x02, 0x53, 0x49, 0x4d, 0x00, 0x15];
+    let ap_mac: [u8; 6] = [0x02, 0x46, 0x4d, 0x31, 0x00, 0x01];
+
+    // Verify MAC_ADDR_DW0/DW1 pre-populated at 0x30300/0x30304
+    let dw0 = soc.read32(0x30300);
+    let dw1 = soc.read32(0x30304);
+    assert_eq!(dw0 & 0xFF, sta_mac[0] as u32);
+    assert_eq!((dw0 >> 8) & 0xFF, sta_mac[1] as u32);
+    assert_eq!((dw1 >> 8) & 0xFF, sta_mac[5] as u32);
+
+    // DMA init sequence (matching firmware's wifi_dma_init)
+    soc.write32(0x40208, 0); // WPDMA_GLO_CFG: disable TX+RX
+    soc.write32(0x40230, TXD_ADDR); // TX_BASE_PTR0
+    soc.write32(0x40234, 1);        // TX_MAX_CNT0
+    soc.write32(0x40290, RXD_ADDR); // RX_BASE_PTR
+
+    // Setup RX descriptor: buffer pointer + length, DMA_DONE=0
+    soc.write32(RXD_ADDR, RX_BUF);     // sd_ptr0
+    soc.write32(RXD_ADDR + 4, 1600);   // sd_len0
+    soc.write32(RXD_ADDR + 8, 0);      // sd_ptr1
+    soc.write32(RXD_ADDR + 12, 0);     // flags (no DMA_DONE)
+
+    soc.write32(0x40294, 1);  // RX_MAX_CNT
+    soc.write32(0x40238, 0);  // TX_CTX_IDX0
+    soc.write32(0x40298, 0);  // RX_CRX_IDX
+    soc.write32(0x40204, 0);  // INT_MASK = 0
+
+    // Enable DMA
+    soc.write32(0x40208, (1 << 0) | (1 << 2)); // TX_EN | RX_EN
+
+    // Helper: write a frame to TX buffer and kick DMA
+    let dma_tx = |soc: &mut fm1_soc::Soc, frame: &[u8]| {
+        // Write frame bytes to TX buffer in RAM
+        for (i, &b) in frame.iter().enumerate() {
+            soc.write8(TX_BUF + i as u32, b);
+        }
+        // Setup TX descriptor
+        soc.write32(TXD_ADDR, TX_BUF);
+        soc.write32(TXD_ADDR + 4, (frame.len() as u32 & 0xFFFF) | (1 << 16)); // len | LAST_SEC0
+        soc.write32(TXD_ADDR + 8, 0);
+        soc.write32(TXD_ADDR + 12, 0); // clear DMA_DONE
+        // Kick TX
+        soc.write32(0x40238, 0); // TX_CTX_IDX0
+    };
+
+    // Helper: read RX frame from DMA
+    let dma_rx = |soc: &mut fm1_soc::Soc| -> Option<Vec<u8>> {
+        let flags = soc.read32(RXD_ADDR + 12);
+        if flags & (1 << 17) == 0 { return None; } // no DMA_DONE
+
+        let len = (soc.read32(RXD_ADDR + 4) & 0xFFFF) as usize;
+        if len < 24 || len > 1600 { return None; }
+
+        let mut frame = vec![0u8; len];
+        for i in 0..len {
+            frame[i] = soc.read8(RX_BUF + i as u32);
+        }
+
+        // Re-post RX buffer (like firmware does)
+        soc.write32(RXD_ADDR, RX_BUF);
+        soc.write32(RXD_ADDR + 4, 1600);
+        soc.write32(RXD_ADDR + 8, 0);
+        soc.write32(RXD_ADDR + 12, 0); // clear DMA_DONE
+        soc.write32(0x40298, 0); // RX_CRX_IDX
+
+        Some(frame)
+    };
+
+    // --- Probe request ---
+    let mut probe = vec![0x40, 0x00, 0x00, 0x00]; // FC=probe req
+    probe.extend_from_slice(&[0xFF; 6]);
+    probe.extend_from_slice(&sta_mac);
+    probe.extend_from_slice(&[0xFF; 6]);
+    probe.extend_from_slice(&[0x00; 2]);
+    probe.push(0); probe.push(0); // SSID IE (wildcard)
+    dma_tx(&mut soc, &probe);
+
+    // TX descriptor should have DMA_DONE
+    assert!(soc.read32(TXD_ADDR + 12) & (1 << 17) != 0, "TX DMA_DONE not set");
+    // INT_SOURCE should have TX_DONE0
+    assert!(soc.read32(0x40200) & 1 != 0, "INT_TX_DONE0 not set");
+
+    // RX: should get probe responses (Home first)
+    let home_rsp = dma_rx(&mut soc).expect("Home probe response via DMA");
+    let fc = u16::from_le_bytes([home_rsp[0], home_rsp[1]]);
+    assert_eq!(fc, 0x0050, "expected probe response FC");
+
+    let cafe_rsp = dma_rx(&mut soc).expect("Cafe probe response via DMA");
+    assert_eq!(u16::from_le_bytes([cafe_rsp[0], cafe_rsp[1]]), 0x0050);
+
+    // --- Auth request ---
+    let mut auth = vec![0xB0, 0x00, 0x00, 0x00];
+    auth.extend_from_slice(&ap_mac);
+    auth.extend_from_slice(&sta_mac);
+    auth.extend_from_slice(&ap_mac);
+    auth.extend_from_slice(&[0; 2]); // seq ctrl
+    auth.extend_from_slice(&[0; 2]); // algo: open
+    auth.extend_from_slice(&[1, 0]); // seq: 1
+    auth.extend_from_slice(&[0; 2]); // status
+    dma_tx(&mut soc, &auth);
+
+    let auth_rsp = dma_rx(&mut soc).expect("Auth response via DMA");
+    assert_eq!(u16::from_le_bytes([auth_rsp[0], auth_rsp[1]]), 0x00B0);
+    assert_eq!(u16::from_le_bytes([auth_rsp[28], auth_rsp[29]]), 0, "auth status");
+
+    // --- Assoc request ---
+    let mut assoc = vec![0x00, 0x00, 0x00, 0x00];
+    assoc.extend_from_slice(&ap_mac);
+    assoc.extend_from_slice(&sta_mac);
+    assoc.extend_from_slice(&ap_mac);
+    assoc.extend_from_slice(&[0; 2]);
+    assoc.extend_from_slice(&[0x21, 0x00]); // capability 0x0021 (matching firmware)
+    assoc.extend_from_slice(&[10, 0]); // listen interval
+    assoc.push(0); assoc.push(4); assoc.extend_from_slice(b"Home");
+    dma_tx(&mut soc, &assoc);
+
+    let assoc_rsp = dma_rx(&mut soc).expect("Assoc response via DMA");
+    assert_eq!(u16::from_le_bytes([assoc_rsp[0], assoc_rsp[1]]), 0x0010);
+    assert_eq!(u16::from_le_bytes([assoc_rsp[26], assoc_rsp[27]]), 0, "assoc status");
+
+    // EAPOL msg1 should follow (WPA2 handshake start)
+    let msg1 = dma_rx(&mut soc).expect("EAPOL msg1 via DMA");
+    assert_eq!(&msg1[30..32], &[0x88, 0x8E], "EAPOL ethertype");
+
+    eprintln!("oss_wifi_dma_probe_auth_assoc PASSED: full scan/auth/assoc via DMA");
 }

@@ -70,6 +70,7 @@ const SSID_MAX: usize = 33;
 
 struct VirtualAp {
     ssid: &'static str,
+    pass: &'static str,
     rssi: i32,
     secured: bool,
     channel: u8,
@@ -78,12 +79,14 @@ struct VirtualAp {
 const VIRTUAL_APS: &[VirtualAp] = &[
     VirtualAp {
         ssid: "Home",
+        pass: "fm1pass",
         rssi: -48,
         secured: true,
         channel: 6,
     },
     VirtualAp {
         ssid: "Cafe",
+        pass: "",
         rssi: -71,
         secured: false,
         channel: 11,
@@ -156,6 +159,19 @@ impl WifiController {
         Self::default()
     }
 
+    fn find_ap(ssid: &[u8; SSID_MAX]) -> Option<&'static VirtualAp> {
+        VIRTUAL_APS.iter().find(|ap| {
+            let ap_bytes = ap.ssid.as_bytes();
+            let ssid_len = ssid.iter().position(|&b| b == 0).unwrap_or(SSID_MAX);
+            ssid_len == ap_bytes.len() && &ssid[..ssid_len] == ap_bytes
+        })
+    }
+
+    fn pass_matches(join_pass: &[u8; SSID_MAX], expected: &str) -> bool {
+        let pass_len = join_pass.iter().position(|&b| b == 0).unwrap_or(SSID_MAX);
+        pass_len == expected.len() && &join_pass[..pass_len] == expected.as_bytes()
+    }
+
     fn tick(&mut self, ms: u32) {
         let elapsed = ms.wrapping_sub(self.state_t);
         match self.state {
@@ -205,6 +221,12 @@ impl WifiController {
             }
             CMD_JOIN => {
                 if self.state >= WIFI_ON {
+                    if let Some(ap) = Self::find_ap(&self.join_ssid) {
+                        if ap.secured && !Self::pass_matches(&self.join_pass, ap.pass) {
+                            // wrong password: stay in WIFI_ON, don't transition
+                            return;
+                        }
+                    }
                     self.ssid = self.join_ssid;
                     self.state = WIFI_JOINING;
                     self.state_t = ms;

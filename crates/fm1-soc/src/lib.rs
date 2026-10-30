@@ -40,6 +40,7 @@ pub mod smk;
 mod spiflash;
 pub mod usb;
 pub mod wifi;
+pub mod wifi_hw;
 
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
@@ -238,6 +239,8 @@ pub struct Soc {
     pub bt: bt::BtRegion,
     /// WiFi controller (wifi.rs): register-mapped mailbox for plat_wifi_* mock.
     pub wifi: wifi::WifiController,
+    /// Hardware-level WiFi emulation (wifi_hw.rs): --oss-wifi activates this path.
+    pub wifi_hw: Option<wifi_hw::WifiHw>,
     /// `--flaky-core1`: core 1's RAM loads misread now and then (flaky.rs); None = a good unit.
     pub flaky_core1: Option<flaky::FlakyCore1>,
     /// The power domain's analog registers.
@@ -379,6 +382,7 @@ impl Soc {
             unknown_log: Vec::new(),
             bt: bt::BtRegion::new(BT_WINDOW_BASE),
             wifi: wifi::WifiController::new(),
+            wifi_hw: None,
             flaky_core1: None,
             p33: Default::default(),
             usb: Default::default(),
@@ -441,6 +445,13 @@ impl Soc {
             Some(f) if (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() => f.load(addr, size, v),
             _ => v,
         }
+    }
+
+    /// Enable hardware-level WiFi emulation (--oss-wifi): SDIO controller,
+    /// BBP, MAC registers, and a virtual 802.11 AP. The mailbox path remains
+    /// available for low offsets.
+    pub fn enable_oss_wifi(&mut self) {
+        self.wifi_hw = Some(wifi_hw::WifiHw::new());
     }
 
     /// Wire the chip into `board`'s panel (and its flash chip's id).
@@ -814,6 +825,18 @@ impl Bus for Soc {
 impl Soc {
     #[inline(never)]
     fn read32_slow(&mut self, addr: u32) -> u32 {
+        // --oss-wifi: intercept SDIO, DMA, and wireless control registers
+        if self.wifi_hw.is_some() {
+            match addr {
+                0x50000 | 0x50008 | 0x5000C => return self.wifi_hw.as_mut().unwrap().sdio_read(addr),
+                0x40200..=0x4029C => {
+                    let offset = addr - 0x40000;
+                    return self.wifi_hw.as_mut().unwrap().dma_read(offset);
+                }
+                0x14028..=0x1405C => return self.wifi_hw.as_ref().unwrap().wl_ctrl_read(addr),
+                _ => {}
+            }
+        }
         match self.region(addr) {
             Region::Xip => {
                 let o = (addr - XIP_BASE) as usize;
@@ -853,7 +876,18 @@ impl Soc {
             // (a trim only nudges the DAC's DC offset).
             Region::Ana => {
                 let v = self.sfr_get(addr);
-                if addr == 0x11978 { (v & !0xff00) | 0x4_0000 | 0x8000 | 0x20 } else { v }
+                if addr == 0x11978 {
+                    // VCO scan (wifi_rf_vco_scan) sets CAL_START bit 28 at 0x11968
+                    // then reads 0x11978 for the comparator. Return "locked" (neither
+                    // bit 17 nor 18) so the binary search succeeds.
+                    if self.wifi_hw.is_some() && self.sfr_get(0x11968) & (1 << 28) != 0 {
+                        let cal = self.sfr_get(0x11968) & !(1 << 28);
+                        self.sfr_set(0x11968, cal);
+                        return 0;
+                    }
+                    // DAC trim: bit 5=done, bit 15=done, bit 18=step ok
+                    (v & !0xff00) | 0x4_0000 | 0x8000 | 0x20
+                } else { v }
             }
             // the Bluetooth baseband (bsfr 0x20000; no radio here): reads 0, writes are
             // dropped (self-clearing requests like bt_clkn_compare_arm's capture at 0x2001C
@@ -868,6 +902,13 @@ impl Soc {
             }
             Region::Wifi => {
                 let offset = addr - 0x30000;
+                if let Some(ref hw) = self.wifi_hw {
+                    match offset {
+                        0x101C => return hw.bbp_read(offset),
+                        0x120.. => return hw.mac_read(offset),
+                        _ => {}
+                    }
+                }
                 self.wifi.read(offset).unwrap_or(0)
             }
             Region::Gpio | Region::Adc | Region::Alnk | Region::Irqc2 | Region::Uart1 => {
@@ -939,6 +980,21 @@ impl Soc {
 
     #[inline(never)]
     fn write32_slow(&mut self, addr: u32, value: u32) {
+        // --oss-wifi: intercept SDIO, DMA, and wireless control registers
+        if self.wifi_hw.is_some() {
+            match addr {
+                0x50000 | 0x50008 | 0x5000C => { self.wifi_hw.as_mut().unwrap().sdio_write(addr, value); return; }
+                0x40200..=0x4029C => {
+                    let offset = addr - 0x40000;
+                    let mut hw = self.wifi_hw.take().unwrap();
+                    hw.dma_write(offset, value, &mut self.ram);
+                    self.wifi_hw = Some(hw);
+                    return;
+                }
+                0x14028..=0x1405C => { self.wifi_hw.as_mut().unwrap().wl_ctrl_write(addr, value); return; }
+                _ => {}
+            }
+        }
         match self.region(addr) {
             Region::Xip | Region::XipFlash => self.log_unknown(addr, 4, true, value), // flash writes go via the ROM
             Region::Ram => self.ram.write32(addr - RAM_BASE, value),
@@ -998,6 +1054,13 @@ impl Soc {
             }
             Region::Wifi => {
                 let offset = addr - 0x30000;
+                if self.wifi_hw.is_some() {
+                    match offset {
+                        0x101C => { self.wifi_hw.as_mut().unwrap().bbp_write(offset, value); return; }
+                        0x120.. => { self.wifi_hw.as_mut().unwrap().mac_write(offset, value); return; }
+                        _ => {}
+                    }
+                }
                 self.wifi.write(offset, value);
             }
             Region::Clk => {
@@ -1433,6 +1496,164 @@ mod tests {
         assert!(rx_len > 0, "RX frame should have nonzero length");
 
         assert_eq!(soc.wifi.vnet.stats.dhcp_acks, 1);
+    }
+
+    /// Helper: write a null-terminated string into WiFi mailbox SSID/pass register words.
+    fn wifi_write_str(soc: &mut Soc, base_offset: u32, s: &str) {
+        let mut buf = [0u8; 32];
+        for (i, b) in s.bytes().enumerate() {
+            if i < 32 { buf[i] = b; }
+        }
+        for word in 0..8u32 {
+            let off = (word * 4) as usize;
+            let mut v = 0u32;
+            for j in 0..4 {
+                if off + j < 32 {
+                    v |= (buf[off + j] as u32) << (j * 8);
+                }
+            }
+            soc.write32(base_offset + word * 4, v);
+        }
+    }
+
+    /// Helper: boot WiFi to WIFI_ON state (past auto-join of "Home").
+    fn wifi_boot_to_on(soc: &mut Soc) {
+        soc.write32(0x30084, 0);    // TICK_MS
+        soc.write32(0x30000, 1);    // CMD_ON
+        soc.write32(0x30084, 501);  // past START_MS → auto-join "Home"
+        soc.write32(0x30084, 1502); // past JOIN_MS → WIFI_ADDRESS
+        soc.write32(0x30084, 2003); // past ADDR_MS → WIFI_CONNECTED
+    }
+
+    #[test]
+    fn wifi_join_open_ap_without_password() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.wifi.vnet.nat = None;
+        wifi_boot_to_on(&mut soc);
+        assert_eq!(soc.read32(0x30004), 6); // WIFI_CONNECTED to "Home"
+
+        // disconnect and join "Cafe" (open) with no password
+        soc.write32(0x30000, 2); // CMD_OFF
+        soc.write32(0x30084, 3000);
+        soc.write32(0x30000, 1); // CMD_ON
+        soc.write32(0x30084, 3501); // past START_MS
+
+        wifi_write_str(&mut soc, 0x30044, "Cafe"); // JOIN_SSID
+        wifi_write_str(&mut soc, 0x30064, "");      // JOIN_PASS (empty)
+        soc.write32(0x30000, 4); // CMD_JOIN
+        assert!(soc.read32(0x30004) >= 4, "should be JOINING or later");
+
+        soc.write32(0x30084, 4502); // past JOIN_MS
+        soc.write32(0x30084, 5003); // past ADDR_MS
+        assert_eq!(soc.read32(0x30004), 6); // WIFI_CONNECTED
+    }
+
+    #[test]
+    fn wifi_join_wpa2_correct_password() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.wifi.vnet.nat = None;
+        wifi_boot_to_on(&mut soc);
+
+        // disconnect and rejoin "Home" with correct WPA2 password
+        soc.write32(0x30000, 2); // CMD_OFF
+        soc.write32(0x30084, 3000);
+        soc.write32(0x30000, 1); // CMD_ON
+        soc.write32(0x30084, 3501);
+
+        wifi_write_str(&mut soc, 0x30044, "Home");
+        wifi_write_str(&mut soc, 0x30064, "fm1pass");
+        soc.write32(0x30000, 4); // CMD_JOIN
+        assert!(soc.read32(0x30004) >= 4);
+
+        soc.write32(0x30084, 4502);
+        soc.write32(0x30084, 5003);
+        assert_eq!(soc.read32(0x30004), 6); // WIFI_CONNECTED
+    }
+
+    #[test]
+    fn wifi_join_wpa2_wrong_password_rejected() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.wifi.vnet.nat = None;
+        wifi_boot_to_on(&mut soc);
+
+        // forget "Home" so auto-join won't bypass the password check
+        soc.write32(0x300A8, 0); // SAVED_IDX = 0
+        soc.write32(0x30000, 5); // CMD_FORGET
+
+        soc.write32(0x30000, 2); // CMD_OFF
+        soc.write32(0x30084, 3000);
+        soc.write32(0x30000, 1); // CMD_ON
+        soc.write32(0x30084, 3501); // past START_MS → WIFI_ON (no saved networks)
+        assert_eq!(soc.read32(0x30004), 2); // WIFI_ON
+
+        wifi_write_str(&mut soc, 0x30044, "Home");
+        wifi_write_str(&mut soc, 0x30064, "wrongpass");
+        soc.write32(0x30000, 4); // CMD_JOIN
+
+        soc.write32(0x30084, 4502);
+        soc.write32(0x30084, 5003);
+        let state = soc.read32(0x30004);
+        assert!(state <= 2, "wrong password should not reach CONNECTED, got state {}", state);
+    }
+
+    #[test]
+    fn wifi_join_wpa2_no_password_rejected() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.wifi.vnet.nat = None;
+        wifi_boot_to_on(&mut soc);
+
+        // forget "Home" so auto-join won't bypass the password check
+        soc.write32(0x300A8, 0); // SAVED_IDX = 0
+        soc.write32(0x30000, 5); // CMD_FORGET
+
+        soc.write32(0x30000, 2); // CMD_OFF
+        soc.write32(0x30084, 3000);
+        soc.write32(0x30000, 1); // CMD_ON
+        soc.write32(0x30084, 3501); // past START_MS → WIFI_ON
+        assert_eq!(soc.read32(0x30004), 2); // WIFI_ON
+
+        wifi_write_str(&mut soc, 0x30044, "Home");
+        wifi_write_str(&mut soc, 0x30064, "");
+        soc.write32(0x30000, 4); // CMD_JOIN
+
+        soc.write32(0x30084, 4502);
+        soc.write32(0x30084, 5003);
+        let state = soc.read32(0x30004);
+        assert!(state <= 2, "empty password on WPA2 AP should not connect, got state {}", state);
+    }
+
+    #[test]
+    fn oss_wifi_wireless_ctrl_roundtrip() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.enable_oss_wifi();
+
+        // Write/read wireless control registers
+        soc.write32(0x14040, 0x01);
+        assert_eq!(soc.read32(0x14040), 0x01);
+
+        soc.write32(0x1405C, 0x01);
+        assert_eq!(soc.read32(0x1405C), 0x01);
+    }
+
+    #[test]
+    fn oss_wifi_mac_registers() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.enable_oss_wifi();
+
+        // MAC config registers in the WiFi region (offset >= 0x120)
+        soc.write32(0x30308, 0xDEAD);
+        assert_eq!(soc.read32(0x30308), 0xDEAD);
+
+        soc.write32(0x30F00, 0xBEEF);
+        assert_eq!(soc.read32(0x30F00), 0xBEEF);
+
+        // Mailbox still works for low offsets
+        soc.write32(0x30084, 0); // TICK_MS
+        soc.write32(0x30000, 1); // CMD_ON
+        soc.write32(0x30084, 501);
+        soc.write32(0x30084, 1502);
+        soc.write32(0x30084, 2003);
+        assert_eq!(soc.read32(0x30004), 6); // WIFI_CONNECTED via mailbox
     }
 
     /// The BT region dispatches to the right sub-module by offset.
