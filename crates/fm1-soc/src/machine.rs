@@ -94,6 +94,12 @@ impl Bus for Core1Bus<'_> {
     fn service(&mut self) {
         self.budget = self.budget.min(1);
     }
+    fn idle(&mut self, _core: u32) {
+        // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
+        // only once an interrupt from its bank is pending
+        self.soc.cpu1_idle = true;
+        self.budget = self.budget.min(1);
+    }
     fn next_tick_due(&self) -> bool {
         self.budget <= 1
     }
@@ -563,6 +569,7 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
     if !std::mem::take(&mut soc.cpu1_release) && soc.read32(0x10008) & 8 == 0 {
         return None;
     }
+    soc.cpu1_idle = false;
     let entry = soc.read32(0x01C7_FFF8);
     let in_code = (0x0200_0000..0x0300_0000).contains(&entry) || (RAM_BASE..RAM_BASE + ram_size as u32).contains(&entry);
     if std::env::var_os("FM1_DUAL_TRACE").is_some() {
@@ -581,6 +588,13 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> {
     if soc.core_paused(1) || soc.reset_due() {
         return Ok(());
+    }
+    if soc.cpu1_idle {
+        // asleep since its `idle`: on again only with an interrupt from its bank pending
+        if !(soc.periph.any_pending() && soc.pending_irq_for(1).is_some()) {
+            return Ok(());
+        }
+        soc.cpu1_idle = false;
     }
     let probe = (c1.pc, c1.regs, c1.sp);
     let mut left = cycles.min(1 << 20);
@@ -631,6 +645,9 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         probing = probing.saturating_sub(k);
         if soc.reset_due() {
             break; // (cpu1 wrote PR_PWR: `Core1Bus::stop_at_reset`)
+        }
+        if soc.cpu1_idle {
+            break; // asleep (`Core1Bus::idle`)
         }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
@@ -1041,6 +1058,37 @@ mod tests {
             assert_eq!(soc.resets, 1);
             assert!(c1.is_none(), "core 1 held again");
             assert_eq!(soc.read32(RAM_BASE + 0x10000), 0, "core 1 ran on after its reset (jit {jit})");
+        }
+    }
+
+    /// `idle;  *(int *)0x01C10000 = 0x600d;  for (;;);`: core 1 sleeps, then stores a word.
+    const CORE1_IDLE: [u8; 20] = [
+        0x01, 0x00, 0xc0, 0xff, 0x00, 0x00, 0xc1, 0x01, 0x41, 0xe0, 0x0d, 0x60, 0x81, 0x60, 0xf7, 0x9f, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn core_1_sleeps_on_idle_until_an_interrupt_from_its_bank_is_pending() {
+        for jit in [false, true] {
+            let (mut cpu, mut c1, mut soc, mut t) = two_cores(&CORE1_IDLE, jit);
+            let mut slices = |c1: &mut Option<Cpu>, soc: &mut Soc, n: usize| {
+                for _ in 0..n {
+                    run_dual(c1, soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+                }
+            };
+            slices(&mut c1, &mut soc, 8);
+            assert!(soc.cpu1_idle, "asleep after idle (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0, "ran on past idle (jit {jit})");
+            // a software interrupt (ILAT bit 0, IRQ 120) enabled for cpu0's bank only: not its
+            soc.write32(0x1eef13c, 0x3);
+            soc.write32(0x1eef1a0, 1);
+            slices(&mut c1, &mut soc, 8);
+            assert!(soc.cpu1_idle, "woke on an interrupt of the other core's bank (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0);
+            // enabled in its own bank (0x1EEF300): it wakes and goes on after the idle
+            soc.write32(0x1eef33c, 0x3);
+            slices(&mut c1, &mut soc, 8);
+            assert!(!soc.cpu1_idle, "still asleep (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0x600d, "did not go on after the idle (jit {jit})");
         }
     }
 

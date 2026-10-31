@@ -67,7 +67,10 @@ cpu1 starts when cpu0 sets `0x10008` bit 3 (latched at the write: X0X and Melode
 only briefly), at the word in `0x01C7FFF8`. It has no clock of its own: cpu0 runs in slices of
 1024 instructions, then cpu1 may run as many instructions as cycles passed (idle skips included),
 through `Core1Bus`, whose tick budget stops interpreted and compiled code alike. It stops early
-when it is back at the same pc with the same registers (a job loop with nothing to do). Compiled
+when it is back at the same pc with the same registers (a job loop with nothing to do). A core 1
+that runs `idle` sleeps until an interrupt from its own bank (`0x1EEF300`) is pending, as the
+chip's does (before, `idle` did nothing on core 1, and a core that idles and feeds the watchdog
+each round, Bubba Machine's, cost as much as a busy one). Compiled
 code is capped to a slice (`Periph::room_cap`): unbounded, a JIT loop waiting on cpu1 ran for up
 to 2^30 instructions before cpu1 ran at all. `fm1-live` and the browser build share this code;
 `fm1-emu` interleaves the cores instruction by instruction.
