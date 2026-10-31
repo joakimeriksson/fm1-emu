@@ -279,6 +279,18 @@ tools/build_plugin.sh
 This builds the plugin and installs `FM-1.component`, `FM-1.vst3` and `FM-1.clap` in
 `~/Library/Audio/Plug-Ins`. It then runs Apple's AU validator on them.
 
+**Build and install it yourself (Windows, x86-64).** You need Rust (MSVC), Visual Studio Build
+Tools with the C++ workload, CMake and git, then:
+
+```powershell
+tools\build_plugin.ps1
+```
+
+This builds `FM-1.vst3` and `FM-1.clap` and installs them in `%LOCALAPPDATA%\Programs\Common`
+(`VST3` and `CLAP`). The two go together: the VST3 loads the CLAP from the CLAP folder.
+[crates/fm1-plugin](crates/fm1-plugin/README.md) has the details, and where to put them for a
+DAW that only scans `C:\Program Files\Common Files`.
+
 **In GarageBand:**
 1. *Settings → Audio/MIDI*: tick *Enable Audio Units*, then quit and reopen GarageBand.
 2. Make a *Software Instrument* track and open its Smart Controls (**B**).
@@ -301,7 +313,8 @@ including Apple's AudioUnitSDK and Steinberg's VST3 SDK, which is MIT since 3.8.
 - GarageBand, as an AU;
 - Steinberg's VST3 test host.
 
-Logic, Ableton and the Windows / Linux builds haven't been tried yet. More in
+On Windows the VST3 passes Steinberg's validator too (47 of 47), but no Windows DAW has been
+tried yet. Logic, Ableton and the Linux build haven't been tried either. More in
 [crates/fm1-plugin](crates/fm1-plugin/README.md).
 
 ## How it works
