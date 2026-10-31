@@ -24,7 +24,8 @@ const USAGE: &str = "usage: fm1-emu --bin APP.bin | --fwsc FIRMWARE.fwsc [option
 run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 0x02000000]
        [--steps N (5000000)] [--ms MS] [--ram BYTES (1048576, at most 4194304)] [--quiet]
        [--flaky-core1 RATE [--seed N]]
-input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms)
+input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
+        the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
 out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
 debug: [--trace K (the first K instructions)]
        [--break-pc ADDR (registers at each hit)] [--watch ADDR (each change of a word)]
@@ -1059,7 +1060,8 @@ fn parse_key_script(item: &str) -> Option<Vec<(u64, fm1_soc::Action)>> {
         let clicks: i32 = arg?.trim_start_matches('+').parse().ok()?;
         return Some(vec![(t0, Action::Enc { enc, clicks })]);
     }
-    let id = fm1_soc::periph::key_id(what)?;
+    // the FM-1's names, then the SMK-37's (its keys are `k0`..`k36` on both)
+    let id = fm1_soc::periph::key_id(what).or_else(|| fm1_soc::smk::key_id(what))?;
     let up = t1.unwrap_or(t0 + 150);
     Some(vec![(t0, Action::Key { id, down: true }), (up, Action::Key { id, down: false })])
 }

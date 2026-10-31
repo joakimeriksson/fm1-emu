@@ -37,8 +37,9 @@ const norm = (u) => (u || "").toLowerCase().replace(/\/$/, "").replace(/\/tree\/
 const firmwares = [{
   id: "stock", name: "M-VAVE stock firmware", version: "016", author: "M-VAVE", license: "M-VAVE's own", byo: true,
   about: "The firmware the SMK-37 Pro ships with: a MIDI controller. Its screen, buttons, pads and keys work (PATCH, " +
-    "then a chord: it names it), but no sound comes out here (its notes go to USB and Bluetooth MIDI, not emulated), " +
-    "and it runs at about 0.6x real time in the browser so far. This page does not host it and cannot download it: " +
+    "then a chord: it names it), and with PATCH on the keys play its DX7 synth (this emulator's own small bank: the " +
+    "factory patches are not in the package; its notes also go to USB and Bluetooth MIDI, not emulated). It runs at " +
+    "about 0.6x real time in the browser so far. This page does not host it and cannot download it: " +
     "download SMK-37 Pro_016.fwsc from M-VAVE, then open it here.",
   download: "https://yms-file-store.oss-cn-hongkong.aliyuncs.com/software/firmware/SMK-37Pro/SMK-37%20Pro_016.fwsc",
   repo: "https://github.com/genkigenki/fm1-to-smk37",
