@@ -2398,7 +2398,7 @@ impl Cpu {
             }
         };
         match s {
-            "nop" | "csync" | "lockclr" | "lockset" | "pfetch [R]"
+            "nop" | "csync" | "pfetch [R]"
             | "sti R" | "cli R" => {}
             // the core halts until an interrupt: the bus may let time pass
             "idle" => bus.idle(self.core_id),
@@ -2665,7 +2665,10 @@ impl Cpu {
                 // lockset / lockclr: the hardware lock the cores share (the stock RTOS takes
                 // it around every kernel critical section; with both cores running, a no-op
                 // let a task be queued on a wait list twice). Held by the other core: retry.
-                if !bus.hw_lock(self.core_id, name == "lockset_r") {
+                // (The table names them `lockset` / `lockclr`; spelled `lockset_r` here, this
+                // arm never ran and both fell through to the syntax executor's no-ops: FreeRTOS
+                // SMP in Bubba Machine then corrupted its lists at the first contention.)
+                if !bus.hw_lock(self.core_id, name == "lockset") {
                     jumped = Some(self.pc);
                 }
             }
@@ -4566,6 +4569,35 @@ mod tests {
     }
 
     #[test]
+    fn lockset_retries_while_the_other_core_holds_it() {
+        // `41 00` = lockset, `40 00` = lockclr: the cores' hardware lock (`Bus::hw_lock`). Held
+        // by the other core, lockset retries (the pc stays); granted, it goes on; lockclr
+        // releases. (The ISA table names them `lockset` / `lockclr`: a route that spelled them
+        // `lockset_r` / `lockclr_r` never matched, and both ran as no-ops: no lock at all.)
+        struct LockRam { mem: Vec<u8>, grant: bool, calls: Vec<(u32, bool)> }
+        impl Bus for LockRam {
+            fn read8(&mut self, a: u32) -> u8 { *self.mem.get(a as usize).unwrap_or(&0) }
+            fn read16(&mut self, a: u32) -> u16 { u16::from_le_bytes([self.read8(a), self.read8(a + 1)]) }
+            fn read32(&mut self, a: u32) -> u32 { u32::from_le_bytes([self.read8(a), self.read8(a + 1), self.read8(a + 2), self.read8(a + 3)]) }
+            fn write8(&mut self, a: u32, v: u8) { if (a as usize) < self.mem.len() { self.mem[a as usize] = v; } }
+            fn write16(&mut self, a: u32, v: u16) { for (i, b) in v.to_le_bytes().iter().enumerate() { self.write8(a + i as u32, *b); } }
+            fn write32(&mut self, a: u32, v: u32) { for (i, b) in v.to_le_bytes().iter().enumerate() { self.write8(a + i as u32, *b); } }
+            fn hw_lock(&mut self, core: u32, set: bool) -> bool { self.calls.push((core, set)); !set || self.grant }
+        }
+        let mut ram = LockRam { mem: vec![0x41, 0x00, 0x40, 0x00, 0, 0, 0, 0], grant: false, calls: vec![] };
+        let mut cpu = Cpu::new(0);
+        cpu.core_id = 1;
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.pc, 0, "held by the other core: lockset retries");
+        ram.grant = true;
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.pc, 2, "granted: on to the next instruction");
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.pc, 4, "lockclr");
+        assert_eq!(ram.calls, vec![(1, true), (1, true), (1, false)]);
+    }
+
+    #[test]
     fn composed_matches_observed_table() {
         for (code, m, v) in MOV_H_TABLE {
             assert_eq!(
@@ -6328,7 +6360,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             _ if bittest.is_some() => 0,
             _ if alu4.is_some() => 1,
             "nop" | "csync" | "sti_r" | "cli_r" => 2,
-            "lockclr_r" | "lockset_r" => 3,
+            "lockclr" | "lockset" => 3,
             "r_mov_i_l2" => 4,
             "sp_mov_i" => 5,
             "ssp_mov_i" => 6,
