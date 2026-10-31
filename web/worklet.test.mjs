@@ -202,3 +202,23 @@ test('once audio plays a quantum may run 1.5 quanta; the worst quantum counts on
   off.render(); off.render();
   assert.deepEqual(seen, [240e6 * 0.02, 240e6 * 0.02]);
 });
+
+test("a try-out's sectors and input script are installed before the first quantum", async () => {
+  const h = harness(), x = h.p.x, calls = [];
+  let next = 1000;
+  Object.assign(x, { fm1_alloc: (n) => { const p = next; next += n + 8; return p; }, fm1_jit() {}, fm1_boot_fwsc: () => 0,
+    fm1_board: () => 0, fm1_flash_base: () => 140000,
+    fm1_flash_restore(p, n) { calls.push(['flash', n]); return 0; },
+    fm1_bench_script(p, n) { calls.push(['script', new TextDecoder().decode(new Uint8Array(x.memory.buffer, p, n))]); return 0; } });
+  h.p.module = {};
+  h.context.WebAssembly = { instantiate: async () => ({ exports: x }) };
+  const script = new TextEncoder().encode('1500:mf07d4842f7');
+  await h.p.port.onmessage({ data: { type: 'boot', seq: 2, mhz: 100, package: new Uint8Array(960).buffer,
+    sectors: new Uint8Array(4100).buffer, script: script.buffer } });
+  assert.deepEqual(calls, [['flash', 4100], ['script', '1500:mf07d4842f7']]);
+  assert.ok(h.messages.some(m => m.type === 'booted' && m.seq === 2));
+  // a build without scheduled inputs refuses a script rather than booting without it
+  delete x.fm1_bench_script;
+  await h.p.port.onmessage({ data: { type: 'boot', seq: 3, mhz: 100, package: new Uint8Array(960).buffer, script: script.buffer } });
+  assert.ok(h.messages.some(m => m.type === 'error' && m.seq === 3 && /input script/.test(m.message)));
+});
