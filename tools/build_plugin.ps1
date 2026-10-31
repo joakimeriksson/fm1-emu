@@ -21,8 +21,9 @@ Pop-Location
 $clap = Join-Path $out 'FM-1.clap'
 Copy-Item crates\fm1-plugin\target\release\fm1_plugin.dll $clap -Force
 
-# the VST3 around it (the Visual Studio generator finds the Build Tools by itself)
-cmake -S crates\fm1-plugin\wrap -B "$out\build" -G "Visual Studio 17 2022" -A x64 -DFM1_CLAP="$clap"
+# the VST3 around it (CMake's default generator on Windows is the newest Visual Studio it finds,
+# Build Tools included: 2022 here, 2026 on GitHub's windows-latest, so no version is named)
+cmake -S crates\fm1-plugin\wrap -B "$out\build" -A x64 -DFM1_CLAP="$clap"
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 cmake --build "$out\build" --config Release
 if ($LASTEXITCODE) { exit $LASTEXITCODE }

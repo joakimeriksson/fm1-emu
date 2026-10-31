@@ -68,8 +68,8 @@ winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait
 ```
 
 The script builds the CLAP (the cdylib, `fm1_plugin.dll`, is `FM-1.clap`), then the VST3 around
-it with clap-wrapper (the Visual Studio generator finds the Build Tools by itself; the SDKs are
-downloaded on the first run). It installs both in the per-user plugin folders, no administrator
+it with clap-wrapper (CMake picks the newest Visual Studio it finds, the Build Tools included, so
+no vcvars is needed; the SDKs are downloaded on the first run). It installs both in the per-user plugin folders, no administrator
 needed: `%LOCALAPPDATA%\Programs\Common\VST3\FM-1.vst3` and `…\Common\CLAP\FM-1.clap`. Set
 `$env:NO_INSTALL = 1` to only build them, into `target\plugin\`.
 
@@ -85,7 +85,7 @@ settings get the per-user folder added to the plugin paths.
 lets it find the CLAP that was built but not installed:
 
 ```powershell
-cmake -S target\plugin\build\cpm\vst3sdk -B target\plugin\vst3sdk-build -G "Visual Studio 17 2022" -A x64 `
+cmake -S target\plugin\build\cpm\vst3sdk -B target\plugin\vst3sdk-build -A x64 `
   -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON
 cmake --build target\plugin\vst3sdk-build --config Release --target validator
 $env:CLAP_PATH = "$PWD\target\plugin"
