@@ -70,7 +70,12 @@ through `Core1Bus`, whose tick budget stops interpreted and compiled code alike.
 when it is back at the same pc with the same registers (a job loop with nothing to do). A core 1
 that runs `idle` sleeps until an interrupt from its own bank (`0x1EEF300`) is pending, as the
 chip's does (before, `idle` did nothing on core 1, and a core that idles and feeds the watchdog
-each round, Bubba Machine's, cost as much as a busy one). Compiled
+each round, Bubba Machine's, cost as much as a busy one). A fault on core 1 halts the machine,
+as any fault: most are the emulator's own gaps, which a halt shows. With `--cpu1-survives`
+(`Soc::cpu1_survives`; `fm1_cpu1_survives` for a page) core 1 stops alone and cpu0 goes on, as
+the chip's would, for a firmware whose core 1 fails on the chip too (COSMOS 0.23's package sends
+it into erased flash; felucca-bsp's `cpu2_fallback` is built for that); `fm1_cpu1_fault` says
+it happened. Compiled
 code is capped to a slice (`Periph::room_cap`): unbounded, a JIT loop waiting on cpu1 ran for up
 to 2^30 instructions before cpu1 ran at all. `fm1-live` and the browser build share this code;
 `fm1-emu` interleaves the cores instruction by instruction.
