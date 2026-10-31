@@ -46,6 +46,14 @@ M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the 
 are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
 too; `&embed=1` shows only the device and its controls, for a window on another site.)
+A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash
+sectors over the package's fresh flash (records of a 4-byte little-endian offset and the 4096-byte
+sector, as the saves keep them), `&script=PATH` plays an input script from the boot (fm1-live's
+`FM1_BENCH_KEYS`: `ms:mHEX` MIDI into the DIN jack, `ms:id` keys, `ms:eN:clicks` encoders). Both
+come from the page's own origin only, the try-out starts by itself where the browser lets it, and
+it is a session of its own: the browser's saved flash is neither loaded nor overwritten. fm1-dock's
+catalog uses it for its "Try it": a module installed and picked
+([fm1-dock's tools/tryit.py](https://github.com/joakimeriksson/fm1-dock/blob/main/tools/tryit.py)).
 
 <!-- firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
