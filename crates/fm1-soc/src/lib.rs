@@ -236,6 +236,11 @@ pub struct Soc {
     /// core 1 was released once: a later run on 0x1EEE004 is the stock IPC's resume after a
     /// pause, not a release, and a later 0 -> 1 of 0x10008 bit 3 latches nothing (core 1 runs on).
     cpu1_released_once: bool,
+    /// core 1 ran `idle`: it sleeps until an interrupt from its own bank is pending, as the
+    /// chip's core does (`machine::run_cpu1` leaves it be meanwhile; before this its `idle`
+    /// did nothing, and a core 1 that idles and feeds the watchdog each round, Bubba
+    /// Machine's, cost as much as a busy one).
+    pub cpu1_idle: bool,
     /// FM1_AUDIO_TRACE: log each audio half-buffer (debugging the DMA's pace).
     audio_trace: bool,
     /// The CRC-16 unit's register (0x13504).
@@ -403,6 +408,7 @@ impl Soc {
             rand: 0x9e37_79b9_7f4a_7c15,
             cpu1_release: false,
             cpu1_released_once: false,
+            cpu1_idle: false,
             audio_trace: std::env::var_os("FM1_AUDIO_TRACE").is_some(),
             xip_flash: true,
             sfc_key: None,
@@ -472,6 +478,7 @@ impl Soc {
         }
         self.usb.keep_recording(&mut old); // (a computer's recording goes on across the reset)
         (self.paused, self.lock_owner, self.cpu1_release, self.cpu1_released_once, self.crc) = ([false; 2], None, false, false, 0);
+        self.cpu1_idle = false;
         self.flash.chip_reset();
         cpu.set_plain_state(&boot.cpu);
         self.sfr_lo.clone_from(&boot.sfr_lo);
@@ -846,6 +853,8 @@ impl Bus for Soc {
     fn idle(&mut self, core: u32) {
         if core == 0 {
             self.periph.idle();
+        } else {
+            self.cpu1_idle = true; // (a runner stepping core 1 against the SoC: fm1-emu's)
         }
     }
 

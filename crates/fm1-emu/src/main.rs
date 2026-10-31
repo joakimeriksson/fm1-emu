@@ -525,6 +525,13 @@ fn main() -> ExitCode {
                 }
                 continue;
             }
+            if cpu.core_id == 1 && soc.cpu1_idle {
+                // asleep since its `idle`, until an interrupt from its bank is pending
+                if soc.pending_irq_for(1).is_none() {
+                    continue;
+                }
+                soc.cpu1_idle = false;
+            }
             if (Some(cpu.pc) == args.break_pc || extra_breaks.contains(&cpu.pc)) && break_hits < break_max {
                 break_hits += 1;
                 println!("break c{} pc={:#010x} [{}] sp={:#010x} rets={:#010x} irq_levels={:?} r0-11={:x?}", cpu.core_id, cpu.pc, total_steps, cpu.sp, cpu.rets, cpu.irq_levels, &cpu.regs[..12]);

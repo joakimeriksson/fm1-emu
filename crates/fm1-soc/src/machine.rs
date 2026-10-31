@@ -94,6 +94,12 @@ impl Bus for Core1Bus<'_> {
     fn service(&mut self) {
         self.budget = self.budget.min(1);
     }
+    fn idle(&mut self, _core: u32) {
+        // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
+        // only once an interrupt from its bank is pending
+        self.soc.cpu1_idle = true;
+        self.budget = self.budget.min(1);
+    }
     fn next_tick_due(&self) -> bool {
         self.budget <= 1
     }
@@ -563,6 +569,7 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
     if !std::mem::take(&mut soc.cpu1_release) && soc.read32(0x10008) & 8 == 0 {
         return None;
     }
+    soc.cpu1_idle = false;
     let entry = soc.read32(0x01C7_FFF8);
     let in_code = (0x0200_0000..0x0300_0000).contains(&entry) || (RAM_BASE..RAM_BASE + ram_size as u32).contains(&entry);
     if std::env::var_os("FM1_DUAL_TRACE").is_some() {
@@ -581,6 +588,13 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> {
     if soc.core_paused(1) || soc.reset_due() {
         return Ok(());
+    }
+    if soc.cpu1_idle {
+        // asleep since its `idle`: on again only with an interrupt from its bank pending
+        if !(soc.periph.any_pending() && soc.pending_irq_for(1).is_some()) {
+            return Ok(());
+        }
+        soc.cpu1_idle = false;
     }
     let probe = (c1.pc, c1.regs, c1.sp);
     let mut left = cycles.min(1 << 20);
@@ -631,6 +645,9 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         probing = probing.saturating_sub(k);
         if soc.reset_due() {
             break; // (cpu1 wrote PR_PWR: `Core1Bus::stop_at_reset`)
+        }
+        if soc.cpu1_idle {
+            break; // asleep (`Core1Bus::idle`)
         }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
