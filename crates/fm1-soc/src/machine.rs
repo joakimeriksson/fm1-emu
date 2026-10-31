@@ -566,6 +566,9 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
 /// stock firmware's stub at 0x020001B8 and X0X's entry both put it there; older images
 /// without it: the RAM job loop at 0x01C022B6). It starts in supervisor mode.
 pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
+    if soc.cpu1_fault.is_some() {
+        return None; // (stopped on a fault: held until a chip reset)
+    }
     if !std::mem::take(&mut soc.cpu1_release) && soc.read32(0x10008) & 8 == 0 {
         return None;
     }
@@ -586,7 +589,7 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 /// Run cpu1 for up to `cycles` instructions: interrupts from its own bank, then blocks or
 /// single steps; back where it started with nothing changed means it is idle.
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> {
-    if soc.core_paused(1) || soc.reset_due() {
+    if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
         return Ok(());
     }
     if soc.cpu1_idle {
@@ -733,7 +736,12 @@ fn run_dual_from(
         }
         done += k;
         let dt = soc.periph.cycles - c0;
-        run_cpu1(c1, soc, dt)?;
+        if let Err(e) = run_cpu1(c1, soc, dt) {
+            // the chip's core 1 faults there and stops; cpu0 goes on alone (a firmware built
+            // for a core 1 that fails falls back to one core: felucca-bsp's cpu2_fallback)
+            eprintln!("cpu1 stopped at {} ms: {e} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms());
+            soc.cpu1_fault = Some(e);
+        }
     }
     Ok(done)
 }

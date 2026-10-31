@@ -239,7 +239,7 @@ class Fm1 extends AudioWorkletProcessor {
       // Report the preceding interval: its final postMessage is included in its timing.
       const ms = x.fm1_ms(), idle = x.fm1_idle_ms?.() ?? 0;
       this.port.postMessage({ type: "frame", seq: this.seq, lcd, leds, ms,
-        short: this.short, halted: x.fm1_halted(), jit: this.jit, pads, playing: this.playing,
+        short: this.short, halted: x.fm1_halted(), cpu1Fault: x.fm1_cpu1_fault?.() ?? 0, jit: this.jit, pads, playing: this.playing,
         busy: this.lastTiming?.busy ?? 0, worst: this.lastTiming?.worst ?? 0,
         emulated: this.lastTiming?.emulated ?? 0, idle: this.lastTiming?.idle ?? 0,
         quanta: this.lastTiming?.quanta ?? 0, frames: this.lastTiming?.frames ?? n }, transfer);
