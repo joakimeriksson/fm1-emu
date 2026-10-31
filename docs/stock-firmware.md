@@ -63,7 +63,11 @@ only briefly), at the word in `0x01C7FFF8`. It has no clock of its own: cpu0 run
 through `Core1Bus`, whose tick budget stops interpreted and compiled code alike. It stops early
 when it is back at the same pc with the same registers (a job loop with nothing to do). Compiled
 code is capped to a slice (`Periph::room_cap`): unbounded, a JIT loop waiting on cpu1 ran for up
-to 2^30 instructions before cpu1 ran at all. `fm1-live` and the browser build share this code;
+to 2^30 instructions before cpu1 ran at all. A core that finds a lock held (`lockset` denied, a
+`testset` on a taken byte: `Soc::waits`) hands the machine over rather than spinning its slice
+out: cpu1 ends its run, cpu0 ends its slice and cpu1 runs on while it holds the lock, the clock
+moving for cpu0's retries (Bubba Machine's FreeRTOS SMP takes the hardware lock around every
+critical section: 3x faster with this). `fm1-live` and the browser build share this code;
 `fm1-emu` interleaves the cores instruction by instruction.
 
 Users: the stock firmware (synth rendering on cpu1), X0X, Melodee 1.0.1, ChoralRoot. With two
