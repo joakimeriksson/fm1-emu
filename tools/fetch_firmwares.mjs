@@ -3,8 +3,10 @@
 // 0x120 bytes of padding, loaded at 0x02000120). Same download and unpacking as the web page.
 //   node tools/fetch_firmwares.mjs [id ...]
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 const { appFromPackage, fetchPackage } = await import(new URL("../web/fwsc.js", import.meta.url));
-const root = new URL("..", import.meta.url).pathname;
+// (a path, not URL.pathname: that keeps a leading slash before the drive letter on Windows)
+const root = fileURLToPath(new URL("../", import.meta.url));
 const cat = JSON.parse(readFileSync(root + "web/firmwares.json"));
 const want = new Set(process.argv.slice(2));
 mkdirSync(root + "reference/firmwares", { recursive: true });
