@@ -27,12 +27,12 @@
     {
       "id": "fm1dock",
       "name": "fm1-dock",
-      "version": "0.5",
+      "version": "0.7",
       "author": "joakimeriksson",
       "license": "GPL-3.0",
-      "about": "One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. Deploy more modules over USB (FM-1 SID among them) and debug them from its page's console. Formerly harbor.",
+      "about": "One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. Add FM-106, MONK-1, FiMba-1, GATOR, DUB-1, FM-1 SID, AMB-1 or FoMni from its page with one click; Bluetooth MIDI with both cores, a master EQ, MIDI options. Formerly harbor.",
       "repo": "https://github.com/joakimeriksson/fm1-dock",
-      "package": "https://joakimeriksson.github.io/fm1-dock/fm1-dock-0.5.fwsc"
+      "package": "https://joakimeriksson.github.io/fm1-dock/fm1-dock-0.7.fwsc"
     },
     {
       "id": "fm1doom",
