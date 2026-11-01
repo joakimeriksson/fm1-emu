@@ -341,6 +341,26 @@ impl PlainState {
     }
 }
 
+/// The decoded-instruction cache (`Cpu::fetch_at`) and the block map (`Cpu::block_at`) are
+/// direct-mapped on the halfword index: 256K lines cover 512 KiB of XIP code without aliasing
+/// (Felucca's image is 441 KiB; 64K lines re-decoded ~1M times per 6 s). Code below the XIP window
+/// (RAM: ISRs, flash drivers, a firmware's hot loop) has 64K lines of its own after them, so a
+/// RAM line and an XIP line never share a slot: with one map for both, Ravel's spin loop in RAM
+/// and the XIP code at the same slot evicted each other 54K times in 8 s, and in the wasm JIT
+/// each line decoded anew was a block made anew and a region compiled anew, without end.
+const ICACHE_BITS: u32 = 18;
+const ICACHE_RAM_BITS: u32 = 16;
+const ICACHE_LINES: usize = (1 << ICACHE_BITS) + (1 << ICACHE_RAM_BITS);
+
+#[inline(always)]
+fn icache_slot(pc: u32) -> usize {
+    if pc < 0x0200_0000 {
+        (1 << ICACHE_BITS) + ((pc >> 1) & ((1 << ICACHE_RAM_BITS) - 1)) as usize
+    } else {
+        ((pc >> 1) & ((1 << ICACHE_BITS) - 1)) as usize
+    }
+}
+
 impl Cpu {
     /// The core's state when it is plain: no pair in flight, no predicated block, no repeat
     /// loop, no interrupt in progress, no glued pair cut (None otherwise).
@@ -475,14 +495,11 @@ impl Cpu {
     }
 
     fn fetch_at<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<usize, CoreError> {
-        // 256K lines cover 512 KiB of code without aliasing (Felucca's
-        // image is 441 KiB; 64K lines re-decoded ~1M times per 6 s)
-        const BITS: u32 = 18;
         if self.icache.is_empty() {
-            self.icache = vec![Line::EMPTY; 1 << BITS];
-            self.icache_x = vec![None; 1 << BITS];
+            self.icache = vec![Line::EMPTY; ICACHE_LINES];
+            self.icache_x = vec![None; ICACHE_LINES];
         }
-        let slot = ((pc >> 1) & ((1 << BITS) - 1)) as usize;
+        let slot = icache_slot(pc);
         let hit = self.icache[slot].pc == pc;
         if hit && (0x0200_0000..0x0400_0000).contains(&pc) {
             return Ok(slot);
@@ -490,8 +507,14 @@ impl Cpu {
         let lo = bus.fetch32(pc) as u64;
         let hi = bus.fetch32(pc + 4) as u64;
         let win = (hi << 32) | lo;
-        if hit && self.icache_x[slot].map_or(false, |x| x.win == win) {
-            return Ok(slot);
+        // (RAM code: the line stands while the instruction's own bytes do; the rest of the window
+        // may be data a short instruction sits next to, which changing must not cost a decode)
+        if hit {
+            let len = self.icache[slot].len as u32;
+            let mask = if len >= 8 { u64::MAX } else { (1u64 << (8 * len)) - 1 };
+            if self.icache_x[slot].map_or(false, |x| (x.win ^ win) & mask == 0) {
+                return Ok(slot);
+            }
         }
         self.decodes += 1;
         let insn = decode_any(win, pc).map_err(CoreError::Decode)?;
@@ -1017,7 +1040,7 @@ impl Cpu {
             return Ok(None);
         }
         if !self.bmap.is_empty() {
-            let id = self.bmap[(pc >> 1) as usize & (self.bmap.len() - 1)];
+            let id = self.bmap[icache_slot(pc)];
             if id != 0 {
                 let (bpc, start, len) = self.blocks[id as usize - 1];
                 if bpc == pc && (xip || self.ram_block_ok(bus, id as usize - 1)) {
@@ -1196,7 +1219,7 @@ impl Cpu {
         if self.bmap.is_empty() || (!ram_tracked && !(0x0200_0000..0x0400_0000).contains(&pc)) {
             return None;
         }
-        let id = self.bmap[(pc >> 1) as usize & (self.bmap.len() - 1)];
+        let id = self.bmap[icache_slot(pc)];
         if id == 0 || self.blocks[id as usize - 1].0 != pc {
             return None;
         }
@@ -1205,9 +1228,8 @@ impl Cpu {
 
     #[inline(never)]
     fn build_block<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<Option<(usize, u32, u32)>, CoreError> {
-        const BITS: u32 = 18;
         if self.bmap.is_empty() {
-            self.bmap = vec![0; 1 << BITS];
+            self.bmap = vec![0; ICACHE_LINES];
         }
         if self.bops.len() > 1 << 22 {
             // (cannot happen for one image, but never grow without bound)
@@ -1286,7 +1308,7 @@ impl Cpu {
             self.bver.resize(self.blocks.len() - 1, u64::MAX);
             self.bver.push(bus.code_writes().unwrap_or(u64::MAX));
         }
-        let slot = (pc >> 1) as usize & ((1 << BITS) - 1);
+        let slot = icache_slot(pc);
         self.bmap[slot] = self.blocks.len() as u32;
         Ok(if len == 0 { None } else { Some((self.blocks.len() - 1, start, len)) })
     }
