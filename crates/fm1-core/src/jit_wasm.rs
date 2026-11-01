@@ -42,8 +42,8 @@ pub static COMPILE_BUDGET: AtomicU32 = AtomicU32::new(u32::MAX);
 const HOT: u32 = 32;
 
 /// Most blocks / instructions in one region (Safari's top tier skips very large functions).
-pub(crate) const REGION_BLOCKS: usize = 32;
-pub(crate) const REGION_OPS: usize = 384;
+pub(crate) const REGION_BLOCKS: usize = 96;
+pub(crate) const REGION_OPS: usize = 1152;
 
 #[derive(Clone, Copy)]
 enum Entry {
