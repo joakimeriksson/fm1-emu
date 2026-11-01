@@ -448,10 +448,12 @@ impl Cpu {
         #[cfg(target_arch = "wasm32")]
         let exits = {
             let names = jit_wasm::EXIT_NAMES;
+            let (regions, drops, resets, blocks, compiled) = self.wjit.as_ref().map_or((0, 0, 0, 0, 0), |j| (j.regions, j.drops, j.resets, j.blocks, j.compiled_blocks()));
+            let (bytes, bytes_max) = self.wjit.as_ref().map_or((0, 0), |j| (j.bytes, j.bytes_max));
             let e = names.iter().zip(self.exit_hist).filter(|(_, n)| *n > 0).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
             let i = names.iter().zip(self.exit_insns).filter(|(_, n)| *n > 0).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
             let m = ["ld_ram", "ld_xip", "ld_bus", "st_ram", "st_code", "st_bus"].iter().zip(self.mem_hist).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
-            format!(",\"exits\":{{{e}}},\"exit_insns\":{{{i}}},\"mem\":{{{m}}}")
+            format!(",\"exits\":{{{e}}},\"exit_insns\":{{{i}}},\"mem\":{{{m}}},\"regions\":{regions},\"bytes\":{bytes},\"bytes_max\":{bytes_max},\"drops\":{drops},\"resets\":{resets},\"region_blocks\":{blocks},\"compiled_blocks\":{compiled}")
         };
         #[cfg(not(target_arch = "wasm32"))]
         let exits = String::new();
@@ -1177,6 +1179,11 @@ impl Cpu {
                 continue;
             }
             let Ok(Some((bid, start, len))) = self.block_at(bus, pc) else { continue };
+            // (a block the loop never ran: likely cold, left out; one compiled already: the
+            // region's exit chains into its region. Either gets a region of its own if it turns hot)
+            if !out.is_empty() && self.wjit.as_ref().is_some_and(|j| j.never_ran(bid) || j.compiled(bid)) {
+                continue;
+            }
             let all = &self.bops[start as usize..(start + len) as usize];
             let mut ops: Vec<BOp> = all.iter().take_while(|o| !o.careful).copied().collect();
             let (all_len, tail) = (all.len(), all.get(ops.len()).copied());

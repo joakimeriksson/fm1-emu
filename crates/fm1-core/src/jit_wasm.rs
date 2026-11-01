@@ -61,6 +61,14 @@ pub struct Jit {
     pub(crate) rinfo: Vec<(Box<[usize]>, u64)>,
     pub regions: u32,
     pub bytes: usize,
+    /// the largest region module
+    pub bytes_max: usize,
+    /// regions dropped for RAM code that changed, and resets (the block table rebuilt)
+    pub drops: u32,
+    pub resets: u32,
+    /// blocks compiled into regions, all told (with the copies: a block reachable from several
+    /// hot blocks is in each one's region)
+    pub blocks: u32,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
     pub profile: bool,
     /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
@@ -83,7 +91,7 @@ impl std::fmt::Debug for Jit {
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, bytes_max: 0, drops: 0, resets: 0, blocks: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -118,6 +126,17 @@ impl Jit {
         }
     }
 
+    /// Did block `id` never run through the loop (no visit counted)? Reachable from a hot block,
+    /// such a block is left out of its region (`Cpu::wasm_region`): it is likely cold.
+    pub(crate) fn never_ran(&self, id: usize) -> bool {
+        matches!(self.state.get(id), None | Some(Entry::Cold(0)))
+    }
+
+    /// Is block `id` compiled already (in some region)?
+    pub(crate) fn compiled(&self, id: usize) -> bool {
+        matches!(self.state.get(id), Some(Entry::In(..)))
+    }
+
     /// Compile a region (blocks with their ids; the first is the hot one) and install it: every
     /// block not yet in a region gets this one. `ver`: the bus's count of code-word writes, its
     /// RAM blocks having just been found current. False: it could not be compiled.
@@ -132,6 +151,8 @@ impl Jit {
         }
         self.regions += 1;
         self.bytes += m.len();
+        self.bytes_max = self.bytes_max.max(m.len());
+        self.blocks += blocks.len() as u32;
         let r = self.rinfo.len() as u32;
         let ram = blocks.iter().filter(|b| !(0x0200_0000..0x0400_0000).contains(&b.1)).map(|b| b.0).collect();
         self.rinfo.push((ram, ver));
@@ -145,6 +166,7 @@ impl Jit {
 
     /// Region `r` ran from RAM that has changed: its blocks are hot again, to be compiled anew.
     pub(crate) fn drop_region(&mut self, r: u32) {
+        self.drops += 1;
         for e in self.state.iter_mut() {
             if matches!(*e, Entry::In(_, _, q) if q == r) {
                 *e = Entry::Cold(0);
@@ -156,6 +178,11 @@ impl Jit {
         }
     }
 
+    /// Blocks compiled now (each counted once, whatever regions hold a copy).
+    pub fn compiled_blocks(&self) -> u32 {
+        self.state.iter().filter(|e| matches!(e, Entry::In(..))).count() as u32
+    }
+
     /// Block `id` stays interpreted.
     pub(crate) fn refuse(&mut self, id: usize) {
         *self.at(id) = Entry::No;
@@ -163,6 +190,7 @@ impl Jit {
 
     /// Forget every compiled block (the block table was rebuilt; the table slots stay in use).
     pub fn reset(&mut self) {
+        self.resets += 1;
         self.state.clear();
         self.rinfo.clear();
         self.cache.fill((0, 0, 0, 0));
