@@ -380,6 +380,7 @@ fn main() -> ExitCode {
     image.resize(image.len().max(1) , 0);
 
     let mut soc = Soc::new(args.ram, image);
+    soc.cpu1_survives = args.cpu1_survives;
     soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
     if let Some(f) = &flash_image {
         soc.flash.load(f);
@@ -662,7 +663,7 @@ fn main() -> ExitCode {
                         }
                     }
                 }
-                Err(e) if cpu.core_id == 1 && args.cpu1_survives => {
+                Err(e) if cpu.core_id == 1 && soc.cpu1_survives => {
                     // the chip's core 1 faults there and stops; cpu0 goes on alone
                     if !args.quiet { println!("cpu1 stopped at step {total_steps} ({} ms): {e:?} at pc {:#010x} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms(), cpu.pc); }
                     soc.cpu1_fault = Some(format!("{e:?}"));
@@ -673,9 +674,7 @@ fn main() -> ExitCode {
                     halt = Some(e);
                     report_core = ci;
                     stop = true;
-                    report_core = ci;
-                stop = true;
-                break;
+                    break;
                 }
             }
         }
