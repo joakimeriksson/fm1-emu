@@ -173,8 +173,9 @@ identity says which board it runs on.
 **Play it: [joakimeriksson.github.io/fm1-emu/smk37](https://joakimeriksson.github.io/fm1-emu/smk37/)**.
 The firmwares come from [genkigenki's install page](https://genkigenki.github.io/smk37/)
 (`node tools/smk37_catalog.mjs` refreshes the list). M-VAVE's own SMK-37 firmware runs as the
-MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold), without sound (its
-notes go to USB / Bluetooth MIDI) and slower than real time in the browser so far.
+MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold): with PATCH on, the
+keys play its DX7 synth from this emulator's own bank (the factory patches are not in the package; the
+notes also go to USB / Bluetooth MIDI), slower than real time in the browser so far.
 
 <!-- smk37-firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |

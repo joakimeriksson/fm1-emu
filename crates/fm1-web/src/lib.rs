@@ -35,6 +35,7 @@ struct Machine {
     halted: bool,
     flash0: Vec<u8>,
     usr: Option<usize>,
+    usr_layout: fm1_soc::fwsc::UsrLayout,
     started: bool,
     pace: Pace,
 }
@@ -130,7 +131,7 @@ impl Machine {
         }
         let flash0 = soc.flash.mem.clone();
         Machine { cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false,
-            flash0, usr: None, started: false, pace: Pace::default() }
+            flash0, usr: None, usr_layout: fm1_soc::fwsc::UsrLayout::FM1, started: false, pace: Pace::default() }
     }
 
     // Runtime SPI writes replace complete ranges in XIP, including bytes that happen
@@ -166,7 +167,7 @@ impl Machine {
         if self.started { return false; }
         let Some(usr) = self.usr else { return false };
         let mut flash = self.soc.flash.mem.clone();
-        if fm1_soc::fwsc::usr_load_syx(&mut flash, usr, bank, 0).is_err() { return false; }
+        if fm1_soc::fwsc::usr_load_syx(&mut flash, usr, self.usr_layout, bank, 0).is_err() { return false; }
         // Only bank sectors were written; preserve decrypted code elsewhere.
         for at in (0..flash.len()).step_by(4096) {
             if flash[at..at + 4096] != self.soc.flash.mem[at..at + 4096] {
@@ -232,6 +233,7 @@ pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u
         Ok(st) => {
             let mut m = Machine::new(st.xip, st.entry, mhz, Some((&st.flash, st.board)));
             m.usr = st.usr;
+            m.usr_layout = st.usr_layout;
             if bank.as_deref().is_some_and(|b| !m.load_syx(b)) { return 1; }
             unsafe { M = Some(m) };
             0
@@ -766,7 +768,7 @@ mod persistence_tests {
         assert!(m.restore(&record(0x74000, 0x17)));
         let bank = vec![0x23; 4096];
         let mut expected = m.soc.flash.mem.clone();
-        fm1_soc::fwsc::usr_load_syx(&mut expected, 0xe0000, &bank, 0).unwrap();
+        fm1_soc::fwsc::usr_load_syx(&mut expected, 0xe0000, fm1_soc::fwsc::UsrLayout::FM1, &bank, 0).unwrap();
         assert!(m.load_syx(&bank));
         assert_eq!(m.soc.flash.mem, expected);
         assert_eq!(m.soc.read32(0x02000000), 0x55555555, "bank imports preserve decrypted code");

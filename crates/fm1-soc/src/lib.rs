@@ -1259,8 +1259,10 @@ pub struct Stock {
     /// The protected image's end in flash (`fwsc::Unpacked::end`): decrypted up to here as
     /// installed (`Soc::sfc_boot`).
     pub app_end: usize,
-    /// FM-1 user bank, if this package has one.
+    /// The USR area (the firmware's patch bank), if this package has one, and how its board's
+    /// stock firmware lays the bank out in it.
     pub usr: Option<usize>,
+    pub usr_layout: fwsc::UsrLayout,
 }
 
 pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, String> {
@@ -1271,15 +1273,19 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
         // a unit's factory calibration record, with the stock defaults
         fwsc::smk_trim_fill_defaults(&mut flash);
     }
-    if let Some(usr) = fwsc::usr_offset(&u).filter(|_| board == Board::Fm1) {
-        fwsc::usr_fill_defaults(&mut flash, usr);
+    // the patch bank real units carry from the factory (the SMK-37 Pro's stock firmware loads
+    // its current patch from an erased area as it is, and plays nothing); any package with a USR
+    // entry gets it, community firmwares too (none tested reads that area)
+    let usr = fwsc::usr_offset(&u);
+    let usr_layout = fwsc::UsrLayout::of(board);
+    if let Some(usr) = usr {
+        fwsc::usr_fill_defaults(&mut flash, usr, usr_layout);
         if let Some(b) = syx {
-            fwsc::usr_load_syx(&mut flash, usr, b, 0)?;
+            fwsc::usr_load_syx(&mut flash, usr, usr_layout, b, 0)?;
         }
     }
     let app = u.entry("app.bin").map(|h| h.offset).unwrap_or(0x120);
-    let usr = fwsc::usr_offset(&u).filter(|_| board == Board::Fm1);
-    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr })
+    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
 }
 
 /// Ready a Soc for a package's firmware: its board, its flash chip, and the SPL's boot

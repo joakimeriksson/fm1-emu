@@ -24,6 +24,12 @@ The stock app needs more than its `app.bin`:
   carry the factory bank (Yamaha's ROM1A) there. A blank area gets the emulator's own small bank
   (`EMU E.PNO`, `EMU BASS`, … then `INIT VOICE`) with zeroed settings; erased settings (0xFF) leave
   only one voice sounding. `--syx` loads a DX7 32-voice bank into slots 1-32.
+  The SMK-37 Pro's firmware (and the mods built on it) keeps the same synth, with its USR area at
+  `0xF4000`–`0xFE000` laid out its own way (`fwsc::UsrLayout::SMK37`): 4 banks of 32 voices from
+  `+0`, a 163-byte record per patch from `+0x4000`, a 128-byte block at `+0x9180` and its 9-byte
+  state at `+0x9200`, which it writes itself. Left erased, it loads patch 0 as it is and plays
+  nothing (2026-10-31: three SMK-37 Pro mods silent in the bench); it gets the same bank. Its
+  keys play the synth only with **PATCH** on (the button's LED): a bench script presses PATCH first.
 
 Every community package boots the same way with byte-identical audio, so the page boots all
 firmwares from their whole package.
