@@ -300,6 +300,10 @@ pub struct Cpu {
     /// instructions are left, so a stretch knows where that block's call ends. (u32: compiled
     /// code stores it.)
     pub stop_rest: u32,
+    /// The runner's probe (`run_cpu1`): the registers and sp where its stretch began. Compiled
+    /// code for core 1 (wasm) makes the runner's polling test itself when it comes back to the
+    /// stop pc, and runs on when something changed.
+    pub probe: [u32; 17],
     /// Compile the checks for `stop_pc` / `stop_io` into this core's blocks (set before its
     /// JIT is made; core 1's).
     pub stop_checks: bool,

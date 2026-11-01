@@ -325,7 +325,7 @@ pub extern "C" fn fm1_profile_report() -> *const u8 {
 pub extern "C" fn fm1_jit_selftest() -> u32 {
     #[cfg(target_arch = "wasm32")]
     {
-        fm1_core::jit_wasm::fop_selftest()
+        fm1_core::jit_wasm::fop_selftest() + fm1_core::jit_wasm::int_selftest()
     }
     #[cfg(not(target_arch = "wasm32"))]
     0
