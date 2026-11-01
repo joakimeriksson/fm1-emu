@@ -7,6 +7,7 @@ Set-Location (Join-Path $PSScriptRoot '..')
 $out = 'target\plugin'
 $version = (Select-String -Path 'crates\fm1-plugin\Cargo.toml' -Pattern '^version = "(.*)"' |
     Select-Object -First 1).Matches[0].Groups[1].Value
+if (-not $version) { throw 'no version in crates\fm1-plugin\Cargo.toml' }
 $name = "fm1-plugin-$version-windows-x86_64"
 $rel = "$out\release"
 Remove-Item $rel -Recurse -Force -ErrorAction SilentlyContinue

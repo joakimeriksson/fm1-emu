@@ -79,6 +79,7 @@ jobs:
       - name: Plugin tests
         run: |
           node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc  # (the fetch exits 0 on a failed download; without the file the engine tests skip themselves)
           cd crates/fm1-plugin && cargo test --release
 
       - name: Build, install, Apple's AU validator
@@ -134,6 +135,7 @@ jobs:
       - name: Plugin tests
         run: |
           node tools/fetch_firmwares.mjs felucca
+          if (-not (Test-Path reference/firmwares/felucca.fwsc)) { throw 'felucca.fwsc was not fetched: the engine tests would skip themselves' }
           cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
 
       - name: Build the CLAP and VST3
