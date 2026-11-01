@@ -817,13 +817,18 @@ fn run_dual_from(
 /// cpu0 goes on alone (a firmware built for a core 1 that fails falls back to one core:
 /// felucca-bsp's cpu2_fallback).
 /// `run_cpu1` for `run_dual`: a fault on core 1 halts the machine, unless the core survives
-/// (`Soc::cpu1_survives`): then it stops alone and cpu0 goes on.
+/// (`Soc::cpu1_survives`): then it stops alone and cpu0 goes on, and the hardware lock it
+/// held is released (cpu0 would spin on `lockset` for ever, nothing to hand the machine to).
 fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     match run_cpu1(c1, soc, cycles, until) {
         Ok(k) => Ok(k),
         Err(e) if soc.cpu1_survives => {
             eprintln!("cpu1 stopped at {} ms: {e} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms());
             soc.cpu1_fault = Some(e);
+            if soc.lock_owner == Some(1) {
+                soc.lock_owner = None;
+            }
+            soc.waits = [None; 2];
             Ok(0)
         }
         Err(e) => Err(e),
@@ -1227,6 +1232,28 @@ mod tests {
                 run_dual(&mut c1, &mut soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
             }
             assert_eq!(c1.as_ref().map(|c| (c.pc, c.insn_count)), stopped, "core 1 ran on after its fault (jit {jit})");
+        }
+    }
+
+    #[test]
+    fn a_core_1_that_faults_holding_the_lock_releases_it() {
+        // cpu0: lockset, then a word stored, then on the spot; core 1 holds the lock (as state) and
+        // faults at once: cpu0 gets the lock and stores, where it would retry `lockset` for ever
+        const CPU0: [u8; 14] = [0x41, 0x00, 0xc0, 0xff, 0x04, 0x00, 0xc1, 0x01, 0x41, 0xe0, 0x01, 0x00, 0x81, 0x60];
+        for jit in [false, true] {
+            let (mut cpu, mut soc) = machine(&[CPU0.as_slice(), &[0xf7, 0x9f], CORE1_ERASED.as_slice()].concat(), &[], false);
+            cpu.jit_on = jit;
+            soc.cpu1_survives = true;
+            soc.take_boot(&cpu);
+            soc.write32(0x01c7_fff8, XIP_BASE + 16);
+            soc.write32(0x10008, 8);
+            soc.lock_owner = Some(1);
+            let (mut c1, mut t) = (None, false);
+            for _ in 0..6 {
+                run_dual(&mut c1, &mut soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+            }
+            assert!(soc.cpu1_fault.is_some(), "core 1 faulted (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10004), 1, "cpu0 never got the lock core 1 held (jit {jit})");
         }
     }
 
