@@ -61,6 +61,9 @@ pub struct Jit {
     pub bytes: usize,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
     profile: bool,
+    /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
+    /// core 1, whose runner probes for polling loops)
+    pub(crate) stops: bool,
 }
 
 impl std::fmt::Debug for Jit {
@@ -71,7 +74,7 @@ impl std::fmt::Debug for Jit {
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile })
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -100,7 +103,7 @@ impl Jit {
     /// RAM blocks having just been found current. False: it could not be compiled.
     pub(crate) fn install<B: Bus>(&mut self, blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, ver: u64) -> bool {
         COMPILE_BUDGET.fetch_sub(1, Ordering::Relaxed);
-        let m = compile::<B>(blocks, mem, self.profile);
+        let m = compile::<B>(blocks, mem, self.profile, self.stops);
         // SAFETY: a plain byte slice; the host copies it before returning
         let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len()) };
         if f == 0 {
@@ -195,11 +198,21 @@ unsafe fn sync<B: Bus>(ctx: &mut Ctx, bus: &mut B, idx: u32) {
     }
 }
 
+/// A helper reached the bus: a runner's stretch (`Cpu::stop_pc`) wants a look (as jit.rs).
+fn stop_io(ctx: &mut Ctx) {
+    // SAFETY: ctx.cpu is the live Cpu `run` was given.
+    let cpu = unsafe { &mut *ctx.cpu };
+    if cpu.stop_pc != 0 {
+        cpu.stop_io = 1;
+    }
+}
+
 extern "C" fn h_read<B: Bus>(ctx: *mut Ctx, addr: u32, idx: u32, w: u32) -> u32 {
     // SAFETY: ctx is the live context `run` passed in; the bus pointer is the caller's &mut B.
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     unsafe { sync(ctx, bus, idx) };
+    stop_io(ctx);
     let v = match w {
         1 => bus.read8(addr) as u32,
         2 => bus.read16(addr) as u32,
@@ -216,6 +229,7 @@ extern "C" fn h_write<B: Bus>(ctx: *mut Ctx, addr: u32, v: u32, idx: u32, w: u32
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     unsafe { sync(ctx, bus, idx) };
+    stop_io(ctx);
     let code = bus.code_writes();
     match w {
         1 => bus.write8(addr, v as u8),
@@ -238,6 +252,9 @@ extern "C" fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let cpu = unsafe { &mut *ctx.cpu };
     unsafe { sync(ctx, bus, idx) };
+    if cpu.stop_pc != 0 {
+        cpu.stop_io = 1;
+    }
     if PROF {
         cpu.profile_helper(unsafe { &*op });
     }
@@ -386,6 +403,12 @@ fn off_rets() -> u32 {
 fn off_pc() -> u32 {
     offset_of!(Cpu, pc) as u32
 }
+fn off_stop_pc() -> u32 {
+    offset_of!(Cpu, stop_pc) as u32
+}
+fn off_stop_io() -> u32 {
+    offset_of!(Cpu, stop_io) as u32
+}
 fn off_hold() -> u32 {
     offset_of!(Cpu, hold_irq) as u32
 }
@@ -409,6 +432,8 @@ struct Gen<'a> {
     cur: u32,
     n: u32,
     nest: u32,
+    /// the stretch's stop checks at each block's entry (`Jit::stops`)
+    stops: bool,
 }
 
 impl Gen<'_> {
@@ -776,7 +801,7 @@ impl Gen<'_> {
 
 /// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
 /// first.
-fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, profile: bool) -> Vec<u8> {
+fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, profile: bool, stops: bool) -> Vec<u8> {
     let n = blocks.len() as u32;
     let mut g = Gen {
         c: Vec::with_capacity(64 * blocks.iter().map(|b| b.2.len()).sum::<usize>()),
@@ -790,6 +815,7 @@ fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, profi
         cur: 0,
         n,
         nest: 0,
+        stops,
     };
     // loop { block_{n-1} { .. block_0 { br_table cur } code_0 } code_1 .. } code_{n-1} }: a br
     // to depth k from the innermost block lands on code_k; code_k reaches the loop through the
@@ -830,6 +856,36 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
     g.if_();
     g.exit_imm(pc0, 0);
     g.end();
+    // a runner's stretch (`Cpu::stop_pc`), as jit.rs compiles it: past the call's first block,
+    // leave before a block that holds the stop pc, once a helper reached the bus (`stop_io`),
+    // or with less than `STRETCH_ROOM` of the limit left (the runner's checks come at the
+    // block's entry, where the interpreter would make them)
+    if g.stops {
+        let bytes: u32 = ops.iter().map(|o| o.len as u32).sum();
+        g.get(L_DONE);
+        g.if_();
+        g.ld_field(off_stop_pc());
+        g.tee(L_VAL);
+        g.if_();
+        g.get(L_VAL);
+        g.i32c(pc0);
+        g.op(I32_SUB);
+        g.i32c(bytes);
+        g.op(I32_LT_U);
+        g.ld_field(off_stop_io());
+        g.op(I32_OR);
+        g.get(L_DONE);
+        g.i32c(crate::STRETCH_ROOM);
+        g.op(I32_ADD);
+        g.get(L_LIMIT);
+        g.op(I32_GE_U);
+        g.op(I32_OR);
+        g.if_();
+        g.exit_imm(pc0, 0);
+        g.end();
+        g.end();
+        g.end();
+    }
 
     let mut pc = pc0;
     let mut ended = false;
@@ -1574,7 +1630,7 @@ pub fn fop_selftest() -> u32 {
             let (b2, b3) = if op <= 6 { (a << 4 | op, d << 4 | b) } else { (op, d << 4 | a) };
             bus.0 = [0; 16];
             bus.0[..4].copy_from_slice(&[0x3f, 0xe5, b2, b3]);
-            let m = compile::<NoBus>(&[(0, 0x0200_0000, vec![bop])], &mem, false);
+            let m = compile::<NoBus>(&[(0, 0x0200_0000, vec![bop])], &mem, false, false);
             // SAFETY: a plain byte slice; the host copies it before returning
             let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len()) };
             if f == 0 {
