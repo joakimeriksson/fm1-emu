@@ -419,6 +419,9 @@ fn off_pc() -> u32 {
 fn off_stop_pc() -> u32 {
     offset_of!(Cpu, stop_pc) as u32
 }
+fn off_probe(i: u32) -> u32 {
+    offset_of!(Cpu, probe) as u32 + 4 * i
+}
 fn off_stop_io() -> u32 {
     offset_of!(Cpu, stop_io) as u32
 }
@@ -905,13 +908,42 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
         g.ld_field(off_stop_pc());
         g.tee(L_VAL);
         g.if_();
+        // back at the stop pc, this block's start: the runner's own test, made here. The
+        // registers and sp as when its probe began is polling with nothing to do: leave (the
+        // runner stops the core). Else the lap goes on: the runner would only call again with
+        // the same stretch (DUELL's core 1 came back every 7 instructions, 150 M times in 12 s).
+        g.get(L_VAL);
+        g.i32c(pc0);
+        g.op(I32_EQ);
+        g.if_();
+        for r in 0..16u8 {
+            g.ld_reg(r);
+            g.ld_field(off_probe(r as u32));
+            g.op(I32_EQ);
+            if r > 0 {
+                g.op(I32_AND);
+            }
+        }
+        g.ld_field(off_sp());
+        g.ld_field(off_probe(16));
+        g.op(I32_EQ);
+        g.op(I32_AND);
+        g.if_();
+        g.exit_imm(pc0, 0);
+        g.end();
+        g.op(ELSE);
+        // the stop pc inside the block, past its start: leave before it
         g.get(L_VAL);
         g.i32c(pc0);
         g.op(I32_SUB);
         g.i32c(bytes);
         g.op(I32_LT_U);
+        g.if_();
+        g.exit_imm(pc0, 0);
+        g.end();
+        g.end();
+        // a helper reached the bus, or less than `STRETCH_ROOM` of the limit left
         g.ld_field(off_stop_io());
-        g.op(I32_OR);
         g.get(L_DONE);
         g.i32c(crate::STRETCH_ROOM);
         g.op(I32_ADD);
