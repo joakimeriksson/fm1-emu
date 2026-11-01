@@ -1251,6 +1251,25 @@ itself "rebuilt" (its 0.7 package is not the one hashed: JIT = interpreter, and 
 8 s with keys byte for byte; tests/catalog.json carries the new package and audio hashes); the wasm
 build's audio identical to master's on all 95.
 
+## 5.37 The wasm JIT goes from region to region without a round of run_fast's loop (2026-11-01)
+
+Counters on `jit_wasm::run`'s exits (a temporary build) said what ended a region run on Melodee:
+of 41 M in 5 s, half were edges out of the region (a jump or fall-through to a pc in another
+compiled region), each a round of `run_fast`'s loop: the block table, `Jit::lookup`, the region's
+RAM check, the call's prologue. `Jit` keeps a direct-mapped cache by pc of what `lookup` found
+(4096 entries; cleared with a dropped region and on `reset`), and after a region run that is not
+a stretch's call, `run_fast` goes straight to the region at the new pc while the budget allows and
+nothing careful is pending: `block_at` is pure, and what it checks of a RAM block `wasm_region_ok`
+checks of all the region's, so the round of the loop would have decided the same. A region that
+does not fit (k = 0) or was dropped goes round the loop as before.
+
+On top of 5.35 and 5.36 (the wasm build of each, interleaved in node, the median of 3): Felucca
++7.8%, X0X +6.1%, 386DX +3.5%, Melodee +2.3%; byte-identical audio on all 95 catalog firmwares.
+Also tried in this pass, with the FPU, the six ops and the stretches that 5.35 brought: guest
+registers in wasm locals within a block (+1-5%, within what the rest moves; 5.35's author found
+the same and dropped it), a helper of its own for `sti` (neutral), SRAM2 as a third inline range
+(no gain, 3-6% code-size cost where it is unused). None kept.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.
