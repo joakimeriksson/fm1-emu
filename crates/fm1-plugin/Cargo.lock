@@ -932,6 +932,7 @@ dependencies = [
  "fm1-soc",
  "nih_plug",
  "nih_plug_egui",
+ "raw-window-handle 0.6.2",
  "rfd",
  "rtrb",
  "serde",

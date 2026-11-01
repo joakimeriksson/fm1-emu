@@ -92,7 +92,8 @@ $env:CLAP_PATH = "$PWD\target\plugin"
 target\plugin\vst3sdk-build\bin\Release\validator.exe target\plugin\FM-1.vst3   # 47 tests pass
 ```
 
-The build is not code-signed; Windows hosts load unsigned plugins.
+The build is not code-signed; Windows hosts load unsigned plugins. REAPER and Waveform scan the
+per-user folders by default, so the plugin shows up after their next plugin scan.
 
 ## Releases
 
@@ -105,7 +106,11 @@ workflow:
 3. builds Steinberg's validator and runs it on the VST3;
 4. packages the zip (`tools/package_plugin.sh`: the three plugins and an `INSTALL.txt`).
 
-Without signing secrets the release is unsigned (`INSTALL.txt` gives the command that lets macOS
+On a Windows runner it runs the tests, builds the CLAP and the VST3 (`tools\build_plugin.ps1`),
+runs Steinberg's validator and packages `fm1-plugin-<version>-windows-x86_64.zip`
+(`tools\package_plugin.ps1`: the two plugins and an `INSTALL.txt`), unsigned.
+
+Without signing secrets the macOS release is unsigned (`INSTALL.txt` gives the command that lets macOS
 open it). With these repository secrets it's signed with a Developer ID and notarized:
 - `MACOS_CERTIFICATE`: a "Developer ID Application" certificate as a base64 `.p12`;
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
@@ -122,6 +127,9 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   including when the same firmware is already running. For a browser backup that omits
   bring-your-own firmware, load the matching `.fwsc` first, then import the `.fm1save`.
   Invalid imports leave the current setup intact.
+  On a Mac, keep the files outside Desktop, Documents, Downloads and iCloud Drive: macOS keeps a
+  DAW's plugin host out of those folders without asking, and the load fails with "Operation not
+  permitted". `~/Music` or any other folder in your home works.
 - **Export save…** captures the running firmware and its latest flash changes as a `.fm1save`.
   Send it to someone else, import it in the browser, or open it in another VST3/AU/CLAP instance.
   It waits for flash writes to finish and writes the file in the background. Edits held only in
@@ -181,7 +189,8 @@ audio. It uses `reference/firmwares/felucca.fwsc` (`node tools/fetch_firmwares.m
 | GarageBand | AU: loads a firmware and runs; the window's redraw on reopening is fixed but not yet seen there |
 | Steinberg's editorhost | VST3: the window draws, firmwares boot and react to the panel |
 | Logic, Ableton, REAPER, Bitwig | not yet tried |
-| Windows (x86-64) | builds with `tools\build_plugin.ps1`; the crate's 12 tests and Steinberg's validator (47 of 47) pass on Windows 11; no DAW tried yet |
+| Windows (x86-64) | builds with `tools\build_plugin.ps1`; the crate's 12 tests and Steinberg's validator (47 of 47) pass on Windows 11 |
+| REAPER 7.84, Waveform Free 14 (Windows 11) | VST3: both find it in the per-user folder, load Felucca through the file dialog and play it from the panel and MIDI (3.4x real time on this PC) |
 | Linux | not built yet: nih-plug and clap-wrapper support it, but the build scripts are macOS and Windows only |
 
 ## Testing portable saves locally

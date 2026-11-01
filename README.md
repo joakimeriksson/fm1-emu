@@ -173,8 +173,9 @@ identity says which board it runs on.
 **Play it: [joakimeriksson.github.io/fm1-emu/smk37](https://joakimeriksson.github.io/fm1-emu/smk37/)**.
 The firmwares come from [genkigenki's install page](https://genkigenki.github.io/smk37/)
 (`node tools/smk37_catalog.mjs` refreshes the list). M-VAVE's own SMK-37 firmware runs as the
-MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold), without sound (its
-notes go to USB / Bluetooth MIDI) and slower than real time in the browser so far.
+MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold): with PATCH on, the
+keys play its DX7 synth from this emulator's own bank (the factory patches are not in the package; the
+notes also go to USB / Bluetooth MIDI), slower than real time in the browser so far.
 
 <!-- smk37-firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
@@ -281,10 +282,11 @@ other synth:
   how much faster than real time the firmware could run on this computer; most run at 3–6x,
   the heaviest at about 1.5x.
 
-**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest),
-for Macs with Apple silicon (M1 or later). The zip has the three plugins and an `INSTALL.txt` that
-says where each goes. Until a release is signed with an Apple Developer ID, macOS blocks it until
-you allow it, with one Terminal command that `INSTALL.txt` gives.
+**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest):
+a zip for Macs with Apple silicon (M1 or later; AU, VST3 and CLAP) and one for Windows (x86-64;
+VST3 and CLAP). Each has an `INSTALL.txt` that says where the files go. Until a release is signed
+with an Apple Developer ID, macOS blocks it until you allow it, with one Terminal command that
+`INSTALL.txt` gives; the Windows build is unsigned too, and Windows hosts load it as it is.
 
 **Build and install it yourself (macOS, Apple silicon).** You need Rust, CMake and Ninja
 (`brew install cmake ninja`), then:
@@ -319,6 +321,25 @@ DAW that only scans `C:\Program Files\Common Files`.
 
 **In VST3 or CLAP hosts:** add *FM-1* (by fm1-emu) as an instrument on a track.
 
+**On Windows, in Waveform Free** (REAPER works the same way; both find the plugin in
+`Common Files` and in the per-user folders, where the release's `INSTALL.txt` and
+`tools\build_plugin.ps1` put it):
+
+[![Three FM-1 tracks in Waveform Free on Windows: a Scintilla pad, a Felucca bass and lead](docs/media/plugin-windows-waveform.gif)](docs/media/plugin-windows-waveform.gif)
+
+1. *Track → Create New Track*, then the **+** at the right end of the track: *Plugins → fm1-emu → FM-1*.
+2. Click the *FM-1* box on the track to open its window, then *Load firmware / save…* and pick a
+   `.fwsc` package.
+3. Play it from a MIDI keyboard, or click the panel's keys. A MIDI clip on the track plays it too.
+
+The clip above is three tracks at 100 BPM, each with its own FM-1: a pad on
+[Scintilla](https://github.com/joakimeriksson/scintilla-fm1) (an Elka Synthex; preset 29,
+*Filtered strings*), then a bass and a lead joining on Felucca (*Analog Acid* and *FM6 Tine
+EP*). Each window's status bar shows the headroom: on a laptop each instance could run at about
+3x real time with all three playing, 4.5x idle. FM-1 Dock, which runs both of the chip's cores, is the
+heaviest: under real time on that laptop even at 120 MHz, so a synth it carries as a module is
+lighter as its own firmware, as Scintilla is here.
+
 **How it's built:** it's one plugin written in Rust as a CLAP with
 [nih-plug](https://github.com/robbert-vdh/nih-plug). [clap-wrapper](https://github.com/free-audio/clap-wrapper)
 makes the AU and VST3 of it, and the plugin stays MIT. All its parts are MIT, ISC or Apache-2.0,
@@ -330,8 +351,8 @@ including Apple's AudioUnitSDK and Steinberg's VST3 SDK, which is MIT since 3.8.
 - GarageBand, as an AU;
 - Steinberg's VST3 test host.
 
-On Windows the VST3 passes Steinberg's validator too (47 of 47), but no Windows DAW has been
-tried yet. Logic, Ableton and the Linux build haven't been tried either. More in
+On Windows the VST3 passes Steinberg's validator too (47 of 47) and plays in REAPER and
+Waveform Free. Logic, Ableton and the Linux build haven't been tried yet. More in
 [crates/fm1-plugin](crates/fm1-plugin/README.md).
 
 ## How it works

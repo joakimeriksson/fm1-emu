@@ -25,6 +25,10 @@ tempfile = "3"
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"
 
+# the file dialog's owner window (rfd takes it as a raw-window-handle)
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"
+
 # Its own workspace: the GUI and plugin dependencies stay out of the emulator's builds and CI.
 [workspace]
 

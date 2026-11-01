@@ -94,8 +94,8 @@ pub fn read(path: &Path) -> Result<SaveData, String> { read_with_firmware(path, 
 
 pub fn read_with_firmware(path: &Path, fallback: Option<&Firmware>) -> Result<SaveData, String> {
     let mut bytes = Vec::new();
-    std::fs::File::open(path).map_err(|e| e.to_string())?.take((MAX_SAVE + 1) as u64)
-        .read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    std::fs::File::open(path).map_err(io_error)?.take((MAX_SAVE + 1) as u64)
+        .read_to_end(&mut bytes).map_err(io_error)?;
     if bytes.len() > MAX_SAVE { return Err("save file too large".into()); }
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fwsc")) {
         let data = SaveData { firmware: Firmware {
@@ -113,11 +113,24 @@ pub fn read_with_firmware(path: &Path, fallback: Option<&Firmware>) -> Result<Sa
 pub fn write(path: &Path, data: &SaveData) -> Result<(), String> {
     let bytes = encode(data)?;
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
-    file.as_file().sync_all().map_err(|e| e.to_string())?;
-    file.persist(path).map_err(|e| e.to_string())?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(io_error)?;
+    file.write_all(&bytes).map_err(io_error)?;
+    file.as_file().sync_all().map_err(io_error)?;
+    file.persist(path).map_err(|e| io_error(e.error))?;
     Ok(())
+}
+
+/// A file error as the status bar shows it. On a Mac, "Operation not permitted" on a file the
+/// user just picked is the system keeping the plugin's process (a DAW's plugin host runs apart
+/// from the DAW, and nothing asks the user on its behalf) out of the folders it protects:
+/// Desktop, Documents, Downloads, iCloud Drive and removable drives. The file is fine
+/// anywhere else in the home folder; say so, as the dialog's choice gave no sign (#56).
+fn io_error(e: std::io::Error) -> String {
+    if cfg!(target_os = "macos") && e.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("{e}; macOS keeps plugins out of Desktop, Documents, Downloads and iCloud Drive: move the file to ~/Music or another folder in your home")
+    } else {
+        e.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -174,6 +187,22 @@ mod tests {
         assert!(encode(&short).is_err());
         assert!(decode(b"{}").is_err());
         assert!(decode(&vec![b' '; MAX_SAVE + 1]).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_the_plugin_may_not_read_says_where_to_put_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("felucca.fwsc");
+        std::fs::write(&path, b"not read anyway").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() { return; } // (root reads anything: nothing to test)
+        let message = match read(&path) { Err(m) => m, Ok(_) => panic!("read a file with no permissions") };
+        assert!(message.contains("ermission denied"), "{message}");
+        assert_eq!(message.contains("~/Music"), cfg!(target_os = "macos"), "{message}");
+        let plain = io_error(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        assert_eq!(plain, "gone");
     }
 }
 

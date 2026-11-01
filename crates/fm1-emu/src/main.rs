@@ -23,8 +23,9 @@ const MAX_RAM: usize = (XIP_BASE - RAM_BASE) as usize;
 const USAGE: &str = "usage: fm1-emu --bin APP.bin | --fwsc FIRMWARE.fwsc [options]
 run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 0x02000000]
        [--steps N (5000000)] [--ms MS] [--ram BYTES (1048576, at most 4194304)] [--quiet]
-       [--flaky-core1 RATE [--seed N]]
-input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms)
+       [--flaky-core1 RATE [--seed N]] [--cpu1-survives (a fault on core 1 stops it alone; cpu0 goes on)]
+input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
+        the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
 out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
 debug: [--trace K (the first K instructions)]
        [--break-pc ADDR (registers at each hit)] [--watch ADDR (each change of a word)]
@@ -87,6 +88,8 @@ struct Args {
     snap: Vec<u64>,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
+    /// `--cpu1-survives`: a fault on core 1 stops that core alone, cpu0 goes on (`Soc::cpu1_survives`)
+    cpu1_survives: bool,
     /// the flaky core's generator seed (the same seed, the same misreads; default 1)
     seed: Option<u64>,
 }
@@ -381,6 +384,7 @@ fn main() -> ExitCode {
     let mut soc = Soc::new(args.ram, image);
     // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
     soc.lcd_timed = fm1_soc::lcd_timed_from_env();
+    soc.cpu1_survives = args.cpu1_survives;
     soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
     if let Some(f) = &flash_image {
         soc.flash.load(f);
@@ -417,7 +421,7 @@ fn main() -> ExitCode {
         args.steps = soc.periph.cycle_of_ms(ms);
     }
     for k in &args.keys {
-        match parse_key_script(k) {
+        match parse_key_script(k, soc.board) {
             Some(evs) => {
                 for (ms, a) in evs {
                     let at = soc.periph.cycle_of_ms(ms);
@@ -483,6 +487,7 @@ fn main() -> ExitCode {
 
     let dump_every: u64 = 1 << 20;
     let mut stop = false;
+    let mut park = false; // (core 1 stopped on a fault this step: dropped below)
     soc.take_boot(&cpus[0]);
     for _ in 0..args.steps {
         // a chip reset (the watchdog, PR_PWR): cpu0 from its start, core 1 held again
@@ -528,6 +533,13 @@ fn main() -> ExitCode {
                     soc.advance(1);
                 }
                 continue;
+            }
+            if cpu.core_id == 1 && soc.cpu1_idle {
+                // asleep since its `idle`, until an interrupt from its bank is pending
+                if soc.pending_irq_for(1).is_none() {
+                    continue;
+                }
+                soc.cpu1_idle = false;
             }
             if (Some(cpu.pc) == args.break_pc || extra_breaks.contains(&cpu.pc)) && break_hits < break_max {
                 break_hits += 1;
@@ -655,15 +667,24 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                Err(e) if cpu.core_id == 1 && soc.cpu1_survives => {
+                    // the chip's core 1 faults there and stops; cpu0 goes on alone
+                    if !args.quiet { println!("cpu1 stopped at step {total_steps} ({} ms): {e:?} at pc {:#010x} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms(), cpu.pc); }
+                    soc.cpu1_fault = Some(format!("{e:?}"));
+                    park = true;
+                    break;
+                }
                 Err(e) => {
                     halt = Some(e);
                     report_core = ci;
                     stop = true;
-                    report_core = ci;
-                stop = true;
-                break;
+                    break;
                 }
             }
+        }
+        if park {
+            cpus.truncate(1);
+            park = false;
         }
         if stop {
             break;
@@ -932,6 +953,7 @@ fn parse_args() -> Option<Args> {
         keys: Vec::new(),
         snap: Vec::new(),
         flaky_core1: None,
+        cpu1_survives: false,
         seed: None,
     };
     let mut have_bin = false;
@@ -993,6 +1015,10 @@ fn parse_args() -> Option<Args> {
                 args.quiet = true;
                 i += 1;
             }
+            "--cpu1-survives" => {
+                args.cpu1_survives = true;
+                i += 1;
+            }
             "--ms" => {
                 args.ms = Some(a.get(i + 1)?.parse().ok()?);
                 i += 2;
@@ -1040,7 +1066,7 @@ fn parse_hex(s: &str) -> Option<u32> {
 ///   `2000:enc0:+3`     3 clockwise clicks on encoder 0; names SELECT/ALGO/PRESET/K1..K4
 ///   `2500:pot:512`     the MASTER pot (SARADC ch 4)
 ///   `3000:midi:903c64` MIDI bytes into the MIDI IN jack (note on C4)
-fn parse_key_script(item: &str) -> Option<Vec<(u64, fm1_soc::Action)>> {
+fn parse_key_script(item: &str, board: fm1_soc::Board) -> Option<Vec<(u64, fm1_soc::Action)>> {
     use fm1_soc::Action;
     let mut parts = item.splitn(3, ':');
     let when = parts.next()?;
@@ -1063,7 +1089,12 @@ fn parse_key_script(item: &str) -> Option<Vec<(u64, fm1_soc::Action)>> {
         let clicks: i32 = arg?.trim_start_matches('+').parse().ok()?;
         return Some(vec![(t0, Action::Enc { enc, clicks })]);
     }
-    let id = fm1_soc::periph::key_id(what)?;
+    // a name on this board's panel, as fm1-soc's script.rs has it (the SMK-37's ARP, FX, SEQ are its buttons, not
+    // the FM-1's keys of the same names)
+    let id = match board {
+        fm1_soc::Board::Smk37 => fm1_soc::smk::key_id(what),
+        fm1_soc::Board::Fm1 => fm1_soc::periph::key_id(what),
+    }?;
     let up = t1.unwrap_or(t0 + 150);
     Some(vec![(t0, Action::Key { id, down: true }), (up, Action::Key { id, down: false })])
 }
@@ -1088,4 +1119,27 @@ fn write_wav(path: &str, samples: &[i16]) -> std::io::Result<()> {
         f.write_all(&s.to_le_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod key_script_tests {
+    use super::parse_key_script;
+    use fm1_soc::{Action, Board};
+
+    fn first_key(item: &str, board: Board) -> Option<u8> {
+        parse_key_script(item, board)?.into_iter().find_map(|(_, a)| match a {
+            Action::Key { id, .. } => Some(id),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn names_are_the_boards_own() {
+        for name in ["ARP", "FX", "SEQ"] {
+            let smk = fm1_soc::smk::key_id(name);
+            assert!(smk.is_some(), "{name} is an SMK-37 button");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Smk37), smk, "{name} on an SMK-37");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Fm1), fm1_soc::periph::key_id(name), "{name} on an FM-1");
+        }
+    }
 }

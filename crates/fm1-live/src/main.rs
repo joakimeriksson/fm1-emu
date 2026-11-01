@@ -30,7 +30,8 @@
 //! those times, and what comes back is printed. FM1_USB_WAV=FILE (`--bench` or `--shot`): the
 //! computer records the device's USB audio into FILE (FM1_USB_RATE: at that rate).
 //!
-//! `--flaky-core1 RATE [--seed N]`: core 1 misreads RAM now and then, as on some units
+//! `--flaky-core1 RATE [--seed N]`: core 1 misreads RAM now and then, as on some units;
+//! `--cpu1-survives`: a fault on core 1 stops that core alone and cpu0 goes on, as the chip's
 //! (fm1_soc::flaky), for trying a firmware's fallback to one core.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -75,6 +76,7 @@ struct Opts {
     midi_ch: u8,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
+    cpu1_survives: bool,
     /// its generator's seed (default 1)
     seed: Option<u64>,
     /// --flash FILE: the flash chip's contents from FILE at the start (if it exists; after the
@@ -108,7 +110,7 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -151,6 +153,7 @@ fn parse() -> Option<Opts> {
             "--shot" => o.shot = Some(a.get(i + 1)?.parse().ok()?),
             "--flaky-core1" => o.flaky_core1 = Some(a.get(i + 1)?.parse::<f64>().ok().filter(|r| (0.0..=1.0).contains(r))?),
             "--seed" => o.seed = Some(a.get(i + 1)?.parse().ok()?),
+            "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             _ => return None,
         }
@@ -209,6 +212,7 @@ impl Machine {
         }
         soc.periph.skip_idle = true;
         soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
+        soc.cpu1_survives = o.cpu1_survives;
         let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
         cpu.jit_on = std::env::var("FM1_NO_JIT").is_err() && !strict;
         cpu.cost_model = strict;
@@ -939,7 +943,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--flaky-core1 RATE [--seed N]] [--version] [--help]
+         [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
 env: FM1_BENCH_KEYS='T[-T2]:PLAY,T:n7,T:enc0:+3,T:pot:512,T:ms:mHEX'  scripted input (--bench, --shot;
