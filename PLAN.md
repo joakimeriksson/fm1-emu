@@ -1277,6 +1277,24 @@ registers in wasm locals within a block (+1-5%, within what the rest moves; 5.35
 the same and dropped it), a helper of its own for `sti` (neutral), SRAM2 as a third inline range
 (no gain, 3-6% code-size cost where it is unused). None kept.
 
+## 5.38 FM1_STRICT's tests out of the default run loop (2026-11-02)
+
+The realistic mode of #105 (FM1_STRICT and the CPU's guards, documented in docs/stock-firmware.md) tested `Cpu::cost_model` at four places in `run_fast`'s loop, once
+or twice per instruction, and `Soc::strict_align` before the alignment of every RAM read and
+write; both off, the default emulator paid for the tests. Against master before #105 (CPU seconds,
+interleaved, median of 5): interpreted zen and Melodee +31%, the browser build 3-6% slower, the
+native JIT 0-4%. The loop is generic over `COST` now as it is over `STRETCH` (5.33), the four
+tests `if COST`, `run_fast` / `run_stretch` picking the copy from `cost_model` once per call; the
+alignment tests test the address first, so an aligned access never loads the flag. Interpreted:
++31% -> +16-21%; the browser build back within noise; the JIT +2% (zp12 +4%).
+
+What is left of the interpreter's gap is not the per-block PC-limit check (`pc_enter`: 1-2%,
+measured with it taken out) nor the flash cache's test on XIP reads (0-3%); the rest of #105's
+per-block additions (`cpu0_between`'s guard and exception bookkeeping, `any_pending`'s extra
+field) are each a few instructions, and the `Cpu` and `Soc` structs grew. A native profile of
+the two builds side by side is the way to find it; the catalog check (interpreted, every
+firmware) is where it costs time, users run the JIT.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.

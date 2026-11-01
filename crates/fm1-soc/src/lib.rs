@@ -1122,7 +1122,7 @@ impl Bus for Soc {
 
     #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
-        if self.strict_align && addr & 1 != 0 && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
+        if addr & 1 != 0 && self.strict_align && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
             self.misaligned(addr, 2);
         }
         // halfwords sit at offsets 0 and 2 of the word (the old `>> 8` for
@@ -1135,7 +1135,7 @@ impl Bus for Soc {
     fn read32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
-            if self.strict_align && addr & 3 != 0 {
+            if addr & 3 != 0 && self.strict_align {
                 self.misaligned(addr, 4);
             }
             return self.ram.read32(o as u32);
@@ -1187,7 +1187,7 @@ impl Bus for Soc {
 
     #[inline(always)]
     fn write16(&mut self, addr: u32, value: u16) {
-        if self.strict_align && addr & 1 != 0 && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
+        if addr & 1 != 0 && self.strict_align && (addr.wrapping_sub(RAM_BASE) as usize) < self.ram.len() {
             self.misaligned(addr, 2);
         }
         // merged at (addr & 2) within the aligned word, as the slow path does
@@ -1202,7 +1202,7 @@ impl Bus for Soc {
     fn write32(&mut self, addr: u32, value: u32) {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
-            if self.strict_align && addr & 3 != 0 {
+            if addr & 3 != 0 && self.strict_align {
                 self.misaligned(addr, 4);
             }
             return self.ram.write32(o as u32, value);
