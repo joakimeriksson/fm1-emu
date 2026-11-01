@@ -93,22 +93,22 @@ impl Jit {
         &mut self.state[id]
     }
 
-    /// The compiled code at `pc`, if `remember` has it.
+    /// The compiled code at `pc`, if `lookup` found it there (an empty entry has no function:
+    /// table index 0 is never a region's, so pc 0 cannot match one).
     #[inline]
     pub(crate) fn cached(&self, pc: u32) -> Option<(u32, u32, u32)> {
         let (p, f, k, r) = self.cache[(pc >> 1) as usize & (CACHE - 1)];
-        (p == pc).then_some((f, k, r))
-    }
-
-    pub(crate) fn remember(&mut self, pc: u32, (f, k, r): (u32, u32, u32)) {
-        self.cache[(pc >> 1) as usize & (CACHE - 1)] = (pc, f, k, r);
+        (p == pc && f != 0).then_some((f, k, r))
     }
 
     /// Block `id`'s compiled code (function, start index, region); else counts the run, and true
     /// says the block just became hot (form its region and `install` it, or `refuse`).
-    pub(crate) fn lookup(&mut self, id: usize) -> (Option<(u32, u32, u32)>, bool) {
+    pub(crate) fn lookup(&mut self, id: usize, pc: u32) -> (Option<(u32, u32, u32)>, bool) {
         match *self.at(id) {
-            Entry::In(f, k, r) => (Some((f, k, r)), false),
+            Entry::In(f, k, r) => {
+                self.cache[(pc >> 1) as usize & (CACHE - 1)] = (pc, f, k, r);
+                (Some((f, k, r)), false)
+            }
             Entry::No => (None, false),
             Entry::Cold(c) if c + 1 < HOT => {
                 *self.at(id) = Entry::Cold(c + 1);
@@ -151,7 +151,9 @@ impl Jit {
             }
         }
         self.rinfo[r as usize].0 = Box::new([]);
-        self.cache.fill((0, 0, 0, 0));
+        for e in self.cache.iter_mut().filter(|e| e.3 == r) {
+            *e = (0, 0, 0, 0);
+        }
     }
 
     /// Block `id` stays interpreted.

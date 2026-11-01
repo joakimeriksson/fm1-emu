@@ -1242,7 +1242,11 @@ iterations as fit the budget and the ticks before the next event (`tick_room`, a
 them: `add_ticks` for all but the first instruction of a call), the register down by one per
 iteration, the pc past the loop when the count ran out. Nothing else observes the iterations (one
 register, no bus), so the state after any number of instructions is the interpreter's; a stretch
-ends its call there and returns to the runner, as after a block run interpreted.
+ends its call there and returns to the runner, as after a block run interpreted. In a stretch the
+iterations stop `STRETCH_ROOM` short of the budget, where compiled code's check at a block's entry
+would have stopped them (a review found the first version running up to 64 further than the
+compiled path on a count longer than the stretch; fm1-dock's 256 never is). One shape only: a
+two-instruction delay (`r -= 1; if r != 0 goto`) or another condition still pays a call per lap.
 
 fm1-dock: 0.76x -> 6.05x native, 0.59x -> 2.98x in the browser (node), no audio quantum over its
 2.9 ms where 1680 of 1723 were. Native CPU time unchanged to three digits on Felucca, X0X, Melodee
@@ -1261,7 +1265,10 @@ RAM check, the call's prologue. `Jit` keeps a direct-mapped cache by pc of what 
 a stretch's call, `run_fast` goes straight to the region at the new pc while the budget allows and
 nothing careful is pending: `block_at` is pure, and what it checks of a RAM block `wasm_region_ok`
 checks of all the region's, so the round of the loop would have decided the same. A region that
-does not fit (k = 0) or was dropped goes round the loop as before.
+does not fit (k = 0) or was dropped goes round the loop as before, and nothing is tried once the
+next tick is due. An empty entry is one without a function (table index 0 is never a region's: a
+review found the first version's all-zero entry matching a jump to pc 0, a trap where `step`
+reports the fetch); a dropped region takes only its own entries out of the cache.
 
 On top of 5.35 and 5.36 (the wasm build of each, interleaved in node, the median of 3): Felucca
 +7.8%, X0X +6.1%, 386DX +3.5%, Melodee +2.3%; byte-identical audio on all 95 catalog firmwares.
