@@ -639,7 +639,20 @@ impl Cpu {
                         let r0 = self.regs[(r & 15) as usize];
                         // iterations until the decremented register equals v (2^32 when it does now)
                         let total = match r0.wrapping_sub(v) as u64 { 0 => 1 << 32, t => t };
-                        let k = total.min(room);
+                        let mut k = total.min(room);
+                        // A stretch's call that begins at the stop pc: the runner tests its
+                        // probe after each call (here: after each iteration), and ends the
+                        // slice at the visit where the registers are back at the probe's. That
+                        // visit ends this call too, so the JIT stops where the interpreter does.
+                        if stretch && pc == self.stop_pc && self.sp == self.probe[16] {
+                            let ri = (r & 15) as usize;
+                            if self.regs.iter().zip(&self.probe[..16]).enumerate().all(|(i, (a, b))| i == ri || a == b) {
+                                let j = r0.wrapping_sub(self.probe[ri]) as u64;
+                                if j != 0 && j < k {
+                                    k = j;
+                                }
+                            }
+                        }
                         if k > 0 {
                             self.regs[(r & 15) as usize] = r0.wrapping_sub(k as u32);
                             if k == total {
@@ -5109,6 +5122,51 @@ mod tests {
                 assert!(cpu.pred_skips.is_empty(), "jit {jit}, round {round}: the construct is over");
             }
             assert!(fast > 0 && (!jit || cpu.jit_insns > 0), "jit {jit}: {fast} fast, {} compiled", cpu.jit_insns);
+        }
+    }
+
+    /// fm1-dock's core 1 polls with a software delay in the loop: `r0 = 200; if (--r0 != 0)
+    /// goto self; goto loop`. A slice ended inside the countdown, so the runner's probe is at the
+    /// countdown with r0 part way down, and the runner (fm1-soc's `run_cpu1`: a stretch with the
+    /// JIT, a block a call without) stops at the visit where r0 is back at that value with the
+    /// rest of the state the probe's. The countdown's shortcut must end its call there too, or
+    /// core 1 with the JIT runs on past where the interpreter stopped.
+    #[test]
+    #[cfg(native_jit)]
+    fn a_countdown_at_the_probe_ends_where_the_runner_would() {
+        let jump = |op, next_pc: u32, to: u32| { let d = ((to as i32 - next_pc as i32) / 2) as i16 as u16; [op, 0xea, d as u8, (d >> 8) as u8] };
+        let mut xip = vec![0u8; 0x200];
+        xip[0x80..0x86].copy_from_slice(&[0xc0, 0xff, 0xc8, 0x00, 0x00, 0x00]); // r0 = 200
+        xip[0x86..0x8a].copy_from_slice(&[0x00, 0xea, 0xfe, 0xff]); // if (--r0 != 0) goto self
+        xip[0x8a..0x8e].copy_from_slice(&jump(0xff, 0x8e, 0x80)); // goto r0 = 200
+        const PROBE: u32 = 0x0200_0086;
+        for jit in [false, true] {
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.clone(), cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut cpu = Cpu::new(PROBE);
+            (cpu.jit_on, cpu.stop_checks, cpu.sp, cpu.regs[0]) = (jit, true, 0x1000, 50);
+            cpu.probe[..16].copy_from_slice(&cpu.regs);
+            cpu.probe[16] = cpu.sp;
+            let mut ran = 0;
+            loop {
+                let chunk = if jit {
+                    (cpu.stop_pc, cpu.stop_io) = (PROBE, 0);
+                    512 + STRETCH_ROOM
+                } else {
+                    cpu.block_len_to(&mut bus, PROBE).max(1) as u32
+                };
+                let k = match cpu.run_fast(&mut bus, chunk).unwrap().0 {
+                    0 => { cpu.step(&mut bus).unwrap(); 1 }
+                    k => k,
+                };
+                cpu.stop_pc = 0;
+                ran += k;
+                if cpu.pc == PROBE && cpu.sp == 0x1000 && cpu.regs[..] == cpu.probe[..16] {
+                    break;
+                }
+                assert!(ran < 2000, "jit {jit}: {ran} instructions and never back at the probe");
+            }
+            // 50 iterations down to 0, r0 = 200, 150 iterations back to 50
+            assert_eq!((ran, cpu.regs[0]), (202, 50), "jit {jit}");
         }
     }
 
