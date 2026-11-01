@@ -277,9 +277,7 @@ extern "C" fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let cpu = unsafe { &mut *ctx.cpu };
     unsafe { sync(ctx, bus, idx) };
-    if cpu.stop_pc != 0 {
-        cpu.stop_io = 1;
-    }
+    stop_io(ctx);
     if PROF {
         cpu.profile_helper(unsafe { &*op });
     }
@@ -1847,9 +1845,6 @@ fn fop_inline(op: u8) -> bool {
 
 static mut SELFTEST_DETAIL: String = String::new();
 
-/// The mismatches `fop_selftest` found, the first of each op and register choice, one per line
-/// (empty: none).
-#[allow(static_mut_refs)]
 /// 16 bytes of RAM at 0x0200_0000 holding the instruction under test (the interpreter decodes
 /// and runs it from there: `run_fast`), nothing else (the self-tests)
 struct NoBus([u8; 16]);
@@ -1927,6 +1922,9 @@ pub fn int_selftest() -> u32 {
     fails
 }
 
+/// The mismatches `fop_selftest` and `int_selftest` found, the first of each op and register
+/// choice, one per line (empty: none).
+#[allow(static_mut_refs)]
 pub fn fop_selftest_detail() -> &'static str {
     unsafe { SELFTEST_DETAIL.as_str() }
 }
