@@ -41,6 +41,8 @@ env:   FM1_BREAK_MAX=N (8)        stop reporting --break-pc after N hits
        FM1_FWSC_XIP=FILE          save a package's XIP window; FM1_FWSC_DIR lists its directory
        FM1_SUPERVISOR_START       start in supervisor mode (the old single stack)
        FM1_NO_RAM_BLOCKS          RAM code a step at a time (the reference)
+       FM1_LCD_TIMED              the LCD's transfers take their time at the SPI clock, as on an FM-1
+                                  (also with FM1_STRICT; FM1_LCD_INSTANT turns it off; default: at once)
 a bare-metal program ends its run by jumping outside every code region (else it runs to --steps)";
 const DEFAULT_STEPS: u64 = 5_000_000;
 
@@ -377,6 +379,8 @@ fn main() -> ExitCode {
     image.resize(image.len().max(1) , 0);
 
     let mut soc = Soc::new(args.ram, image);
+    // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
+    soc.lcd_timed = fm1_soc::lcd_timed_from_env();
     soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
     if let Some(f) = &flash_image {
         soc.flash.load(f);

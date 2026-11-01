@@ -235,6 +235,15 @@ interface's setting that has the isochronous endpoint, asks for `FM1_USB_RATE` (
 default) if the endpoint can be set to it and the format offers it (else the device's own rate),
 takes one packet a millisecond and writes the samples to FILE (16-bit, interleaved as the device's
 channels come, no header), printing how many packets came empty (nothing queued: an underrun).
+Realistic mode: by default the emulator is generous where an FM-1 is not, so firmwares boot and
+play as they always have here. `FM1_STRICT=1` (fm1-live) runs it as an FM-1 is: a misaligned 16- or
+32-bit RAM access faults, each instruction takes its measured cycles (both cores, the flash
+cache's misses, the HW DSP / EQ / SRC units' jobs), and the LCD's transfers take their time at
+the SPI clock (a 240 x 240 frame ~77 ms at 12 MHz), so a firmware whose main loop waits for whole
+frames gets as little done in between as on the device; it interprets, without the JIT, so it
+is slower. `FM1_LCD_TIMED=1` (fm1-live, fm1-emu) times the LCD alone; `FM1_LCD_INSTANT=1` keeps it
+instant under `FM1_STRICT`. A firmware that boots under it boots later (its first frames take
+their time). `fm1-live --shot` then reports the LCD's share of the run.
 
 The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
 target), the whole site with `tools/build_site.sh`.

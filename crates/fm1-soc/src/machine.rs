@@ -491,6 +491,46 @@ fn probe_loop(cpu: &mut Cpu, soc: &mut Soc, budget: u32) -> u32 {
     ran
 }
 
+/// Before cpu0's next block or instruction (`run_blocks`, and a runner's reference loop, one
+/// instruction an iteration: fm1-live's FM1_NO_BLOCKS, so the two agree): the PC limits the
+/// firmware wrote handed to the core, "in an ISR" for TIMER4's idle skip, and the interrupt that
+/// is due taken (the CPU exception once: entering its handler clears it).
+pub fn cpu0_between(cpu: &mut Cpu, soc: &mut Soc) {
+    if soc.pc_guard_dirty {
+        soc.pc_guard_dirty = false;
+        cpu.pc_win = soc.pc_windows();
+    }
+    soc.periph.in_isr = !cpu.irq_levels.is_empty();
+    if soc.periph.any_pending() {
+        if let Some((irq, prio)) = soc.pending_irq() {
+            if cpu.irq_ready(prio) {
+                let handler = soc.read32(VEC_BASE + 4 * irq as u32);
+                cpu.interrupt(handler, prio);
+                // the handler's first instruction may stay in compiled code (a micro-op now):
+                // TIMER4's idle skip must see "in an ISR" from that instruction on
+                soc.periph.in_isr = true;
+                if irq == 1 {
+                    soc.periph.exc_pending = false; // (the exception: taken once)
+                }
+            }
+        }
+    }
+}
+
+/// One instruction of cpu0 in a reference loop (after `cpu0_between`), with the PC limits as
+/// `run_blocks` has them, checked here at every instruction: the first one fetched outside them
+/// runs, then the CPU exception (DBG_MSG bit 12).
+pub fn cpu0_step(cpu: &mut Cpu, soc: &mut Soc) -> Result<(), String> {
+    let (_, trip) = cpu.pc_enter(cpu.pc);
+    if let Err(e) = cpu.step(soc) {
+        return Err(format!("{e:?} at pc {:#010x}", cpu.pc));
+    }
+    if trip {
+        soc.guard_trip(12);
+    }
+    Ok(())
+}
+
 /// cpu0's block loop: interrupts taken between blocks, the SoC serviced when a tick is due.
 /// `pending_tick` carries a tick already spent on the next instruction across calls. Returns
 /// the instructions run: n, or fewer when cpu0 released cpu1 or the chip reset (it stops right
@@ -513,25 +553,7 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
             soc.chip_reset(cpu);
             break;
         }
-        if soc.pc_guard_dirty {
-            soc.pc_guard_dirty = false;
-            cpu.pc_win = soc.pc_windows();
-        }
-        soc.periph.in_isr = !cpu.irq_levels.is_empty();
-        if soc.periph.any_pending() {
-            if let Some((irq, prio)) = soc.pending_irq() {
-                if cpu.irq_ready(prio) {
-                    let handler = soc.read32(VEC_BASE + 4 * irq as u32);
-                    cpu.interrupt(handler, prio);
-                    // the handler's first instruction may stay in compiled code (a micro-op now):
-                    // TIMER4's idle skip must see "in an ISR" from that instruction on
-                    soc.periph.in_isr = true;
-                    if irq == 1 {
-                        soc.periph.exc_pending = false; // (the exception: taken once)
-                    }
-                }
-            }
-        }
+        cpu0_between(cpu, soc);
         let now = soc.periph.cycles;
         // not while a release is latched: run_fast's return must break below where it would
         // without the skip (lib.rs latches again on any later 0 -> 1 of 0x10008 bit 3)
@@ -853,6 +875,7 @@ mod tests {
         // (harbor's probes from RAM on an FM-1, 2026-10-24): DBG_MSG bit 12 and the exception pend
         let code = [0x20u8, 0x00].repeat(32); // csync x 32
         let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eef100, 0xf << 4); // IRQ 1 enabled, priority 7 (as fm1_irq.h)
         soc.write32(0x1eee384, XIP_BASE + 0x1000); // window 0 (low, high): past the code
         soc.write32(0x1eee380, XIP_BASE + 0x2000);
         soc.write32(0x1eee38c, RAM_BASE); // window 1: RAM
@@ -873,8 +896,90 @@ mod tests {
     }
 
     #[test]
+    fn the_exception_is_dropped_when_irq_1_is_not_enabled() {
+        // a guard that trips in a firmware without the exception's handler: the cause is kept, but
+        // nothing stays pending for good (no loop skip or idle skip ever again)
+        let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.write32(0x1eee340, 3 << 4); // DBG_EN: AXI read / write invalid
+        soc.read32(0x100);
+        assert!(!soc.periph.exc_pending);
+        assert!(!soc.periph.any_pending());
+        assert_ne!(soc.read32(0x1eee244) & 1 << 4, 0);
+    }
+
+    #[test]
+    fn emu_msg_reads_its_causes_and_a_write_clears_them() {
+        // fm1_irq.h's init writes all ones: that clears, and is not read back
+        let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.write32(0x1eef0d4, 0xffff_ffff);
+        assert_eq!(soc.read32(0x1eef0d4), 0);
+        soc.strict_align = true;
+        soc.read32(RAM_BASE + 2); // misaligned: bit 0
+        assert_eq!(soc.read32(0x1eef0d4), 1);
+        soc.write32(0x1eef0d4, 2); // another bit: bit 0 stays
+        assert_eq!(soc.read32(0x1eef0d4), 1);
+        soc.write32(0x1eef0d4, 1);
+        assert_eq!(soc.read32(0x1eef0d4), 0);
+        // DBG_MSG: a console word written there is not read back as causes
+        soc.write32(0x1eee244, 0x4142_4344);
+        assert_eq!(soc.read32(0x1eee244), 0);
+    }
+
+    #[test]
+    fn a_chip_reset_clears_the_guards() {
+        // after a watchdog or PR_PWR reset the PC limits and the causes are as at power-on: a boot
+        // into code outside the old windows takes no exception
+        let code = [0x20u8, 0x00].repeat(32);
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eef100, 0xf << 4);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap(); // (the boot state taken)
+        soc.write32(0x1eee384, XIP_BASE + 0x1000);
+        soc.write32(0x1eee380, XIP_BASE + 0x2000);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert!(cpu.pc_win.is_some() && soc.dbg_cause != 0);
+        soc.emu_cause = 1;
+        soc.reset_req = Some(crate::p33::P33::RST_SOFT);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_eq!(soc.resets, 1);
+        assert_eq!((soc.dbg_cause, soc.emu_cause, soc.periph.exc_pending), (0, 0, false));
+        assert!(cpu.pc_win.is_none() && soc.pc_windows().is_none());
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_eq!(soc.dbg_cause, 0, "the boot runs outside the old windows: no exception");
+    }
+
+    #[test]
+    fn the_reference_loop_has_the_pc_limits_and_takes_the_exception_once() {
+        // `cpu0_between` / `cpu0_step` (fm1-live's FM1_NO_BLOCKS): the PC limits apply at every
+        // instruction, and the exception is taken once (a handler that returns is not re-entered)
+        let mut code = [0x20u8, 0x00].repeat(32); // csync x 32
+        code.resize(0x100, 0);
+        code[0x80..0x82].copy_from_slice(&[0x20, 0x00]); // the handler: csync ...
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eef100, 0xf << 4);
+        soc.write32(VEC_BASE + 4, XIP_BASE + 0x80);
+        soc.write32(0x1eee384, XIP_BASE + 0x80); // window 0: the handler only
+        soc.write32(0x1eee380, XIP_BASE + 0xff);
+        cpu.ie = true;
+        cpu.sreg_store[0] |= 0x100;
+        let mut taken = 0;
+        for _ in 0..6 {
+            cpu0_between(&mut cpu, &mut soc);
+            if cpu.pc == XIP_BASE + 0x80 {
+                taken += 1;
+                break;
+            }
+            cpu0_step(&mut cpu, &mut soc).unwrap();
+        }
+        assert_eq!(taken, 1, "the exception after the first instruction outside the limits");
+        assert_ne!(soc.dbg_cause & 1 << 12, 0);
+        assert!(!soc.periph.exc_pending, "taken once");
+    }
+
+    #[test]
     fn null_page_access_raises_the_exception_once_armed() {
         let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.write32(0x1eef100, 0xf << 4); // IRQ 1 enabled
         soc.read32(0x100);
         assert!(!soc.periph.exc_pending, "not armed");
         soc.write32(0x1eee340, 3 << 4); // DBG_EN: AXI read / write invalid

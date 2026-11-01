@@ -617,14 +617,12 @@ impl Cpu {
                 return Ok((n, false));
             }
             // (the PC limits: see `pc_win`)
-            let outside = self.pc_win.is_some_and(|w| !(w[0].0 <= pc && pc <= w[0].1) && !(w[1].0 <= pc && pc <= w[1].1));
-            if outside && !self.pc_out {
-                self.pc_out = true;
+            let (outside, trip) = self.pc_enter(pc);
+            if trip {
                 self.pc_trip = true;
                 sync!();
                 return Ok((n, false));
             }
-            self.pc_out = outside;
             let blk = match self.block_at(bus, pc) {
                 Ok(b) => b,
                 Err(e) => {
@@ -832,10 +830,24 @@ impl Cpu {
                     synced = n;
                     pc = self.pc;
                     if self.cost_model {
-                        // (an op the plain path cannot run: its class, as far as the micro-op says)
+                        // (an op the plain path cannot run: each instruction it ran by its class,
+                        // as `step` charges them; each has had its one tick)
                         let at = next_pc - op.len as u32;
-                        let c = op_cost8(&op.fast, op.len, pc != next_pc, pc < at) * (r & 3).max(1);
-                        bus.add_ticks((c - 1) as u64);
+                        let k = (r & 3).max(1);
+                        let c = match op.fast {
+                            Fast::Swap { idx } => {
+                                let (head, tail, hlen) = self.swaps[idx as usize];
+                                let mid = at + hlen as u32;
+                                if k >= 2 {
+                                    bus.fetch_cost(mid);
+                                    op_cost8(&head, hlen, false, false) + op_cost8(&tail, op.len - hlen, pc != next_pc, pc < mid)
+                                } else {
+                                    op_cost8(&head, hlen, pc != mid, pc < at)
+                                }
+                            }
+                            f => op_cost8(&f, op.len, pc != next_pc, pc < at),
+                        };
+                        bus.add_ticks(c.saturating_sub(k) as u64);
                     }
                     careful = r & 4 != 0;
                     if r & 8 != 0 {
@@ -1295,6 +1307,17 @@ impl Cpu {
             self.pair_pending = Some((before, after));
         }
         jumped
+    }
+
+    /// Code is about to run at `pc` (a block in `run_fast`, an instruction in a runner's reference
+    /// loop): (it is outside the PC limits `pc_win`, it is the first code out there since code
+    /// inside them: the exception is due after its first instruction).
+    #[inline]
+    pub fn pc_enter(&mut self, pc: u32) -> (bool, bool) {
+        let outside = self.pc_win.is_some_and(|w| !(w[0].0 <= pc && pc <= w[0].1) && !(w[1].0 <= pc && pc <= w[1].1));
+        let trip = outside && !self.pc_out;
+        self.pc_out = outside;
+        (outside, trip)
     }
 
     /// Fetch/decode/execute one instruction (`step_one`), and with `cost_model` its cost.
@@ -5906,6 +5929,45 @@ mod tests {
         assert_eq!(cpu.run_fast(&mut bus, 3).unwrap(), (3, false));
         assert_eq!((cpu.regs, cpu.pc, cpu.insn_count), (stepped.regs, stepped.pc, stepped.insn_count));
         assert!(bus.0.mem == sbus.0.mem);
+    }
+
+    #[test]
+    fn strict_costs_of_a_swapped_pair_match_step() {
+        // `cost_model`: a pair the block builder swaps (`Fast::Swap`) costs what its two
+        // instructions cost stepped one at a time (once the head's class times two, or `_ => 5`)
+        struct Clocked { ram: FlatRam, ticks: u64 }
+        impl Bus for Clocked {
+            fn read8(&mut self, a: u32) -> u8 { self.ram.read8(a & 0xffff) }
+            fn read16(&mut self, a: u32) -> u16 { self.ram.read16(a & 0xffff) }
+            fn read32(&mut self, a: u32) -> u32 { self.ram.read32(a & 0xffff) }
+            fn write8(&mut self, a: u32, v: u8) { self.ram.write8(a & 0xffff, v) }
+            fn write16(&mut self, a: u32, v: u16) { self.ram.write16(a & 0xffff, v) }
+            fn write32(&mut self, a: u32, v: u32) { self.ram.write32(a & 0xffff, v) }
+            fn tick(&mut self) -> bool { self.ticks += 1; false }
+            fn next_tick_due(&self) -> bool { false }
+            fn add_ticks(&mut self, n: u64) { self.ticks += n; }
+        }
+        // (as `swapped_pair_in_a_block`: `00 d7` paired with `c8 4b`, then two nops)
+        let code = [0x00, 0xd7, 0xc8, 0x4b, 0x00, 0x00, 0x00, 0x00];
+        let fresh = || {
+            let mut mem = vec![0u8; 0x10000];
+            mem[..code.len()].copy_from_slice(&code);
+            let mut cpu = Cpu::new(0x0200_0000);
+            (cpu.regs[0], cpu.regs[4]) = (0x1234_5678, 0x1000);
+            cpu.cost_model = true;
+            (cpu, Clocked { ram: FlatRam::new(mem), ticks: 0 })
+        };
+        let (mut stepped, mut sbus) = fresh();
+        for _ in 0..4 {
+            sbus.tick(); // (the runner's tick, one an instruction)
+            stepped.step(&mut sbus).unwrap();
+        }
+        let (mut cpu, mut bus) = fresh();
+        bus.tick(); // (the first instruction's tick is the runner's: `run_blocks`)
+        assert_eq!(cpu.run_fast(&mut bus, 4).unwrap().0, 4);
+        assert!(matches!(cpu.bops[0].fast, Fast::Swap { .. }), "{:?}", cpu.bops[0]);
+        assert_eq!(cpu.pc, stepped.pc);
+        assert_eq!(bus.ticks, sbus.ticks, "blocks against step");
     }
 
     /// A test bus with a clock and an interrupt source: XIP code at 0x0200_0000, RAM at 0; a
