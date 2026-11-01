@@ -57,8 +57,12 @@ impl Bus for Core1Bus<'_> {
         self.stop_at_reset();
     }
     fn tick(&mut self) -> bool {
-        self.budget = self.budget.saturating_sub(1);
+        let stall = std::mem::take(&mut self.soc.core1_ticks);
+        self.budget = self.budget.saturating_sub(1 + stall);
         self.budget == 0
+    }
+    fn fetch_cost(&mut self, pc: u32) {
+        fm1_core::Bus::fetch_cost(&mut *self.soc, pc);
     }
     fn irq_pending(&self) -> bool {
         self.soc.periph.any_pending()
@@ -80,7 +84,8 @@ impl Bus for Core1Bus<'_> {
         self.budget.saturating_sub(1)
     }
     fn add_ticks(&mut self, n: u64) {
-        self.budget = self.budget.saturating_sub(n);
+        let stall = std::mem::take(&mut self.soc.core1_ticks);
+        self.budget = self.budget.saturating_sub(n + stall);
     }
     fn hw_lock(&mut self, core: u32, set: bool) -> bool {
         self.soc.hw_lock(core, set)
@@ -603,6 +608,23 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         return Ok(());
     }
     let probe = (c1.pc, c1.regs, c1.sp);
+    // (with FM1_STRICT's costs, an instruction that ran past the slice's end is owed from the next one)
+    let mut cycles = cycles;
+    if c1.cost_model {
+        let d = soc.core1_debt.min(cycles);
+        soc.core1_debt -= d;
+        cycles -= d;
+        if cycles == 0 {
+            return Ok(());
+        }
+    }
+    soc.core1_charging = true;
+    let r = run_cpu1_in(c1, soc, cycles, probe);
+    soc.core1_charging = false;
+    r
+}
+
+fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16], u32)) -> Result<(), String> {
     let mut left = cycles.min(1 << 20);
     // first a block at a time, looking for the way back to where it started (a polling loop
     // goes round in well under this); then, busy, in big stretches
@@ -627,7 +649,8 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         // (a stretch: its last call may end up to `STRETCH_ROOM` past what is left, and its ticks
         // never run out)
         let span = if stretch { probing.min(left) + fm1_core::STRETCH_ROOM as u64 } else { busy };
-        let mut bus = Core1Bus { soc: &mut *soc, budget: span.max(64) + 1 };
+        let budget0 = span.max(64) + 1;
+        let mut bus = Core1Bus { soc: &mut *soc, budget: budget0 };
         // (probing: the block at pc, to its last instruction or to where the probe began if that
         // lies inside it, whether it runs compiled or not)
         let chunk = if stretch || probing == 0 { span } else { c1.block_len_to(&mut bus, probe.0).max(1) as u64 };
@@ -647,6 +670,16 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
             Ok((k, _)) => k as u64,
             Err(e) => return Err(format!("cpu1: {e:?} at pc {:#010x}", c1.pc)),
         };
+        // (with FM1_STRICT's costs, core 1's time is the ticks it spent, not its instructions)
+        let k = if c1.cost_model {
+            let stall = std::mem::take(&mut bus.soc.core1_ticks);
+            (budget0 - bus.budget + stall).max(1)
+        } else {
+            k
+        };
+        if c1.cost_model && k > left {
+            soc.core1_debt += k - left;
+        }
         left = left.saturating_sub(k);
         probing = probing.saturating_sub(k);
         if soc.reset_due() {
@@ -704,6 +737,8 @@ fn run_dual_from(
     while cpu1.is_none() {
         *cpu1 = released_cpu1(soc, ram_size).map(|mut c| {
             c.jit_on = jit_on;
+            // (FM1_STRICT costs core 1's instructions as core 0's)
+            c.cost_model = soc.xip_cache.is_some();
             c
         });
         if cpu1.is_some() || done >= n {

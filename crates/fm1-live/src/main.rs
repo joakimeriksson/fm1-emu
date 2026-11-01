@@ -569,9 +569,48 @@ fn shot(o: &Opts, ms: u64) {
     let want_skip = m.soc.periph.skip_idle;
     m.soc.periph.skip_idle = want_skip && skip_from == 0;
     let mut usb_sends = usb_script();
+    // FM1_TPROF=PATH,FROM_MS,TO_MS: time-weighted PC samples of both cores (every 8 cycles,
+    // one instruction at a time) and the flash cache's misses by line, into PATH
+    let tprof: Option<(String, u64, u64)> = std::env::var("FM1_TPROF").ok().and_then(|v| {
+        let mut it = v.split(',');
+        Some((it.next()?.to_string(), it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+    });
+    let mut tp0: std::collections::HashMap<u32, u64> = Default::default();
+    let mut tp1: std::collections::HashMap<u32, u64> = Default::default();
     while m.soc.periph.ms() + 40 < ms {
         if want_skip && m.soc.periph.ms() >= skip_from {
             m.soc.periph.skip_idle = true;
+        }
+        if let Some((_, from, to)) = &tprof {
+            let now = m.soc.periph.ms();
+            if now >= *from && now < *to {
+                if m.soc.miss_hist.is_none() {
+                    m.soc.miss_hist = Some(Default::default());
+                }
+                const P: u64 = 64;
+                for _ in 0..20000 {
+                    let pc0 = m.cpu.pc;
+                    let c0 = m.soc.periph.cycles;
+                    if let Err(e) = m.run(1) {
+                        return halted(&e);
+                    }
+                    let n = m.soc.periph.cycles / P - c0 / P;
+                    if n > 0 {
+                        *tp0.entry(pc0).or_insert(0) += n;
+                        if let Some(c) = m.cpu1.as_ref() {
+                            *tp1.entry(c.pc).or_insert(0) += n;
+                        }
+                    }
+                }
+                continue;
+            }
+            if now >= *to && m.soc.miss_hist.is_some() {
+                let mut o = String::new();
+                for (pc, n) in tp0.iter() { o += &format!("0 {pc:#010x} {n}\n"); }
+                for (pc, n) in tp1.iter() { o += &format!("1 {pc:#010x} {n}\n"); }
+                for (k, n) in m.soc.miss_hist.take().unwrap().iter() { o += &format!("m{} {:#010x} {n}\n", k >> 32, k & 0xffff_ffff); }
+                let _ = std::fs::write(&tprof.as_ref().unwrap().0, o);
+            }
         }
         if let Err(e) = m.run(100_000) {
             usb_audio_save(&m);
@@ -927,7 +966,10 @@ env: FM1_BENCH_KEYS='T[-T2]:PLAY,T:n7,T:enc0:+3,T:pot:512,T:ms:mHEX'  scripted i
      FM1_LCD_INSTANT=1     the LCD's transfers finish at once (by default they take their time at the SPI clock)
      FM1_STRICT=1          as an FM-1 is: a misaligned 16- / 32-bit RAM access faults (EMU_MSG bit 0), and
                            each instruction takes its measured cycles (a taken branch ~5, a call ~5, ALU
-                           ~0.6); the interpreter, no JIT: slower. FM1_STRICT_LOG: list misaligned accesses";
+                           ~0.6), both cores, the flash cache's misses each core's own; the interpreter, no
+                           JIT: slower. FM1_STRICT_LOG: list misaligned accesses
+     FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
+                           FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

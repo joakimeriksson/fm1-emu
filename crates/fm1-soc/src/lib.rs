@@ -267,6 +267,14 @@ pub struct Soc {
     /// The flash cache (FM1_STRICT): XIP reads and code fetched from XIP that miss it cost a line's
     /// fill (`XipCache`)
     pub xip_cache: Option<XipCache>,
+    /// Core 1 is running: a flash cache miss stalls core 1, not the clock; its ticks gather in
+    /// `core1_ticks` for `machine::Core1Bus` to take from core 1's budget, and what an instruction
+    /// ran past a slice's end is `core1_debt`, owed from the next slice
+    pub core1_charging: bool,
+    pub core1_ticks: u64,
+    pub core1_debt: u64,
+    /// FM1_TPROF: flash cache misses by (core << 32 | line address)
+    pub miss_hist: Option<Box<std::collections::HashMap<u64, u64>>>,
     /// Overlay RAM (second bank, 0x04000000), written by the app CRT.
     pub ovl: Ram,
     /// SRAM banks at 0x01f00000 (cleared by the RAM early init).
@@ -466,6 +474,10 @@ impl Soc {
             emu_cause: 0,
             strict_align: false,
             xip_cache: None,
+            core1_charging: false,
+            core1_ticks: 0,
+            core1_debt: 0,
+            miss_hist: None,
             ticks: 0,
             periph: Periph::default(),
             sfr_lo: vec![0; (SFR_LO_END / 4) as usize],
@@ -775,6 +787,25 @@ impl Soc {
         }
     }
 
+    /// FM1_TPROF: a flash cache miss counted by core and line
+    #[cold]
+    fn miss_note(&mut self, addr: u32) {
+        let core = self.core1_charging as u64;
+        if let Some(h) = self.miss_hist.as_mut() {
+            *h.entry(core << 32 | (addr & !63) as u64).or_insert(0) += 1;
+        }
+    }
+
+    /// A flash cache miss's ticks: core 1's own time while it runs, else the clock's
+    #[inline(always)]
+    fn xip_charge(&mut self, t: u64) {
+        if self.core1_charging {
+            self.core1_ticks += t;
+        } else {
+            self.periph.cycles += t;
+        }
+    }
+
     /// The CPU's guards (as Felucca's and Dinghy's hal/fm1_guard.h arm them). A guard that trips
     /// sets its cause in DBG_MSG and raises the CPU exception, interrupt 1 (fm1_irq.h's fault
     /// report reads both); fm1-emu did not have them, so code that trips one on an FM-1 (a probe
@@ -1059,7 +1090,8 @@ impl Bus for Soc {
         if x + 4 <= self.xip.len() {
             if let Some(c) = self.xip_cache.as_mut() {
                 if c.access(addr) {
-                    self.periph.cycles += XipCache::MISS_TICKS;
+                    self.xip_charge(XipCache::MISS_TICKS);
+                    self.miss_note(addr);
                 }
             }
             return u32::from_le_bytes([self.xip[x], self.xip[x + 1], self.xip[x + 2], self.xip[x + 3]]);
@@ -1071,8 +1103,11 @@ impl Bus for Soc {
     fn fetch_cost(&mut self, pc: u32) {
         if pc.wrapping_sub(XIP_BASE) < 0x0100_0000 {
             if let Some(c) = self.xip_cache.as_mut() {
-                let miss = c.access(pc) as u64 + c.access(pc.wrapping_add(4)) as u64;   /* (a 6-byte one may cross a line) */
-                self.periph.cycles += miss * XipCache::MISS_TICKS;
+                let (m1, m2) = (c.access(pc), c.access(pc.wrapping_add(4)));   /* (a 6-byte one may cross a line) */
+                let miss = m1 as u64 + m2 as u64;
+                self.xip_charge(miss * XipCache::MISS_TICKS);
+                if m1 { self.miss_note(pc); }
+                if m2 { self.miss_note(pc.wrapping_add(4)); }
             }
         }
     }
