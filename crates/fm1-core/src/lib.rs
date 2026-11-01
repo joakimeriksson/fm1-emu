@@ -635,7 +635,10 @@ impl Cpu {
                 if let Fast::DecBr { r, cond: Cond::Ne, v, target } = op.fast {
                     if target == pc && !op.careful && !op.pair_head {
                         let extra = if n == 0 { 0 } else { 1 };
-                        let room = (bus.tick_room() + 1).saturating_sub(extra).min((budget - n) as u64);
+                        // (a stretch: as far as compiled code runs before the room check at a
+                        // block's entry stops it, `STRETCH_ROOM` short of the budget)
+                        let cap = if stretch { (budget - n).saturating_sub(STRETCH_ROOM) } else { budget - n };
+                        let room = (bus.tick_room() + 1).saturating_sub(extra).min(cap as u64);
                         let r0 = self.regs[(r & 15) as usize];
                         // iterations until the decremented register equals v (2^32 when it does now)
                         let total = match r0.wrapping_sub(v) as u64 { 0 => 1 << 32, t => t };
@@ -752,14 +755,9 @@ impl Cpu {
                             Box::new(j)
                         });
                     }
-                    let code = match self.wjit.as_mut().map(|j| j.lookup(id)) {
+                    let code = match self.wjit.as_mut().map(|j| j.lookup(id, pc)) {
                         // (a region with RAM blocks runs only while they are what memory holds)
-                        Some((Some((f, at, r)), _)) => {
-                            if let Some(j) = self.wjit.as_mut() {
-                                j.remember(pc, (f, at, r));
-                            }
-                            self.wasm_region_ok(bus, r).then_some((f, at))
-                        }
+                        Some((Some((f, at, r)), _)) => self.wasm_region_ok(bus, r).then_some((f, at)),
                         Some((None, true)) => {
                             // hot: compile its region (it runs from the next visit on)
                             let region = self.wasm_region(bus, id);
@@ -805,7 +803,7 @@ impl Cpu {
                             // checks of a RAM block `wasm_region_ok` checks of all the region's);
                             // not in a stretch, whose calls the loop above bounds. A region that
                             // does not fit (k = 0) or was dropped: round the loop, as ever
-                            while !stretch && !careful && n < limit && !self.no_ram_blocks {
+                            while !stretch && !careful && n < limit && !self.no_ram_blocks && !bus.next_tick_due() {
                                 let Some((f, at, r)) = self.wjit.as_ref().and_then(|j| j.cached(pc)) else { break };
                                 if !self.wasm_region_ok(bus, r) {
                                     break;
