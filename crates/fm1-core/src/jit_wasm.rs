@@ -560,6 +560,14 @@ impl Gen<'_> {
         if last && self.nest == 0 && k == self.cur + 1 {
             return;
         }
+        if k > self.cur {
+            // a later block: its `block` is still open here, and its code follows that block's
+            // end, so a branch to it lands there directly (through the ifs open in this code),
+            // without the round through the loop and the table
+            self.op(BR);
+            uleb(&mut self.c, (k - self.cur - 1 + self.nest) as u64);
+            return;
+        }
         self.i32c(k);
         self.set(L_CUR);
         // to the dispatch loop: past the blocks still open after this one's code, and the ifs
