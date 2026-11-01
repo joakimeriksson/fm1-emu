@@ -311,8 +311,9 @@ DAW that only scans `C:\Program Files\Common Files`.
 
 **In VST3 or CLAP hosts:** add *FM-1* (by fm1-emu) as an instrument on a track.
 
-**On Windows, in Waveform Free** (REAPER works the same way; both find the plugin in the per-user
-folders `tools\build_plugin.ps1` installs into):
+**On Windows, in Waveform Free** (REAPER works the same way; both find the plugin in
+`Common Files` and in the per-user folders, where the release's `INSTALL.txt` and
+`tools\build_plugin.ps1` put it):
 
 [![Three FM-1 tracks in Waveform Free on Windows: a Scintilla pad, a Felucca bass and lead](docs/media/plugin-windows-waveform.gif)](docs/media/plugin-windows-waveform.gif)
 
