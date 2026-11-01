@@ -313,8 +313,8 @@ including Apple's AudioUnitSDK and Steinberg's VST3 SDK, which is MIT since 3.8.
 - GarageBand, as an AU;
 - Steinberg's VST3 test host.
 
-On Windows the VST3 passes Steinberg's validator too (47 of 47), but no Windows DAW has been
-tried yet. Logic, Ableton and the Linux build haven't been tried either. More in
+On Windows the VST3 passes Steinberg's validator too (47 of 47) and plays in REAPER and
+Waveform Free. Logic, Ableton and the Linux build haven't been tried yet. More in
 [crates/fm1-plugin](crates/fm1-plugin/README.md).
 
 ## How it works
