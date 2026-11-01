@@ -705,7 +705,10 @@ impl Cpu {
             if self.jit_on && !careful {
                 if let Some(mem) = jit_mem {
                     if self.wjit.is_none() {
-                        self.wjit = jit_wasm::Jit::new(self.profile).map(Box::new);
+                        self.wjit = jit_wasm::Jit::new(self.profile).map(|mut j| {
+                            j.stops = self.stop_checks;
+                            Box::new(j)
+                        });
                     }
                     let code = match self.wjit.as_mut().map(|j| j.lookup(id)) {
                         // (a region with RAM blocks runs only while they are what memory holds)
@@ -727,16 +730,25 @@ impl Cpu {
                     if let Some((code, at)) = code {
                         let extra = if n == 0 { 0 } else { 1 };
                         sync!();
-                        // (the budget as the interpreter keeps it, to the instruction: each block
-                        // of the region runs only while it fits, else the interpreter goes on)
-                        let cap = limit - n;
+                        // a stretch's call of a block whole runs on, the code checking at each
+                        // block's entry where the runner wants it back (as jit.rs: the stop pc,
+                        // `stop_io`, the room); else the budget as the interpreter keeps it, to
+                        // the instruction: each block of the region runs only while it fits
+                        let open = stretch && whole && self.wjit.as_ref().is_some_and(|j| j.stops);
+                        let cap = if open { budget - n } else { limit - n };
                         // SAFETY: code was compiled for this bus type and memory map
                         let k = unsafe { jit_wasm::run(code, at, self, bus, extra, cap) };
                         if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
                         if k > 0 {
                             n += k;
-                            // (a stretch: its helpers don't say whether they reached a peripheral)
-                            interpreted = true;
+                            if open {
+                                // (it left at a block's entry or after an op: the next call's
+                                // block begins where it stands)
+                                bound = n;
+                            } else {
+                                // (a stretch: its helpers don't say whether they reached a peripheral)
+                                interpreted = true;
+                            }
                             pc = self.pc;
                             // (it left between the two instructions of a glued pair, or inside an
                             // if-else block's then-part)
@@ -1000,9 +1012,9 @@ impl Cpu {
             // an if-else block at the end, its then-part plain: compiled with the then-part in
             // tow (`jit_wasm`'s IfBlk), going on at the else part or past it
             if let Some(last) = tail.filter(|_| ops.len() + 1 == all_len) {
-                if let Fast::IfBlk { has_else: true, fam, then_d, else_d, .. } = last.fast {
+                if let Fast::IfBlk { has_else: true, then_d, else_d, .. } = last.fast {
                     let next = pc + ops.iter().chain([&last]).map(|o| o.len as u32).sum::<u32>();
-                    if let Some(then) = (fam < 8).then(|| self.then_part(bus, next, then_d)).flatten() {
+                    if let Some(then) = self.then_part(bus, next, then_d) {
                         let then_end = next.wrapping_add(then_d as u32);
                         ops.push(last);
                         ops.extend(then);
@@ -6680,7 +6692,7 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
 }
 
 /// `cmp_cond(fam, alt, ..)` as a `Cond`.
-fn cond_of_fam(fam: u64, alt: bool) -> Cond {
+pub(crate) fn cond_of_fam(fam: u64, alt: bool) -> Cond {
     match (fam, alt) {
         (0, false) => Cond::Eq,
         (0, true) => Cond::Ne,

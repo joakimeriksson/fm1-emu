@@ -28,8 +28,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 #[link(wasm_import_module = "env")]
 extern "C" {
-    /// Compile a module and install its `run` in the function table: the table index, 0 on failure.
-    fn fm1_jit_compile(bytes: *const u8, len: usize) -> u32;
+    /// Compile a module and install its `run` in the function table: the table index, 0 on
+    /// failure. The module imports the three helpers as functions (`env.h_read`, `h_write`,
+    /// `h_op`): the host takes them from the table at these indices.
+    fn fm1_jit_compile(bytes: *const u8, len: usize, h_read: u32, h_write: u32, h_op: u32) -> u32;
 }
 
 /// Compiles still allowed (the host refills it: compiling in the audio thread must not hold up a
@@ -61,6 +63,9 @@ pub struct Jit {
     pub bytes: usize,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
     profile: bool,
+    /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
+    /// core 1, whose runner probes for polling loops)
+    pub(crate) stops: bool,
 }
 
 impl std::fmt::Debug for Jit {
@@ -71,7 +76,7 @@ impl std::fmt::Debug for Jit {
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile })
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -100,9 +105,10 @@ impl Jit {
     /// RAM blocks having just been found current. False: it could not be compiled.
     pub(crate) fn install<B: Bus>(&mut self, blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, ver: u64) -> bool {
         COMPILE_BUDGET.fetch_sub(1, Ordering::Relaxed);
-        let m = compile::<B>(blocks, mem, self.profile);
+        let m = compile::<B>(blocks, mem, self.stops);
+        let [r, w, o] = helpers::<B>(self.profile);
         // SAFETY: a plain byte slice; the host copies it before returning
-        let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len()) };
+        let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len(), r, w, o) };
         if f == 0 {
             return false;
         }
@@ -195,11 +201,21 @@ unsafe fn sync<B: Bus>(ctx: &mut Ctx, bus: &mut B, idx: u32) {
     }
 }
 
+/// A helper reached the bus: a runner's stretch (`Cpu::stop_pc`) wants a look (as jit.rs).
+fn stop_io(ctx: &mut Ctx) {
+    // SAFETY: ctx.cpu is the live Cpu `run` was given.
+    let cpu = unsafe { &mut *ctx.cpu };
+    if cpu.stop_pc != 0 {
+        cpu.stop_io = 1;
+    }
+}
+
 extern "C" fn h_read<B: Bus>(ctx: *mut Ctx, addr: u32, idx: u32, w: u32) -> u32 {
     // SAFETY: ctx is the live context `run` passed in; the bus pointer is the caller's &mut B.
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     unsafe { sync(ctx, bus, idx) };
+    stop_io(ctx);
     let v = match w {
         1 => bus.read8(addr) as u32,
         2 => bus.read16(addr) as u32,
@@ -216,6 +232,7 @@ extern "C" fn h_write<B: Bus>(ctx: *mut Ctx, addr: u32, v: u32, idx: u32, w: u32
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     unsafe { sync(ctx, bus, idx) };
+    stop_io(ctx);
     let code = bus.code_writes();
     match w {
         1 => bus.write8(addr, v as u8),
@@ -238,6 +255,9 @@ extern "C" fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let cpu = unsafe { &mut *ctx.cpu };
     unsafe { sync(ctx, bus, idx) };
+    if cpu.stop_pc != 0 {
+        cpu.stop_io = 1;
+    }
     if PROF {
         cpu.profile_helper(unsafe { &*op });
     }
@@ -286,7 +306,7 @@ const END: u8 = 0x0b;
 const BR: u8 = 0x0c;
 const BR_TABLE: u8 = 0x0e;
 const RETURN: u8 = 0x0f;
-const CALL_INDIRECT: u8 = 0x11;
+const CALL: u8 = 0x10;
 const LOCAL_GET: u8 = 0x20;
 const LOCAL_SET: u8 = 0x21;
 const LOCAL_TEE: u8 = 0x22;
@@ -356,6 +376,11 @@ const TY_RUN: u32 = 0;
 const TY_READ: u32 = 1;
 const TY_WRITE: u32 = 2;
 const TY_OP: u32 = 3;
+/// the module's imported helpers, functions 0..3; `run` is function 3
+const F_READ: u32 = 0;
+const F_WRITE: u32 = 1;
+const F_OP: u32 = 2;
+const F_RUN: u32 = 3;
 
 // locals: params cpu, ctx, limit, start; then i32 temporaries, the instructions done in this call
 // before the current block, the block to run next, one i64, and two f32 (the FPU's fmin / fmax)
@@ -386,6 +411,12 @@ fn off_rets() -> u32 {
 fn off_pc() -> u32 {
     offset_of!(Cpu, pc) as u32
 }
+fn off_stop_pc() -> u32 {
+    offset_of!(Cpu, stop_pc) as u32
+}
+fn off_stop_io() -> u32 {
+    offset_of!(Cpu, stop_io) as u32
+}
 fn off_hold() -> u32 {
     offset_of!(Cpu, hold_irq) as u32
 }
@@ -395,9 +426,6 @@ const OFF_PRED: u32 = offset_of!(Ctx, pred) as u32;
 struct Gen<'a> {
     c: Vec<u8>,
     mem: &'a JitMem,
-    h_read: u32,
-    h_write: u32,
-    h_op: u32,
     /// the region's blocks by start pc -> index
     index: std::collections::HashMap<u32, u32>,
     /// the same as a table in memory for jumps to a pc known only at run time (`jump_local`):
@@ -409,6 +437,8 @@ struct Gen<'a> {
     cur: u32,
     n: u32,
     nest: u32,
+    /// the stretch's stop checks at each block's entry (`Jit::stops`)
+    stops: bool,
 }
 
 impl Gen<'_> {
@@ -541,11 +571,10 @@ impl Gen<'_> {
     fn idx(&mut self, i: u32) {
         self.done_plus(i);
     }
-    fn call_ind(&mut self, ty: u32, f: u32) {
-        self.i32c(f);
-        self.op(CALL_INDIRECT);
-        uleb(&mut self.c, ty as u64);
-        self.op(0); // table 0
+    /// call one of the module's imported helpers (`module`: functions 0..3)
+    fn call(&mut self, f: u32) {
+        self.op(CALL);
+        uleb(&mut self.c, f as u64);
     }
     /// After an op that may have called the bus: leave if the next tick is due (and, between a
     /// glued pair's two instructions, keep interrupts back until the second has run).
@@ -699,7 +728,7 @@ impl Gen<'_> {
         self.get(L_ADDR);
         self.idx(idx);
         self.i32c(w as u32);
-        self.call_ind(TY_READ, self.h_read);
+        self.call(F_READ);
         match (w, signed) {
             (2, true) => self.op(I32_EXTEND16_S),
             (1, true) => self.op(I32_EXTEND8_S),
@@ -757,7 +786,7 @@ impl Gen<'_> {
         self.get(L_VAL);
         self.idx(idx);
         self.i32c(w as u32);
-        self.call_ind(TY_WRITE, self.h_write);
+        self.call(F_WRITE);
     }
 
     /// local addr = base + off
@@ -776,20 +805,28 @@ impl Gen<'_> {
 
 /// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
 /// first.
-fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, profile: bool) -> Vec<u8> {
+/// The helpers' indices in the function table (the host imports them into a region's module:
+/// `fm1_jit_compile`), as a region compiled with `profile` calls them.
+fn helpers<B: Bus>(profile: bool) -> [u32; 3] {
+    [
+        h_read::<B> as usize as u32,
+        h_write::<B> as usize as u32,
+        if profile { h_op::<B, true> as usize as u32 } else { h_op::<B, false> as usize as u32 },
+    ]
+}
+
+fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, stops: bool) -> Vec<u8> {
     let n = blocks.len() as u32;
     let mut g = Gen {
         c: Vec::with_capacity(64 * blocks.iter().map(|b| b.2.len()).sum::<usize>()),
         mem,
-        h_read: h_read::<B> as usize as u32,
-        h_write: h_write::<B> as usize as u32,
-        h_op: if profile { h_op::<B, true> as usize as u32 } else { h_op::<B, false> as usize as u32 },
         index: blocks.iter().enumerate().map(|(k, b)| (b.1, k as u32)).collect(),
         table: jump_table(blocks),
         pred: None,
         cur: 0,
         n,
         nest: 0,
+        stops,
     };
     // loop { block_{n-1} { .. block_0 { br_table cur } code_0 } code_1 .. } code_{n-1} }: a br
     // to depth k from the innermost block lands on code_k; code_k reaches the loop through the
@@ -830,6 +867,36 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
     g.if_();
     g.exit_imm(pc0, 0);
     g.end();
+    // a runner's stretch (`Cpu::stop_pc`), as jit.rs compiles it: past the call's first block,
+    // leave before a block that holds the stop pc, once a helper reached the bus (`stop_io`),
+    // or with less than `STRETCH_ROOM` of the limit left (the runner's checks come at the
+    // block's entry, where the interpreter would make them)
+    if g.stops {
+        let bytes: u32 = ops.iter().map(|o| o.len as u32).sum();
+        g.get(L_DONE);
+        g.if_();
+        g.ld_field(off_stop_pc());
+        g.tee(L_VAL);
+        g.if_();
+        g.get(L_VAL);
+        g.i32c(pc0);
+        g.op(I32_SUB);
+        g.i32c(bytes);
+        g.op(I32_LT_U);
+        g.ld_field(off_stop_io());
+        g.op(I32_OR);
+        g.get(L_DONE);
+        g.i32c(crate::STRETCH_ROOM);
+        g.op(I32_ADD);
+        g.get(L_LIMIT);
+        g.op(I32_GE_U);
+        g.op(I32_OR);
+        g.if_();
+        g.exit_imm(pc0, 0);
+        g.end();
+        g.end();
+        g.end();
+    }
 
     let mut pc = pc0;
     let mut ended = false;
@@ -1357,7 +1424,7 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 g.goto(target, count, false);
                 g.end();
             }
-            Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } if fam < 8 && g.pred.is_none() => {
+            Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } if g.pred.is_none() => {
                 // the region brought its then-part along (`Cpu::wasm_region`): the rest of this
                 // block's ops. Not taken: on at the else part. Taken: the then-part, then past
                 // the else part (the interpreter's pred_skips, kept by check_brk on an exit)
@@ -1374,13 +1441,16 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                     g.op(I32_NE);
                     g.i32c(alt as u32);
                     g.op(I32_EQ);
-                } else {
+                } else if fam < 8 {
                     g.get(L_A);
                     g.get(L_B);
                     g.op(match fam { 0 => I32_EQ, 1 => I32_GE_U, 4 => I32_GT_U, 5 => I32_GE_S, _ => I32_GT_S });
                     if alt {
                         g.op(I32_EQZ);
                     }
+                } else {
+                    // a float condition (`cmp_cond`'s `fcond`), as the branches compile it
+                    g.cmp(crate::cond_of_fam(fam as u64, alt));
                 }
                 g.op(I32_EQZ);
                 g.if_();
@@ -1396,7 +1466,7 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 pc = next_pc;
                 continue;
             }
-            Fast::IfBlk { a, rk, fam, alt, has_else: false, rv, then_d, .. } if fam < 8 => {
+            Fast::IfBlk { a, rk, fam, alt, has_else: false, rv, then_d, .. } => {
                 // taken: the then-part follows; not taken: skip it
                 g.rhs(rk, rv);
                 g.ld_reg(a);
@@ -1409,13 +1479,16 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                     g.op(I32_NE);
                     g.i32c(alt as u32);
                     g.op(I32_EQ);
-                } else {
+                } else if fam < 8 {
                     g.get(L_A);
                     g.get(L_B);
                     g.op(match fam { 0 => I32_EQ, 1 => I32_GE_U, 4 => I32_GT_U, 5 => I32_GE_S, _ => I32_GT_S });
                     if alt {
                         g.op(I32_EQZ);
                     }
+                } else {
+                    // a float condition (`cmp_cond`'s `fcond`), as the branches compile it
+                    g.cmp(crate::cond_of_fam(fam as u64, alt));
                 }
                 g.op(I32_EQZ);
                 g.if_();
@@ -1461,7 +1534,7 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 g.i32c(p as *const Fast as u32);
                 g.idx(idx);
                 g.i32c(next_pc);
-                g.call_ind(TY_OP, g.h_op);
+                g.call(F_OP);
                 g.c.push(LOCAL_TEE);
                 uleb(&mut g.c, L_OPRES as u64);
                 g.c.push(I64_CONST);
@@ -1575,8 +1648,9 @@ pub fn fop_selftest() -> u32 {
             bus.0 = [0; 16];
             bus.0[..4].copy_from_slice(&[0x3f, 0xe5, b2, b3]);
             let m = compile::<NoBus>(&[(0, 0x0200_0000, vec![bop])], &mem, false);
+            let [r, w, o] = helpers::<NoBus>(false);
             // SAFETY: a plain byte slice; the host copies it before returning
-            let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len()) };
+            let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len(), r, w, o) };
             if f == 0 {
                 fail(op, d, a, b, 0, 0, "the host could not compile the module".to_owned());
                 continue;
@@ -1670,21 +1744,26 @@ fn module(body: &[u8]) -> Vec<u8> {
         t.extend_from_slice(r);
     }
     section(&mut m, 1, &t);
-    // imports: env.memory, env.table
+    // imports: env.memory, and the helpers as functions (not the emulator's table: a module
+    // that imports a table of thousands of regions gets a dispatch table of its own in V8,
+    // copied at each instantiation and updated at each grow and set: with 7500 regions, 40%
+    // of Bubba Machine's time and 4 GB of heap in a minute)
     let mut im = Vec::new();
-    uleb(&mut im, 2);
+    uleb(&mut im, 4);
     name(&mut im, "env");
     name(&mut im, "memory");
     im.extend_from_slice(&[0x02, 0x00, 0x00]);
-    name(&mut im, "env");
-    name(&mut im, "table");
-    im.extend_from_slice(&[0x01, 0x70, 0x00, 0x00]);
+    for (n, ty) in [("h_read", TY_READ), ("h_write", TY_WRITE), ("h_op", TY_OP)] {
+        name(&mut im, "env");
+        name(&mut im, n);
+        im.extend_from_slice(&[0x00, ty as u8]);
+    }
     section(&mut m, 2, &im);
     section(&mut m, 3, &[1, TY_RUN as u8]);
     let mut ex = Vec::new();
     uleb(&mut ex, 1);
     name(&mut ex, "run");
-    ex.extend_from_slice(&[0x00, 0x00]);
+    ex.extend_from_slice(&[0x00, F_RUN as u8]);
     section(&mut m, 7, &ex);
     // code: locals a, b, addr, val, off, done, cur (i32), the op result (i64), fa, fb (f32)
     let mut f = Vec::new();
