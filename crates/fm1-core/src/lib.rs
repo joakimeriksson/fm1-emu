@@ -267,6 +267,11 @@ pub struct Cpu {
     pub jit_entries: u64,
     pub jit_insns: u64,
     pub jit_helpers: std::collections::BTreeMap<String, u64>,
+    /// The wasm JIT's exits by reason (`jit_wasm::EXIT_NAMES`), the instructions the calls so
+    /// ended ran, and its loads and stores by path (RAM, XIP, bus; RAM store, code word, bus)
+    pub exit_hist: [u64; 10],
+    pub exit_insns: [u64; 10],
+    pub mem_hist: [u64; 6],
     /// Instruction-cache misses (decodes) since reset.
     pub decodes: u64,
     /// Canonical syntax of the instruction executing (from its cache line).
@@ -440,7 +445,17 @@ impl Cpu {
 
     pub fn jit_profile_json(&self) -> String {
         let helpers = self.jit_helpers.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
-        format!("{{\"entries\":{},\"instructions\":{},\"helpers\":{{{helpers}}}}}", self.jit_entries, self.jit_insns)
+        #[cfg(target_arch = "wasm32")]
+        let exits = {
+            let names = jit_wasm::EXIT_NAMES;
+            let e = names.iter().zip(self.exit_hist).filter(|(_, n)| *n > 0).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
+            let i = names.iter().zip(self.exit_insns).filter(|(_, n)| *n > 0).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
+            let m = ["ld_ram", "ld_xip", "ld_bus", "st_ram", "st_code", "st_bus"].iter().zip(self.mem_hist).map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
+            format!(",\"exits\":{{{e}}},\"exit_insns\":{{{i}}},\"mem\":{{{m}}}")
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let exits = String::new();
+        format!("{{\"entries\":{},\"instructions\":{},\"insns\":{},\"helpers\":{{{helpers}}}{exits}}}", self.jit_entries, self.jit_insns, self.insn_count)
     }
 
     /// Count a JIT helper call when profiling. Called for every helper op, so the check is
@@ -820,7 +835,9 @@ impl Cpu {
                             // hot: compile its region (it runs from the next visit on)
                             let region = self.wasm_region(bus, id);
                             let ver = bus.code_writes().unwrap_or(u64::MAX);
-                            let ok = !region.is_empty() && self.wjit.as_mut().is_some_and(|j| j.install::<B>(&region, &mem, ver));
+                            // (profiling as the core is now: core 1 gets the flag after its release)
+                            let profile = self.profile;
+                            let ok = !region.is_empty() && self.wjit.as_mut().is_some_and(|j| j.install::<B>(&region, &mem, ver, profile));
                             if !ok {
                                 if let Some(j) = self.wjit.as_mut() {
                                     j.refuse(id);
