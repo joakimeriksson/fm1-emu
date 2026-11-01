@@ -311,6 +311,23 @@ DAW that only scans `C:\Program Files\Common Files`.
 
 **In VST3 or CLAP hosts:** add *FM-1* (by fm1-emu) as an instrument on a track.
 
+**On Windows, in Waveform Free** (REAPER works the same way; both find the plugin in the per-user
+folders `tools\build_plugin.ps1` installs into):
+
+[![Three FM-1 tracks in Waveform Free on Windows: a Scintilla pad, a Felucca bass and lead](docs/media/plugin-windows-waveform.gif)](docs/media/plugin-windows-waveform.gif)
+
+1. *Track → Create New Track*, then the **+** at the right end of the track: *Plugins → fm1-emu → FM-1*.
+2. Click the *FM-1* box on the track to open its window, then *Load firmware / save…* and pick a
+   `.fwsc` package.
+3. Play it from a MIDI keyboard, or click the panel's keys. A MIDI clip on the track plays it too.
+
+The clip above is three tracks at 100 BPM, each with its own FM-1: a pad on
+[Scintilla](https://github.com/joakimeriksson/scintilla-fm1) (an Elka Synthex; preset 29,
+*Filtered strings*), a bass and a lead on Felucca (*Analog Acid* and *FM6 Tine EP*). On a laptop
+each instance runs at 3–4x real time. FM-1 Dock, which runs both of the chip's cores, is the
+heaviest: under real time on that laptop even at 120 MHz, so a synth it carries as a module is
+lighter as its own firmware, as Scintilla is here.
+
 **How it's built:** it's one plugin written in Rust as a CLAP with
 [nih-plug](https://github.com/robbert-vdh/nih-plug). [clap-wrapper](https://github.com/free-audio/clap-wrapper)
 makes the AU and VST3 of it, and the plugin stays MIT. All its parts are MIT, ISC or Apache-2.0,
