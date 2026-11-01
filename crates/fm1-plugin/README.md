@@ -81,6 +81,9 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   including when the same firmware is already running. For a browser backup that omits
   bring-your-own firmware, load the matching `.fwsc` first, then import the `.fm1save`.
   Invalid imports leave the current setup intact.
+  On a Mac, keep the files outside Desktop, Documents, Downloads and iCloud Drive: macOS keeps a
+  DAW's plugin host out of those folders without asking, and the load fails with "Operation not
+  permitted". `~/Music` or any other folder in your home works.
 - **Export save…** captures the running firmware and its latest flash changes as a `.fm1save`.
   Send it to someone else, import it in the browser, or open it in another VST3/AU/CLAP instance.
   It waits for flash writes to finish and writes the file in the background. Edits held only in

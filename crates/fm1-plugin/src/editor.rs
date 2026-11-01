@@ -93,7 +93,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 if let Some(result) = ui.job.as_ref().and_then(|job| job.lock().unwrap().take()) {
                     ui.job = None;
                     ui.msg_until = result.as_ref().ok().map(|_| std::time::Instant::now() + std::time::Duration::from_secs(3));
-                    ui.msg = match result { Ok(message) => message, Err(error) => format!("Save file: {error}") };
+                    ui.msg = match result { Ok(message) => message, Err(error) => error };
                 }
                 let name = params.firmware.lock().unwrap().name.clone();
                 let idle = ui.picking.is_none() && ui.job.is_none();
@@ -361,7 +361,9 @@ fn file_job(action: FileAction, mut path: std::path::PathBuf, params: Arc<Fm1Par
                 }
             }
         };
-        *result.lock().unwrap() = Some(run());
+        // (the error says which of the two it was: a refused load once read "Save file: …", #56)
+        let what = match action { FileAction::Load => "Load", FileAction::Export => "Export" };
+        *result.lock().unwrap() = Some(run().map_err(|e| format!("{what}: {e}")));
     });
     job
 }
