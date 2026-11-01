@@ -615,10 +615,48 @@ impl Cpu {
             // only where calls end: see jit.rs's `compile`) if it is this block whole, else only
             // to its end
             let mut whole = false;
+            // (a stretch: a runner's call begins here)
+            let at_call = !stretch || n == bound;
             if stretch && n == bound {
                 let (to, all) = len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, pc, self.stop_pc);
                 bound = n + to;
                 whole = all;
+            }
+            // A countdown loop of one instruction, `if (--R != #i) goto self` (a software delay:
+            // fm1-dock's core 1 spends half its time in one), is a block that branches to its own
+            // start: every iteration was a block, a run_fast call in a stretch (the stop pc lies in
+            // it), 60 M calls a second. Its iterations are pure (one register, no bus), so as many
+            // as fit the budget and the ticks before the next event run here in one go, before the
+            // JIT or the interpreter: the same state after the same number of instructions either
+            // way (the register one per iteration, the ticks as compiled code pays them).
+            if len == 1 && !careful && at_call {
+                // SAFETY: build_block pushed start into bops (as the loop below relies on)
+                let op = unsafe { *self.bops.get_unchecked(start as usize) };
+                if let Fast::DecBr { r, cond: Cond::Ne, v, target } = op.fast {
+                    if target == pc && !op.careful && !op.pair_head {
+                        let extra = if n == 0 { 0 } else { 1 };
+                        let room = (bus.tick_room() + 1).saturating_sub(extra).min((budget - n) as u64);
+                        let r0 = self.regs[(r & 15) as usize];
+                        // iterations until the decremented register equals v (2^32 when it does now)
+                        let total = match r0.wrapping_sub(v) as u64 { 0 => 1 << 32, t => t };
+                        let k = total.min(room);
+                        if k > 0 {
+                            self.regs[(r & 15) as usize] = r0.wrapping_sub(k as u32);
+                            if k == total {
+                                pc += op.len as u32; // fell through
+                            }
+                            n += k as u32;
+                            bus.add_ticks(k - 1 + extra);
+                            if stretch {
+                                // the runner's call was this block: it ends here (and the runner
+                                // looks, as after a block run interpreted)
+                                bound = n;
+                                interpreted = true;
+                            }
+                            continue;
+                        }
+                    }
+                }
             }
             let limit = if stretch { bound } else { budget };
             // (careful: inside a then-part or a rep loop with nothing else in progress, where a

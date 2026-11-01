@@ -1224,6 +1224,33 @@ change: that came with the cores' lock handover (d70ed00; at 52e1cb7 they agree)
 FPU; its JIT also compiles 7500 regions in 20 s (RAM code dropped and rebuilt), 0.46x where the
 interpreter runs 1.15x.
 
+## 5.36 A countdown loop of one instruction runs its iterations in one go (2026-11-01)
+
+fm1-dock ran at 0.76x real time natively and 0.6x in the browser, every other firmware's speed
+notwithstanding, and its profile was unlike theirs: 76% of the browser's time in core 1's machinery
+(`run_stretch`, `run_cpu1`, `Jit::lookup`), 283 M `run_fast` calls for 297 M of core 1's instructions.
+Sampling both cores' pcs (fm1-live's `FM1_BENCH_PCS` samples core 0; a local patch added core 1)
+put half of all samples on one RAM address: `if (--r0 != 0) goto self` after `r0 = 256`, a software
+delay in core 1's polling loop. Each iteration is a block of one instruction that branches to its
+own start, and in a runner's stretch that start is the stop pc, so compiled code left after every
+iteration, on AArch64 as in wasm: one call per instruction, 60 M a second. The idle probe never
+matched, the counter differing at every visit.
+
+`run_fast` now runs such a block's iterations in one go, before the JIT or the interpreter sees it:
+a block of one `DecBr` with `!=` whose target is its own pc, entered at a call's start, runs as many
+iterations as fit the budget and the ticks before the next event (`tick_room`, as compiled code pays
+them: `add_ticks` for all but the first instruction of a call), the register down by one per
+iteration, the pc past the loop when the count ran out. Nothing else observes the iterations (one
+register, no bus), so the state after any number of instructions is the interpreter's; a stretch
+ends its call there and returns to the runner, as after a block run interpreted.
+
+fm1-dock: 0.76x -> 6.05x native, 0.59x -> 2.98x in the browser (node), no audio quantum over its
+2.9 ms where 1680 of 1723 were. Native CPU time unchanged to three digits on Felucca, X0X, Melodee
+and 386DX. Exactness: fm1-core's 66 and fm1-soc's 70 tests; the native catalog check, 94 ok, fm1-dock
+itself "rebuilt" (its 0.7 package is not the one hashed: JIT = interpreter, and master's audio over
+8 s with keys byte for byte; tests/catalog.json carries the new package and audio hashes); the wasm
+build's audio identical to master's on all 95.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.
