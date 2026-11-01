@@ -92,7 +92,8 @@ $env:CLAP_PATH = "$PWD\target\plugin"
 target\plugin\vst3sdk-build\bin\Release\validator.exe target\plugin\FM-1.vst3   # 47 tests pass
 ```
 
-The build is not code-signed; Windows hosts load unsigned plugins.
+The build is not code-signed; Windows hosts load unsigned plugins. REAPER and Waveform scan the
+per-user folders by default, so the plugin shows up after their next plugin scan.
 
 ## Releases
 
@@ -181,7 +182,8 @@ audio. It uses `reference/firmwares/felucca.fwsc` (`node tools/fetch_firmwares.m
 | GarageBand | AU: loads a firmware and runs; the window's redraw on reopening is fixed but not yet seen there |
 | Steinberg's editorhost | VST3: the window draws, firmwares boot and react to the panel |
 | Logic, Ableton, REAPER, Bitwig | not yet tried |
-| Windows (x86-64) | builds with `tools\build_plugin.ps1`; the crate's 12 tests and Steinberg's validator (47 of 47) pass on Windows 11; no DAW tried yet |
+| Windows (x86-64) | builds with `tools\build_plugin.ps1`; the crate's 12 tests and Steinberg's validator (47 of 47) pass on Windows 11 |
+| REAPER 7.84, Waveform Free 14 (Windows 11) | VST3: both find it in the per-user folder, load Felucca through the file dialog and play it from the panel and MIDI (3.4x real time on this PC) |
 | Linux | not built yet: nih-plug and clap-wrapper support it, but the build scripts are macOS and Windows only |
 
 ## Testing portable saves locally
