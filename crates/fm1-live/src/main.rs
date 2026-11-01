@@ -36,7 +36,7 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use fm1_core::{Bus, Cpu};
-use fm1_soc::{machine, Action, Soc, VEC_BASE};
+use fm1_soc::{machine, Action, Soc};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use panel::{Ctl, ENCS, H, W};
 
@@ -196,12 +196,29 @@ impl Machine {
             None => std::fs::read(&o.bin)?,
         };
         let mut soc = Soc::new(RAM_SIZE, image);
-        soc.periph.hz = o.mhz * 1_000_000;
+        let strict = std::env::var_os("FM1_STRICT").is_some();
+        // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
+        // time) and as it is timed: each instruction its measured cost (fm1_core's op_cost8) on a
+        // clock in eighths of a cycle (the HW units' jobs too); the interpreter only, and no loop
+        // skip (it counts instructions)
+        soc.periph.cycle_ticks = if strict { 8 } else { 1 };
+        soc.periph.hz = o.mhz * 1_000_000 * soc.periph.cycle_ticks;
+        soc.strict_align = strict;
+        // (FM1_STRICT or FM1_LCD_TIMED; FM1_LCD_INSTANT turns it off again)
+        soc.lcd_timed = fm1_soc::lcd_timed_from_env();
+        if strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(fm1_soc::XipCache::default());
+        }
         soc.periph.skip_idle = true;
         soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
         soc.cpu1_survives = o.cpu1_survives;
         let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
-        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err();
+        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err() && !strict;
+        cpu.cost_model = strict;
+        if std::env::var_os("FM1_ISA_HIST").is_some() {
+            cpu.isa_hist = Some(Default::default());
+        }
         // the SPL hands cpu0 over in user mode (see fm1-emu)
         cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
         // the SPL's boot-parameter struct (see fm1-emu): an all-zero pair
@@ -252,15 +269,8 @@ impl Machine {
                 self.soc.chip_reset(&mut self.cpu); // (as run_blocks: cpu0 from its start)
                 self.cpu1 = None;
             }
-            self.soc.periph.in_isr = !self.cpu.irq_levels.is_empty();
-            if self.soc.periph.any_pending() {
-                if let Some((irq, prio)) = self.soc.pending_irq() {
-                    if self.cpu.irq_ready(prio) {
-                        let handler = self.soc.read32(VEC_BASE + 4 * irq as u32);
-                        self.cpu.interrupt(handler, prio);
-                    }
-                }
-            }
+            // (as run_blocks: the PC limits, the interrupt due, the exception taken once)
+            machine::cpu0_between(&mut self.cpu, &mut self.soc);
             if let Some((bpc, after)) = self.watch_call {
                 if self.cpu.pc == bpc && self.cpu.regs[2] != 0 && self.soc.periph.ms() >= after && self.watch_hits < 60 {
                     self.watch_hits += 1;
@@ -268,9 +278,7 @@ impl Machine {
                 }
             }
             let (pc, sk) = (self.cpu.pc, self.soc.periph.skipped);
-            if let Err(e) = self.cpu.step(&mut self.soc) {
-                return Err(format!("{e:?} at pc {:#010x}", self.cpu.pc));
-            }
+            machine::cpu0_step(&mut self.cpu, &mut self.soc)?;
             if self.skip_log.is_some() && self.soc.periph.skipped != sk {
                 *self.skip_log.as_mut().unwrap().entry(pc).or_insert(0) += 1;
             }
@@ -560,9 +568,48 @@ fn shot(o: &Opts, ms: u64) {
     let want_skip = m.soc.periph.skip_idle;
     m.soc.periph.skip_idle = want_skip && skip_from == 0;
     let mut usb_sends = usb_script();
+    // FM1_TPROF=PATH,FROM_MS,TO_MS: time-weighted PC samples of both cores (every 8 cycles,
+    // one instruction at a time) and the flash cache's misses by line, into PATH
+    let tprof: Option<(String, u64, u64)> = std::env::var("FM1_TPROF").ok().and_then(|v| {
+        let mut it = v.split(',');
+        Some((it.next()?.to_string(), it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+    });
+    let mut tp0: std::collections::HashMap<u32, u64> = Default::default();
+    let mut tp1: std::collections::HashMap<u32, u64> = Default::default();
     while m.soc.periph.ms() + 40 < ms {
         if want_skip && m.soc.periph.ms() >= skip_from {
             m.soc.periph.skip_idle = true;
+        }
+        if let Some((_, from, to)) = &tprof {
+            let now = m.soc.periph.ms();
+            if now >= *from && now < *to {
+                if m.soc.miss_hist.is_none() {
+                    m.soc.miss_hist = Some(Default::default());
+                }
+                const P: u64 = 64;
+                for _ in 0..20000 {
+                    let pc0 = m.cpu.pc;
+                    let c0 = m.soc.periph.cycles;
+                    if let Err(e) = m.run(1) {
+                        return halted(&e);
+                    }
+                    let n = m.soc.periph.cycles / P - c0 / P;
+                    if n > 0 {
+                        *tp0.entry(pc0).or_insert(0) += n;
+                        if let Some(c) = m.cpu1.as_ref() {
+                            *tp1.entry(c.pc).or_insert(0) += n;
+                        }
+                    }
+                }
+                continue;
+            }
+            if now >= *to && m.soc.miss_hist.is_some() {
+                let mut o = String::new();
+                for (pc, n) in tp0.iter() { o += &format!("0 {pc:#010x} {n}\n"); }
+                for (pc, n) in tp1.iter() { o += &format!("1 {pc:#010x} {n}\n"); }
+                for (k, n) in m.soc.miss_hist.take().unwrap().iter() { o += &format!("m{} {:#010x} {n}\n", k >> 32, k & 0xffff_ffff); }
+                let _ = std::fs::write(&tprof.as_ref().unwrap().0, o);
+            }
         }
         if let Err(e) = m.run(100_000) {
             usb_audio_save(&m);
@@ -597,6 +644,25 @@ fn shot(o: &Opts, ms: u64) {
         m.soc.periph.hz / 1_000_000
     );
     let leds = m.soc.periph.led_take();
+    if let (Some(path), Some(h)) = (std::env::var_os("FM1_ISA_HIST"), m.cpu.isa_hist.as_ref()) {
+        // executed instructions by ISA form, as JSON {syntax: count} (FM1_NO_BLOCKS: every step)
+        let mut v: Vec<_> = h.iter().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1));
+        let body: Vec<String> = v.iter().map(|(k, n)| format!("{:?}: {n}", k)).collect();
+        let _ = std::fs::write(&path, format!("{{{}}}\n", body.join(", ")));
+    }
+    if m.soc.lcd_timed {
+        // the screen's share of the run: a firmware whose main loop waits for whole frames gets that
+        // little else done (FM-1 SID's silent tunes on the device, 2026-10-24)
+        let p = &m.soc.periph;
+        let share = 100.0 * p.spi1_wire as f64 / p.cycles.max(1) as f64;
+        println!("LCD: on the wire {:.0}% of the run ({:.0} ms of {:.0} ms)", share,
+            p.spi1_wire as f64 * 1000.0 / p.hz as f64, p.cycles as f64 * 1000.0 / p.hz as f64);
+        if share > 50.0 {
+            println!("warning: the LCD's transfers take {share:.0}% of the time: a main loop that waits for them \
+                      has little left for anything else (send only what changed; FM1_LCD_INSTANT=1: the instant LCD)");
+        }
+    }
     if let Some(log) = &m.skip_log {
         let mut v: Vec<_> = log.iter().collect();
         v.sort_by(|a, b| b.1.cmp(a.1));
@@ -895,7 +961,17 @@ env: FM1_BENCH_KEYS='T[-T2]:PLAY,T:n7,T:enc0:+3,T:pot:512,T:ms:mHEX'  scripted i
      FM1_USB_SEND='MS:HEX;…'  --shot --usb: MIDI messages over USB at those times (@PATH: from a file); FM1_USB_TRACE: the bus
      FM1_USB_SIE_NS=N      --usb: each SIE register access takes N ns (default 1000)
      FM1_USB_WAV=FILE      --usb, --bench / --shot: record the USB audio as a computer would (s16le, no header);
-                           FM1_USB_RATE=HZ asks for that rate if the device lists it (default 44100)";
+                           FM1_USB_RATE=HZ asks for that rate if the device lists it (default 44100)
+     FM1_LCD_TIMED=1       the LCD's transfers take their time at the SPI clock, as on an FM-1 (a 240 x 240
+                           frame ~77 ms at 12 MHz; by default they finish at once). On with FM1_STRICT too;
+                           FM1_LCD_INSTANT=1 turns it off again
+     FM1_STRICT=1          as an FM-1 is: a misaligned 16- / 32-bit RAM access faults (EMU_MSG bit 0), the
+                           LCD is timed (FM1_LCD_TIMED), and each instruction takes its measured cycles (a
+                           taken branch ~5, a call ~5, ALU ~0.6), both cores, the flash cache's misses each
+                           core's own; the interpreter, no JIT: slower. FM1_STRICT_LOG: list misaligned
+                           accesses
+     FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
+                           FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
 fn main() {
     if std::env::args().any(|a| a == "--version" || a == "-V") {

@@ -119,6 +119,7 @@ impl Machine {
         let mut soc = Soc::new(RAM_SIZE, image);
         soc.periph.hz = mhz as u64 * 1_000_000;
         soc.periph.skip_idle = true;
+        soc.lcd_timed = unsafe { LCD_TIMED };
         soc.cpu1_survives = unsafe { CPU1_SURVIVES };
         let mut cpu = Cpu::new(entry);
         // (cpu1 follows cpu0's setting: run_dual)
@@ -193,6 +194,8 @@ static mut M: Option<Machine> = None;
 static mut JIT: bool = false;
 static mut JIT_PER_RENDER: u32 = 0;
 static mut AHEAD: u32 = 0;
+/// `fm1_lcd_timed`: the next boot's `Soc::lcd_timed`
+static mut LCD_TIMED: bool = false;
 /// `fm1_cpu1_survives`: a fault on core 1 stops that core alone and cpu0 goes on (`Soc::cpu1_survives`)
 static mut CPU1_SURVIVES: bool = false;
 static mut OUT_L: [f32; 1024] = [0.0; 1024];
@@ -298,6 +301,13 @@ pub extern "C" fn fm1_jit(on: u32, per_render: u32) {
             c1.jit_on = on != 0;
         }
     }
+}
+
+/// The LCD's transfers take their time at the SPI clock, as on an FM-1 (`on` = 1; fm1_soc's
+/// `Soc::lcd_timed`), from the next boot on. Off by default: they finish at once.
+#[no_mangle]
+pub extern "C" fn fm1_lcd_timed(on: u32) {
+    unsafe { LCD_TIMED = on != 0 };
 }
 
 /// Optional profiling, disabled during throughput measurements. Turn it on before the first
@@ -484,7 +494,7 @@ pub extern "C" fn fm1_analog(idx: u32, value: u32) {
 #[no_mangle]
 pub extern "C" fn fm1_velocity(us: u32) {
     if let Some(m) = machine() {
-        m.soc.periph.smk_vel = (m.soc.periph.hz as u128 * us as u128 / 1_000_000) as u64;
+        m.soc.periph.smk_vel_us = us;
     }
 }
 

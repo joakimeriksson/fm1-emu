@@ -82,7 +82,8 @@ struct Machine {
 }
 
 impl Machine {
-    fn boot(pkg: &[u8], sectors: &[(u32, Vec<u8>)], mhz: u64) -> Result<Self, String> {
+    /// `lcd_timed`: the LCD's transfers take their time, as on an FM-1 (fm1_soc's `Soc::lcd_timed`)
+    fn boot(pkg: &[u8], sectors: &[(u32, Vec<u8>)], mhz: u64, lcd_timed: bool) -> Result<Self, String> {
         crate::savefile::validate_sectors(&sectors.iter().map(|(at, data)| crate::Sector {
             at: *at, data: Arc::new(data.clone()),
         }).collect::<Vec<_>>())?;
@@ -91,6 +92,7 @@ impl Machine {
         let mut soc = Soc::new(RAM_SIZE, st.xip);
         soc.periph.hz = mhz * 1_000_000;
         soc.periph.skip_idle = true;
+        soc.lcd_timed = lcd_timed;
         let mut cpu = Cpu::new(st.entry);
         cpu.jit_on = true;
         cpu.user = true; // the SPL hands cpu0 over in user mode (fm1-core's Cpu::user)
@@ -187,6 +189,8 @@ pub fn run(
     mut out: rtrb::Producer<[f32; 2]>,
 ) {
     let mut m: Option<Machine> = None;
+    // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
+    let lcd_timed = fm1_soc::lcd_timed_from_env();
     let mut lead = 2048usize;
     let mut made: u64 = 0; // frames pushed since boot
     let mut due: VecDeque<Midi> = VecDeque::new();
@@ -206,7 +210,7 @@ pub fn run(
             let (c, prepared, loaded) = match c {
                 Cmd::Load { firmware, sectors, reply } => {
                     let sectors: Sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
-                    match Machine::boot(&firmware.pkg, &sectors, params.clock.value().mhz()) {
+                    match Machine::boot(&firmware.pkg, &sectors, params.clock.value().mhz(), lcd_timed) {
                         Ok(next) => (Cmd::Boot { pkg: firmware.pkg.clone(), sectors }, Some(next), Some((firmware, reply))),
                         Err(error) => { let _ = reply.send(Err(error)); continue; }
                     }
@@ -216,7 +220,7 @@ pub fn run(
             match c {
                 Cmd::Boot { pkg, sectors } => {
                     cancel_snapshots(&mut pending);
-                    m = prepared.or_else(|| Machine::boot(&pkg, &sectors, params.clock.value().mhz()).ok());
+                    m = prepared.or_else(|| Machine::boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed).ok());
                     active_pkg = m.as_ref().map(|_| pkg);
                     pot = u16::MAX;
                     let mut v = shared.view.lock().unwrap();
@@ -253,7 +257,7 @@ pub fn run(
                 Cmd::Analog { idx, value } => apply(&mut m, Action::Adc { ch: idx, value: value.min(1023) }),
                 Cmd::Vel(us) => {
                     if let Some(m) = m.as_mut() {
-                        m.soc.periph.smk_vel = (m.soc.periph.hz as u128 * us as u128 / 1_000_000) as u64;
+                        m.soc.periph.smk_vel_us = us;
                     }
                 }
                 Cmd::Lead(l) => lead = l,
@@ -265,7 +269,7 @@ pub fn run(
         if let (Some(mm), Some(pkg)) = (m.as_ref(), active_pkg.as_ref()) {
             if mm.soc.periph.hz != mhz * 1_000_000 && pending.is_empty() {
                 let sectors = mm.changed_sectors();
-                if let Ok(next) = Machine::boot(pkg, &sectors, mhz) {
+                if let Ok(next) = Machine::boot(pkg, &sectors, mhz, lcd_timed) {
                     m = Some(next);
                     pot = u16::MAX;
                     due.clear();

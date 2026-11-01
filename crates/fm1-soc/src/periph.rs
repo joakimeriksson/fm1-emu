@@ -156,6 +156,10 @@ pub struct Periph {
     pub cycles: u64,
     /// Emulated CPU clock (cycles per second of firmware time).
     pub hz: u64,
+    /// The clock's ticks per CPU cycle: 1, or 8 for fm1-live's FM1_STRICT, whose clock counts
+    /// eighths of a cycle (`hz` is then 8 x the CPU's). What is costed in CPU cycles (the HW
+    /// DSP / EQ / SRC units' jobs) takes this many ticks a cycle.
+    pub cycle_ticks: u64,
     /// Jump over TIMER4 polling loops (see the module notes).
     pub skip_idle: bool,
     /// Set by the runner while cpu0 is inside an ISR (no skipping there).
@@ -197,6 +201,9 @@ pub struct Periph {
     pub adc_value: [u16; 16],
     // interrupt controller
     pub ilat: u32,
+    /// The CPU exception (interrupt 1) is pending: a guard tripped (`Soc::guard_trip`); taken
+    /// once (the runner clears it as it enters the handler)
+    pub exc_pending: bool,
     /// Enable/priority words at 0x1EEF100 (one nibble per source).
     pub icfg: [u32; 32],
     /// cpu1's enable/priority words at 0x1EEF300.
@@ -214,6 +221,8 @@ pub struct Periph {
     /// screen's DMA lets it: finishing at once, ~185 frames a second through the LCD model.
     pub spi1_done_at: u64,
     spi1_irq_at: u64,
+    /// SPI1's transfers' time on the wire, all told (cycles; --shot reports it against the run)
+    pub spi1_wire: u64,
     /// SARADC: a conversion finished (CON bit 7), and its IRQ 24 when CON bit 5 enabled it.
     adc_done: bool,
     adc_irq: bool,
@@ -265,8 +274,9 @@ pub struct Periph {
     /// The panel around the chip: the FM-1's (above), or the SMK-37's (`smk`).
     pub board: crate::Board,
     pub smk: crate::smk::Panel,
-    /// SMK-37: cycles between a key's first and second contact (its velocity; less is harder).
-    pub smk_vel: u64,
+    /// SMK-37: microseconds between a key's first and second contact (its velocity; less is
+    /// harder), in clock ticks as a key goes down (`hz`: FM1_STRICT's eighths too).
+    pub smk_vel_us: u32,
     /// SMK-37: the ADC's last conversion (taken when it starts, from the mux then latched).
     adc_sample: u16,
     /// Scheduled front-panel actions: (cycle, action).
@@ -332,6 +342,7 @@ impl Default for Periph {
         Self {
             cycles: 0,
             hz: CPU_HZ,
+            cycle_ticks: 1,
             skip_idle: false,
             in_isr: false,
             last_cnt_read: 0,
@@ -358,6 +369,7 @@ impl Default for Periph {
             adc_con: 0,
             adc_value,
             ilat: 0,
+            exc_pending: false,
             icfg: [0; 32],
             icfg1: [0; 32],
             tick_ctl: 0,
@@ -368,6 +380,7 @@ impl Default for Periph {
             spi1_pending: false,
             spi1_done_at: 0,
             spi1_irq_at: u64::MAX,
+            spi1_wire: 0,
             adc_done: false,
             adc_irq: false,
             adc_next: u64::MAX,
@@ -401,7 +414,7 @@ impl Default for Periph {
             enc_next: [0; 8],
             board: crate::Board::Fm1,
             smk: crate::smk::Panel::default(),
-            smk_vel: CPU_HZ / 1000 * 3,
+            smk_vel_us: 3000,
             adc_sample: 0,
             script: VecDeque::new(),
         }
@@ -593,7 +606,8 @@ impl Periph {
     /// A chip reset: the chip's own state as at power-on. What is outside it stays: the clock
     /// and the runner's settings, the audio played so far, the keys, encoders and pots, the key
     /// matrix's shift registers (74HC595s: the columns they hold), the SMK-37's panel, the LEDs'
-    /// light so far, the script, the UART's bytes on their way in and a USB cable (its frames).
+    /// light so far, the script, the UART's bytes on their way in, a USB cable (its frames) and
+    /// the LCD's time on the wire so far (`spi1_wire`, a run statistic as `skipped`).
     /// A field added to `Periph` is reset unless it is named here.
     pub(crate) fn chip_reset(&mut self) {
         let mut uart = Uart { next: self.uart.next, ot_next: u64::MAX, ..Default::default() };
@@ -602,9 +616,11 @@ impl Periph {
         *self = Periph {
             cycles: old.cycles,
             hz: old.hz,
+            cycle_ticks: old.cycle_ticks,
             skip_idle: old.skip_idle,
             room_cap: old.room_cap,
             skipped: old.skipped,
+            spi1_wire: old.spi1_wire,
             audio: old.audio,
             audio_halves: old.audio_halves,
             adc_value: old.adc_value,
@@ -624,7 +640,7 @@ impl Periph {
             enc_next: old.enc_next,
             board: old.board,
             smk: old.smk,
-            smk_vel: old.smk_vel,
+            smk_vel_us: old.smk_vel_us,
             script: old.script,
             ..Default::default()
         };
@@ -635,7 +651,8 @@ impl Periph {
         match *a {
             Action::Key { id, down } => {
                 if self.board == crate::Board::Smk37 {
-                    self.smk.key(id, down, self.cycles, self.smk_vel);
+                    let vel = (self.hz as u128 * self.smk_vel_us as u128 / 1_000_000) as u64;
+                    self.smk.key(id, down, self.cycles, vel);
                 } else if (id as usize) < 41 {
                     let (i, t) = (id as usize, self.cycles);
                     if self.keys_down[i] != down {
@@ -663,7 +680,7 @@ impl Periph {
                 }
             }
             Action::Adc { ch, value } if self.board == crate::Board::Smk37 => self.smk.set_analog(ch, value),
-            Action::Vel { us } => self.smk_vel = (self.hz as u128 * us as u128 / 1_000_000) as u64,
+            Action::Vel { us } => self.smk_vel_us = us,
             Action::Adc { ch, value } => {
                 if (ch as usize) < 16 {
                     self.adc_value[ch as usize] = value.min(1023);
@@ -761,8 +778,14 @@ impl Periph {
     /// Any interrupt source pending at all (before enables and priorities).
     #[inline(always)]
     pub fn any_pending(&self) -> bool {
-        self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending
+        self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+    }
+
+    /// Has core `core` (0, 1) source `n` enabled (its ICFG nibble's bit 0)?
+    pub fn irq_enabled(&self, core: u32, n: u8) -> bool {
+        let bank = if core == 0 { &self.icfg } else { &self.icfg1 };
+        (bank[(n >> 3) as usize] >> ((n & 7) * 4)) & 1 != 0
     }
 
     /// The highest-priority source cpu0 has enabled and that is pending: (irq, prio).
@@ -787,6 +810,9 @@ impl Periph {
                 }
             }
         };
+        if self.exc_pending && core == 0 {
+            consider(1); // the CPU exception (a guard: `Soc::guard_trip`)
+        }
         if self.t5_pending {
             consider(IRQ_TIMER5);
         }
@@ -1211,12 +1237,13 @@ impl Periph {
         }
     }
 
-    /// SMK-37: an SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1):
-    /// ~12 MHz at 4 for the LCD, 6.67 MHz at 8 for the pad LEDs); with `irq` IRQ 16 at its end.
+    /// An SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1): ~12 MHz at 4
+    /// for the LCD, 6.67 MHz at 8 for the SMK-37's pad LEDs); with `irq` IRQ 16 at its end.
     pub fn spi1_start(&mut self, bytes: u32, baud: u32, irq: bool) {
         let clk = 60_000_000 / (baud as u64 + 1);
         let dur = (bytes.max(1) as u64 * 8 * self.hz / clk).max(1);
         self.spi1_done_at = self.cycles + dur;
+        self.spi1_wire += dur;
         if irq {
             self.spi1_irq_at = self.spi1_done_at;
             self.next_due = 0;
