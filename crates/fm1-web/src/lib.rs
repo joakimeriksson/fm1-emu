@@ -119,6 +119,7 @@ impl Machine {
         let mut soc = Soc::new(RAM_SIZE, image);
         soc.periph.hz = mhz as u64 * 1_000_000;
         soc.periph.skip_idle = true;
+        soc.cpu1_survives = unsafe { CPU1_SURVIVES };
         let mut cpu = Cpu::new(entry);
         // (cpu1 follows cpu0's setting: run_dual)
         cpu.jit_on = unsafe { JIT };
@@ -192,6 +193,8 @@ static mut M: Option<Machine> = None;
 static mut JIT: bool = false;
 static mut JIT_PER_RENDER: u32 = 0;
 static mut AHEAD: u32 = 0;
+/// `fm1_cpu1_survives`: a fault on core 1 stops that core alone and cpu0 goes on (`Soc::cpu1_survives`)
+static mut CPU1_SURVIVES: bool = false;
 static mut OUT_L: [f32; 1024] = [0.0; 1024];
 static mut OUT_R: [f32; 1024] = [0.0; 1024];
 static mut LEDS: [f32; 41] = [0.0; 41];
@@ -410,6 +413,16 @@ pub extern "C" fn fm1_ahead(frames: u32) {
     unsafe { AHEAD = frames };
 }
 
+/// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
+/// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
+/// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
+/// Before the boot, or for the machine running.
+#[no_mangle]
+pub extern "C" fn fm1_cpu1_survives(on: u32) {
+    unsafe { CPU1_SURVIVES = on != 0 };
+    if let Some(m) = machine() { m.soc.cpu1_survives = on != 0; }
+}
+
 #[no_mangle]
 pub extern "C" fn fm1_out_l() -> *const f32 {
     #[allow(static_mut_refs)]
@@ -543,6 +556,13 @@ pub extern "C" fn fm1_minsns() -> u32 {
 #[no_mangle]
 pub extern "C" fn fm1_halted() -> u32 {
     machine().map_or(1, |m| m.halted as u32)
+}
+
+/// 1 once core 1 stopped on an instruction it could not run (`Soc::cpu1_fault`): the chip's
+/// core would fault there, and cpu0 goes on alone. The page may say so.
+#[no_mangle]
+pub extern "C" fn fm1_cpu1_fault() -> u32 {
+    machine().map_or(0, |m| m.soc.cpu1_fault.is_some() as u32)
 }
 
 // ---------------------------------------------------------------- the front panel (page side)
