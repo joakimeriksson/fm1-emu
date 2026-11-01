@@ -273,10 +273,11 @@ other synth:
   how much faster than real time the firmware could run on this computer; most run at 3–6x,
   the heaviest at about 1.5x.
 
-**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest),
-for Macs with Apple silicon (M1 or later). The zip has the three plugins and an `INSTALL.txt` that
-says where each goes. Until a release is signed with an Apple Developer ID, macOS blocks it until
-you allow it, with one Terminal command that `INSTALL.txt` gives.
+**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest):
+a zip for Macs with Apple silicon (M1 or later; AU, VST3 and CLAP) and one for Windows (x86-64;
+VST3 and CLAP). Each has an `INSTALL.txt` that says where the files go. Until a release is signed
+with an Apple Developer ID, macOS blocks it until you allow it, with one Terminal command that
+`INSTALL.txt` gives; the Windows build is unsigned too, and Windows hosts load it as it is.
 
 **Build and install it yourself (macOS, Apple silicon).** You need Rust, CMake and Ninja
 (`brew install cmake ninja`), then:
