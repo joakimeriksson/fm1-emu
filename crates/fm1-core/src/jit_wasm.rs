@@ -15,7 +15,8 @@
 //! same way: the helpers' table indices are `call_indirect` targets.
 //!
 //! Timing is kept exact as in jit.rs: a block runs only when all its ticks fit before anything
-//! is due; RAM / XIP accesses are inline, anything else goes through a helper that first brings
+//! is due; RAM / XIP accesses are inline (as are the register ops, the FPU's included: wasm's own
+//! f32 instructions, see `fop_inline`), anything else goes through a helper that first brings
 //! the clock to that instruction's tick, and when the next tick is due after it (a peripheral
 //! write, an idle skip) the code leaves right after the instruction. Within a region every block
 //! first checks that its instructions still fit the call's limit (as jit.rs's chained bodies
@@ -329,11 +330,26 @@ const I64_SHR_U: u8 = 0x88;
 const I64_CONST: u8 = 0x42;
 const I64_EQZ: u8 = 0x50;
 const F32_REINTERPRET_I32: u8 = 0xbe;
+const I32_REINTERPRET_F32: u8 = 0xbc;
+const SELECT: u8 = 0x1b;
+const F32_CEIL: u8 = 0x8d;
+const F32_FLOOR: u8 = 0x8e;
+const F32_TRUNC: u8 = 0x8f;
+const F32_NEAREST: u8 = 0x90;
+const F32_ADD: u8 = 0x92;
+const F32_SUB: u8 = 0x93;
+const F32_MUL: u8 = 0x94;
+const F32_DIV: u8 = 0x95;
+const F32_CONVERT_I32_S: u8 = 0xb2;
+const F32_CONVERT_I32_U: u8 = 0xb3;
+/// the `0xfc` prefix of the saturating conversions: i32.trunc_sat_f32_s is 0, i32.trunc_sat_f32_u 1
+const FC_PREFIX: u8 = 0xfc;
 const I32_EXTEND8_S: u8 = 0xc0;
 const I32_EXTEND16_S: u8 = 0xc1;
 const VOID: u8 = 0x40;
 const T_I32: u8 = 0x7f;
 const T_I64: u8 = 0x7e;
+const T_F32: u8 = 0x7d;
 
 // function types of the module: run, and the helpers as Rust exports them
 const TY_RUN: u32 = 0;
@@ -342,7 +358,7 @@ const TY_WRITE: u32 = 2;
 const TY_OP: u32 = 3;
 
 // locals: params cpu, ctx, limit, start; then i32 temporaries, the instructions done in this call
-// before the current block, the block to run next, and one i64
+// before the current block, the block to run next, one i64, and two f32 (the FPU's fmin / fmax)
 const L_CPU: u32 = 0;
 const L_CTX: u32 = 1;
 const L_LIMIT: u32 = 2;
@@ -355,6 +371,8 @@ const L_OFF: u32 = 8;
 const L_DONE: u32 = 9;
 const L_CUR: u32 = 10;
 const L_OPRES: u32 = 11;
+const L_FA: u32 = 12;
+const L_FB: u32 = 13;
 
 fn off_reg(r: u8) -> u32 {
     (offset_of!(Cpu, regs) + 4 * (r & 15) as usize) as u32
@@ -996,7 +1014,84 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 g.get(L_B);
                 // select(a, b, a OP b): smin a <s b, smax a >s b, umin a <u b, umax a >u b
                 g.op(match kind { 0 => I32_LT_S, 1 => I32_GT_S, 2 => I32_LT_U, _ => I32_GT_U });
-                g.op(0x1b); // select
+                g.op(SELECT);
+                g.mem_op(I32_STORE, 2, off_reg(d));
+            }
+            // ---- the FPU (fm1-isa's fpu.rs, the interpreter's `fpu`), as wasm's own f32 ops,
+            // which are the IEEE single precision Rust's are in this build: + - * / as they
+            // are (NaN payloads included: the engine's own instructions make them for both);
+            // fmin / fmax as LLVM expands Rust's `f32::min` / `max` for wasm (a NaN
+            // operand yields the other one, equal operands yield b; wasm's f32.min would
+            // propagate the NaN); the conversions as the `as` casts: trunc_sat saturates and
+            // sends a NaN to 0, the rounding done first by nearest / ceil / floor (trunc_sat
+            // truncates by itself). The multiply-accumulates 7 / 8 stay with the executor, as in
+            // jit.rs. (`fop_selftest` checks each against the executor in the engine at hand.)
+            Fast::FOp { d, a, b, op } if fop_inline(op) => {
+                let k = op >> 4;
+                let to_int = op & 0xf == 0xf && k < 8;
+                g.get(L_CPU);
+                match op {
+                    0..=3 => {
+                        // (+ and * take b first: LLVM commuted them in the interpreter's build,
+                        // and when both operands are NaNs the engine passes the first one's on;
+                        // `fop_selftest` tells when a build changes that)
+                        let (first, second) = if op & 1 == 0 { (b, a) } else { (a, b) };
+                        g.ld_reg(first);
+                        g.op(F32_REINTERPRET_I32);
+                        g.ld_reg(second);
+                        g.op(F32_REINTERPRET_I32);
+                        g.op(match op { 0 => F32_ADD, 1 => F32_SUB, 2 => F32_MUL, _ => F32_DIV });
+                    }
+                    5 | 6 => {
+                        // a' = a != a ? b : a; b' = b != b ? a' : b; a' < b' ? a' : b' (max: >)
+                        g.ld_reg(a);
+                        g.op(F32_REINTERPRET_I32);
+                        g.set(L_FA);
+                        g.ld_reg(b);
+                        g.op(F32_REINTERPRET_I32);
+                        g.set(L_FB);
+                        g.get(L_FB);
+                        g.get(L_FA);
+                        g.get(L_FA);
+                        g.get(L_FA);
+                        g.op(F32_NE);
+                        g.op(SELECT);
+                        g.tee(L_FA);
+                        g.get(L_FA);
+                        g.get(L_FB);
+                        g.get(L_FB);
+                        g.get(L_FB);
+                        g.op(F32_NE);
+                        g.op(SELECT);
+                        g.tee(L_FB);
+                        g.get(L_FA);
+                        g.get(L_FB);
+                        g.op(if op == 5 { F32_LT } else { F32_GT });
+                        g.op(SELECT);
+                    }
+                    0x8f | 0x9f => {
+                        g.ld_reg(a);
+                        g.op(if op == 0x8f { F32_CONVERT_I32_S } else { F32_CONVERT_I32_U });
+                    }
+                    _ => {
+                        g.ld_reg(a);
+                        g.op(F32_REINTERPRET_I32);
+                        match k & 3 {
+                            0 => g.op(F32_NEAREST),
+                            1 if !to_int => g.op(F32_TRUNC),
+                            1 => {}
+                            2 => g.op(F32_CEIL),
+                            _ => g.op(F32_FLOOR),
+                        }
+                        if to_int {
+                            g.op(FC_PREFIX);
+                            g.op(if k < 4 { 0 } else { 1 });
+                        }
+                    }
+                }
+                if !to_int {
+                    g.op(I32_REINTERPRET_F32);
+                }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
             Fast::SpAdd { v } => {
@@ -1411,6 +1506,122 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
     }
 }
 
+/// The FPU ops `block` computes inline: the binary + - * / fmin fmax, the conversions ftoi /
+/// ftou in every rounding, itof, utof, and ftof in every rounding (fm1-isa's fpu.rs). Not the
+/// multiply-accumulates 7 / 8 (the executor, as jit.rs), nor an op the table does not decode.
+fn fop_inline(op: u8) -> bool {
+    matches!(op, 0..=3 | 5 | 6 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
+}
+
+static mut SELFTEST_DETAIL: String = String::new();
+
+/// The mismatches `fop_selftest` found, the first of each op and register choice, one per line
+/// (empty: none).
+#[allow(static_mut_refs)]
+pub fn fop_selftest_detail() -> &'static str {
+    unsafe { SELFTEST_DETAIL.as_str() }
+}
+
+/// Every FPU op the generated code computes inline, against the interpreter in the engine at
+/// hand (web/jit.test.mjs calls it through `fm1_jit_selftest`): each op alone in a block, on
+/// every pair of the special values (NaNs with payloads, quiet and signalling, both zeros,
+/// denormals, infinities, the integers' bounds, halves) and on random words, must leave the
+/// registers and pc the executor leaves, and so must the interpreter proper (`run_fast` on the
+/// instruction word); into a fresh register, into a source register, with both sources the same
+/// register, and into the second source. The mismatches (`fop_selftest_detail` describes the
+/// first of each op and register choice); a module the host could not compile counts as one.
+#[allow(static_mut_refs)]
+pub fn fop_selftest() -> u32 {
+    /// 16 bytes of RAM at 0x0200_0000 holding the instruction under test (the interpreter
+    /// decodes and runs it from there: `run_fast`), nothing else
+    struct NoBus([u8; 16]);
+    impl Bus for NoBus {
+        fn read8(&mut self, a: u32) -> u8 { self.0.get(a.wrapping_sub(0x0200_0000) as usize).copied().unwrap_or(0) }
+        fn read16(&mut self, a: u32) -> u16 { self.read8(a) as u16 | (self.read8(a + 1) as u16) << 8 }
+        fn read32(&mut self, a: u32) -> u32 { self.read16(a) as u32 | (self.read16(a + 2) as u32) << 16 }
+        fn write8(&mut self, _: u32, _: u8) {}
+        fn write16(&mut self, _: u32, _: u16) {}
+        fn write32(&mut self, _: u32, _: u32) {}
+        fn tick_room(&self) -> u64 { 1 << 40 }
+    }
+    let mem = JitMem { ram: std::ptr::null_mut(), ram_base: 0, ram_len: 0, ram_code: std::ptr::null(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 };
+    let specials: Vec<u32> = [0.0f32, -0.0, 1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999997, 3.25, -7.75, 1e-3, 65536.25,
+        8388607.5, 16777216.0, 123456.7, 2147483520.0, 2147483648.0, -2147483648.0, -2147483904.0, 4294967040.0, 4294967296.0,
+        3e9, -3e9, 1e-40, -1e-40, f32::MIN_POSITIVE, f32::MAX, f32::MIN, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN]
+        .iter().map(|f| f.to_bits())
+        .chain([1u32, 0x8000_0001, 0x007f_ffff, 0x7f80_0001, 0xff80_0001, 0x7fc1_2345, 0xffc0_0001, 0x7fff_ffff, 0xffff_ffff])
+        .collect();
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
+    let n = specials.len();
+    let (mut fails, mut bus) = (0u32, NoBus([0; 16]));
+    unsafe { SELFTEST_DETAIL.clear(); }
+    // (per op and register choice: the mismatches, the first described)
+    let mut seen: Vec<(u8, u8, u8, u8)> = Vec::new();
+    let mut fail = |op: u8, d: u8, a: u8, b: u8, x: u32, y: u32, msg: String| {
+        fails += 1;
+        if !seen.contains(&(op, d, a, b)) {
+            seen.push((op, d, a, b));
+            unsafe { SELFTEST_DETAIL += &format!("op {op:02x} (d {d} a {a} b {b}) a {x:08x} b {y:08x}: {msg}\n"); }
+        }
+    };
+    for op in (0..=0xffu8).filter(|&op| fop_inline(op)) {
+        for (d, a, b) in [(0u8, 1u8, 2u8), (1, 1, 2), (0, 1, 1), (2, 1, 2)] {
+            let fast = Fast::FOp { d, a, b, op };
+            let bop = crate::BOp { fast, len: 4, careful: false, pair_head: false, glue: false };
+            // the instruction word (fm1-isa's fpu.rs): `3f e5 b2 b3`, binary b2 = a << 4 | op,
+            // b3 = d << 4 | b; unary b2 = op, b3 = d << 4 | a
+            let (b2, b3) = if op <= 6 { (a << 4 | op, d << 4 | b) } else { (op, d << 4 | a) };
+            bus.0 = [0; 16];
+            bus.0[..4].copy_from_slice(&[0x3f, 0xe5, b2, b3]);
+            let m = compile::<NoBus>(&[(0, 0x0200_0000, vec![bop])], &mem, false);
+            // SAFETY: a plain byte slice; the host copies it before returning
+            let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len()) };
+            if f == 0 {
+                fail(op, d, a, b, 0, 0, "the host could not compile the module".to_owned());
+                continue;
+            }
+            let binary = op <= 6;
+            let cases = if binary { n * n } else { n } + 256;
+            for i in 0..cases {
+                let (x, y) = if i < n * n && binary { (specials[i / n], specials[i % n]) }
+                    else if i < n { (specials[i], rnd()) }
+                    else { (rnd(), rnd()) };
+                let mut cpu = Cpu::new(0x0200_0000);
+                for r in 0..16 { cpu.regs[r] = rnd(); }
+                cpu.regs[1] = x;
+                cpu.regs[2] = y;
+                let init = cpu.regs;
+                // the oracle: the executor as the helper calls it; and, for the first register
+                // choice, the interpreter proper, which decodes the word from the bus and runs
+                // it in `run_fast`'s loop (its own copy of the float code: the two must agree
+                // with each other too, NaN payloads included)
+                let mut want = Cpu::new(0x0200_0000);
+                want.regs = cpu.regs;
+                want.exec_fast(&mut bus, fast, 0x0200_0004);
+                want.pc = 0x0200_0004;
+                // SAFETY: `f` is the module just installed, built for NoBus
+                let k = unsafe { run::<NoBus>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) };
+                let r = (d & 15) as usize;
+                if k != 1 || cpu.regs != want.regs || cpu.pc != want.pc {
+                    fail(op, d, a, b, x, y, format!("ran {k}, r{r} {:08x}, the executor {:08x}", cpu.regs[r], want.regs[r]));
+                    continue;
+                }
+                if (d, a, b) != (0, 1, 2) {
+                    continue;
+                }
+                let mut want2 = Cpu::new(0x0200_0000);
+                want2.regs = init;
+                let ran = want2.run_fast(&mut bus, 1).ok().map(|r| r.0);
+                if ran != Some(1) || want2.regs != want.regs || want2.pc != want.pc {
+                    fail(op, d, a, b, x, y, format!("the interpreter ran {ran:?}, r{r} {:08x} at pc {:08x}, the executor {:08x}", want2.regs[r], want2.pc, want.regs[r]));
+                }
+            }
+        }
+    }
+    fails
+}
+
 /// A region's blocks as a table for `Gen::jump_local`: the smallest power-of-two size (at least
 /// twice the blocks) where (pc >> 1) & mask sets them all apart. Free slots hold pc 1 (no
 /// block starts at an odd pc). Lives as long as the program (as the regions' code does).
@@ -1475,9 +1686,9 @@ fn module(body: &[u8]) -> Vec<u8> {
     name(&mut ex, "run");
     ex.extend_from_slice(&[0x00, 0x00]);
     section(&mut m, 7, &ex);
-    // code: locals a, b, addr, val, off, done, cur (i32) and the op result (i64)
+    // code: locals a, b, addr, val, off, done, cur (i32), the op result (i64), fa, fb (f32)
     let mut f = Vec::new();
-    f.extend_from_slice(&[2, 7, T_I32, 1, T_I64]);
+    f.extend_from_slice(&[3, 7, T_I32, 1, T_I64, 2, T_F32]);
     f.extend_from_slice(body);
     let mut code = Vec::new();
     uleb(&mut code, 1);

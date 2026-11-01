@@ -318,6 +318,35 @@ pub extern "C" fn fm1_profile_report() -> *const u8 {
     }
 }
 
+/// The wasm JIT's inline FPU ops against the interpreter in this engine (jit_wasm.rs
+/// `fop_selftest`, web/jit.test.mjs): the mismatches, 0 when all agree (and on a host without
+/// the wasm JIT).
+#[no_mangle]
+pub extern "C" fn fm1_jit_selftest() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        fm1_core::jit_wasm::fop_selftest()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    0
+}
+
+static mut SELFTEST_DETAIL: Vec<u8> = Vec::new();
+/// The mismatches `fm1_jit_selftest` found, one per line, NUL-terminated (empty: none).
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn fm1_jit_selftest_detail() -> *const u8 {
+    #[cfg(target_arch = "wasm32")]
+    let detail = fm1_core::jit_wasm::fop_selftest_detail();
+    #[cfg(not(target_arch = "wasm32"))]
+    let detail = "";
+    unsafe {
+        SELFTEST_DETAIL = detail.as_bytes().to_vec();
+        SELFTEST_DETAIL.push(0);
+        SELFTEST_DETAIL.as_ptr()
+    }
+}
+
 /// Install the same timestamped input script used by the native benchmark.
 #[no_mangle]
 pub extern "C" fn fm1_bench_script(ptr: *mut u8, len: u32) -> u32 {
