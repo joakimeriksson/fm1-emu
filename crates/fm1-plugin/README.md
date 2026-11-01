@@ -105,7 +105,11 @@ workflow:
 3. builds Steinberg's validator and runs it on the VST3;
 4. packages the zip (`tools/package_plugin.sh`: the three plugins and an `INSTALL.txt`).
 
-Without signing secrets the release is unsigned (`INSTALL.txt` gives the command that lets macOS
+On a Windows runner it runs the tests, builds the CLAP and the VST3 (`tools\build_plugin.ps1`),
+runs Steinberg's validator and packages `fm1-plugin-<version>-windows-x86_64.zip`
+(`tools\package_plugin.ps1`: the two plugins and an `INSTALL.txt`), unsigned.
+
+Without signing secrets the macOS release is unsigned (`INSTALL.txt` gives the command that lets macOS
 open it). With these repository secrets it's signed with a Developer ID and notarized:
 - `MACOS_CERTIFICATE`: a "Developer ID Application" certificate as a base64 `.p12`;
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
