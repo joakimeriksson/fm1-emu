@@ -1413,7 +1413,7 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 g.goto(target, count, false);
                 g.end();
             }
-            Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } if fam < 8 && g.pred.is_none() => {
+            Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } if g.pred.is_none() => {
                 // the region brought its then-part along (`Cpu::wasm_region`): the rest of this
                 // block's ops. Not taken: on at the else part. Taken: the then-part, then past
                 // the else part (the interpreter's pred_skips, kept by check_brk on an exit)
@@ -1430,13 +1430,16 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                     g.op(I32_NE);
                     g.i32c(alt as u32);
                     g.op(I32_EQ);
-                } else {
+                } else if fam < 8 {
                     g.get(L_A);
                     g.get(L_B);
                     g.op(match fam { 0 => I32_EQ, 1 => I32_GE_U, 4 => I32_GT_U, 5 => I32_GE_S, _ => I32_GT_S });
                     if alt {
                         g.op(I32_EQZ);
                     }
+                } else {
+                    // a float condition (`cmp_cond`'s `fcond`), as the branches compile it
+                    g.cmp(crate::cond_of_fam(fam as u64, alt));
                 }
                 g.op(I32_EQZ);
                 g.if_();
@@ -1452,7 +1455,7 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 pc = next_pc;
                 continue;
             }
-            Fast::IfBlk { a, rk, fam, alt, has_else: false, rv, then_d, .. } if fam < 8 => {
+            Fast::IfBlk { a, rk, fam, alt, has_else: false, rv, then_d, .. } => {
                 // taken: the then-part follows; not taken: skip it
                 g.rhs(rk, rv);
                 g.ld_reg(a);
@@ -1465,13 +1468,16 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                     g.op(I32_NE);
                     g.i32c(alt as u32);
                     g.op(I32_EQ);
-                } else {
+                } else if fam < 8 {
                     g.get(L_A);
                     g.get(L_B);
                     g.op(match fam { 0 => I32_EQ, 1 => I32_GE_U, 4 => I32_GT_U, 5 => I32_GE_S, _ => I32_GT_S });
                     if alt {
                         g.op(I32_EQZ);
                     }
+                } else {
+                    // a float condition (`cmp_cond`'s `fcond`), as the branches compile it
+                    g.cmp(crate::cond_of_fam(fam as u64, alt));
                 }
                 g.op(I32_EQZ);
                 g.if_();

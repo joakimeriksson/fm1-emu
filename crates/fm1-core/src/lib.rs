@@ -1012,9 +1012,9 @@ impl Cpu {
             // an if-else block at the end, its then-part plain: compiled with the then-part in
             // tow (`jit_wasm`'s IfBlk), going on at the else part or past it
             if let Some(last) = tail.filter(|_| ops.len() + 1 == all_len) {
-                if let Fast::IfBlk { has_else: true, fam, then_d, else_d, .. } = last.fast {
+                if let Fast::IfBlk { has_else: true, then_d, else_d, .. } = last.fast {
                     let next = pc + ops.iter().chain([&last]).map(|o| o.len as u32).sum::<u32>();
-                    if let Some(then) = (fam < 8).then(|| self.then_part(bus, next, then_d)).flatten() {
+                    if let Some(then) = self.then_part(bus, next, then_d) {
                         let then_end = next.wrapping_add(then_d as u32);
                         ops.push(last);
                         ops.extend(then);
@@ -6692,7 +6692,7 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
 }
 
 /// `cmp_cond(fam, alt, ..)` as a `Cond`.
-fn cond_of_fam(fam: u64, alt: bool) -> Cond {
+pub(crate) fn cond_of_fam(fam: u64, alt: bool) -> Cond {
     match (fam, alt) {
         (0, false) => Cond::Eq,
         (0, true) => Cond::Ne,
