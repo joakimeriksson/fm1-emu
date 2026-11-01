@@ -1274,7 +1274,8 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
         fwsc::smk_trim_fill_defaults(&mut flash);
     }
     // the patch bank real units carry from the factory (the SMK-37 Pro's stock firmware loads
-    // its current patch from an erased area as it is, and plays nothing)
+    // its current patch from an erased area as it is, and plays nothing); any package with a USR
+    // entry gets it, community firmwares too (none tested reads that area)
     let usr = fwsc::usr_offset(&u);
     let usr_layout = fwsc::UsrLayout::of(board);
     if let Some(usr) = usr {

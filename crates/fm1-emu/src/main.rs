@@ -414,7 +414,7 @@ fn main() -> ExitCode {
         args.steps = soc.periph.cycle_of_ms(ms);
     }
     for k in &args.keys {
-        match parse_key_script(k) {
+        match parse_key_script(k, soc.board) {
             Some(evs) => {
                 for (ms, a) in evs {
                     let at = soc.periph.cycle_of_ms(ms);
@@ -1037,7 +1037,7 @@ fn parse_hex(s: &str) -> Option<u32> {
 ///   `2000:enc0:+3`     3 clockwise clicks on encoder 0; names SELECT/ALGO/PRESET/K1..K4
 ///   `2500:pot:512`     the MASTER pot (SARADC ch 4)
 ///   `3000:midi:903c64` MIDI bytes into the MIDI IN jack (note on C4)
-fn parse_key_script(item: &str) -> Option<Vec<(u64, fm1_soc::Action)>> {
+fn parse_key_script(item: &str, board: fm1_soc::Board) -> Option<Vec<(u64, fm1_soc::Action)>> {
     use fm1_soc::Action;
     let mut parts = item.splitn(3, ':');
     let when = parts.next()?;
@@ -1060,8 +1060,12 @@ fn parse_key_script(item: &str) -> Option<Vec<(u64, fm1_soc::Action)>> {
         let clicks: i32 = arg?.trim_start_matches('+').parse().ok()?;
         return Some(vec![(t0, Action::Enc { enc, clicks })]);
     }
-    // the FM-1's names, then the SMK-37's (its keys are `k0`..`k36` on both)
-    let id = fm1_soc::periph::key_id(what).or_else(|| fm1_soc::smk::key_id(what))?;
+    // a name on this board's panel, as fm1-soc's script.rs has it (the SMK-37's ARP, FX, SEQ are its buttons, not
+    // the FM-1's keys of the same names)
+    let id = match board {
+        fm1_soc::Board::Smk37 => fm1_soc::smk::key_id(what),
+        fm1_soc::Board::Fm1 => fm1_soc::periph::key_id(what),
+    }?;
     let up = t1.unwrap_or(t0 + 150);
     Some(vec![(t0, Action::Key { id, down: true }), (up, Action::Key { id, down: false })])
 }
@@ -1086,4 +1090,27 @@ fn write_wav(path: &str, samples: &[i16]) -> std::io::Result<()> {
         f.write_all(&s.to_le_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod key_script_tests {
+    use super::parse_key_script;
+    use fm1_soc::{Action, Board};
+
+    fn first_key(item: &str, board: Board) -> Option<u8> {
+        parse_key_script(item, board)?.into_iter().find_map(|(_, a)| match a {
+            Action::Key { id, .. } => Some(id),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn names_are_the_boards_own() {
+        for name in ["ARP", "FX", "SEQ"] {
+            let smk = fm1_soc::smk::key_id(name);
+            assert!(smk.is_some(), "{name} is an SMK-37 button");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Smk37), smk, "{name} on an SMK-37");
+            assert_eq!(first_key(&format!("100:{name}"), Board::Fm1), fm1_soc::periph::key_id(name), "{name} on an FM-1");
+        }
+    }
 }
