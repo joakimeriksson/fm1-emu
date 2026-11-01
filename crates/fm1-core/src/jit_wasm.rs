@@ -66,7 +66,14 @@ pub struct Jit {
     /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
     /// core 1, whose runner probes for polling loops)
     pub(crate) stops: bool,
+    /// Direct-mapped by pc: (pc, function, start index, region), what `lookup` found there last.
+    /// Most regions end on a pc whose region is known, and `Cpu::run_fast` goes from region to
+    /// region through this without a round of its loop.
+    cache: Box<[(u32, u32, u32, u32)]>,
 }
+
+/// Entries of `Jit::cache` (a power of two).
+const CACHE: usize = 1 << 12;
 
 impl std::fmt::Debug for Jit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,7 +83,7 @@ impl std::fmt::Debug for Jit {
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false })
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -84,6 +91,17 @@ impl Jit {
             self.state.resize(id + 1, Entry::Cold(0));
         }
         &mut self.state[id]
+    }
+
+    /// The compiled code at `pc`, if `remember` has it.
+    #[inline]
+    pub(crate) fn cached(&self, pc: u32) -> Option<(u32, u32, u32)> {
+        let (p, f, k, r) = self.cache[(pc >> 1) as usize & (CACHE - 1)];
+        (p == pc).then_some((f, k, r))
+    }
+
+    pub(crate) fn remember(&mut self, pc: u32, (f, k, r): (u32, u32, u32)) {
+        self.cache[(pc >> 1) as usize & (CACHE - 1)] = (pc, f, k, r);
     }
 
     /// Block `id`'s compiled code (function, start index, region); else counts the run, and true
@@ -133,6 +151,7 @@ impl Jit {
             }
         }
         self.rinfo[r as usize].0 = Box::new([]);
+        self.cache.fill((0, 0, 0, 0));
     }
 
     /// Block `id` stays interpreted.
@@ -144,6 +163,7 @@ impl Jit {
     pub fn reset(&mut self) {
         self.state.clear();
         self.rinfo.clear();
+        self.cache.fill((0, 0, 0, 0));
     }
 }
 

@@ -754,7 +754,12 @@ impl Cpu {
                     }
                     let code = match self.wjit.as_mut().map(|j| j.lookup(id)) {
                         // (a region with RAM blocks runs only while they are what memory holds)
-                        Some((Some((f, at, r)), _)) => self.wasm_region_ok(bus, r).then_some((f, at)),
+                        Some((Some((f, at, r)), _)) => {
+                            if let Some(j) = self.wjit.as_mut() {
+                                j.remember(pc, (f, at, r));
+                            }
+                            self.wasm_region_ok(bus, r).then_some((f, at))
+                        }
                         Some((None, true)) => {
                             // hot: compile its region (it runs from the next visit on)
                             let region = self.wasm_region(bus, id);
@@ -795,6 +800,27 @@ impl Cpu {
                             // (it left between the two instructions of a glued pair, or inside an
                             // if-else block's then-part)
                             careful = self.hold_irq != 0 || !self.pred_skips.is_empty();
+                            // straight on to the region at pc when its own check is all that is
+                            // left of the way round this loop (`block_at` is pure, and what it
+                            // checks of a RAM block `wasm_region_ok` checks of all the region's);
+                            // not in a stretch, whose calls the loop above bounds. A region that
+                            // does not fit (k = 0) or was dropped: round the loop, as ever
+                            while !stretch && !careful && n < limit && !self.no_ram_blocks {
+                                let Some((f, at, r)) = self.wjit.as_ref().and_then(|j| j.cached(pc)) else { break };
+                                if !self.wasm_region_ok(bus, r) {
+                                    break;
+                                }
+                                sync!();
+                                // SAFETY: as above; n > 0: the first instruction's tick is due
+                                let k = unsafe { jit_wasm::run(f, at, self, bus, 1, limit - n) };
+                                if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
+                                if k == 0 {
+                                    break;
+                                }
+                                n += k;
+                                pc = self.pc;
+                                careful = self.hold_irq != 0 || !self.pred_skips.is_empty();
+                            }
                             continue;
                         }
                     }
