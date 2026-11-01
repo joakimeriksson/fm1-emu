@@ -324,8 +324,9 @@ DAW that only scans `C:\Program Files\Common Files`.
 
 The clip above is three tracks at 100 BPM, each with its own FM-1: a pad on
 [Scintilla](https://github.com/joakimeriksson/scintilla-fm1) (an Elka Synthex; preset 29,
-*Filtered strings*), a bass and a lead on Felucca (*Analog Acid* and *FM6 Tine EP*). On a laptop
-each instance runs at 3–4x real time. FM-1 Dock, which runs both of the chip's cores, is the
+*Filtered strings*), then a bass and a lead joining on Felucca (*Analog Acid* and *FM6 Tine
+EP*). Each window's status bar shows the headroom: on a laptop each instance could run at about
+3x real time with all three playing, 4.5x idle. FM-1 Dock, which runs both of the chip's cores, is the
 heaviest: under real time on that laptop even at 120 MHz, so a synth it carries as a module is
 lighter as its own firmware, as Scintilla is here.
 
