@@ -514,6 +514,13 @@ pub extern "C" fn fm1_halted() -> u32 {
     machine().map_or(1, |m| m.halted as u32)
 }
 
+/// 1 once core 1 stopped on an instruction it could not run (`Soc::cpu1_fault`): the chip's
+/// core would fault there, and cpu0 goes on alone. The page may say so.
+#[no_mangle]
+pub extern "C" fn fm1_cpu1_fault() -> u32 {
+    machine().map_or(0, |m| m.soc.cpu1_fault.is_some() as u32)
+}
+
 // ---------------------------------------------------------------- the front panel (page side)
 
 static mut PANEL_BASE: Vec<u32> = Vec::new();

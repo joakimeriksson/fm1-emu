@@ -166,6 +166,13 @@ impl std::hash::Hasher for AddrHasher {
     }
 }
 
+/// What a core spins on (`Soc::waits`): the cores' hardware lock, or a byte lock at this address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    Lock,
+    Byte(u32),
+}
+
 /// The board around the chip: the FM-1's panel, or the SMK-37's (SMK-37 Pro / Elite, MKE-P37
 /// and Starrykey 37 Play share one: fm1-to-smk37 docs/01-hardware.md). Same chip, flash
 /// layout, audio and update path; the panel's wiring differs (smk.rs).
@@ -236,6 +243,16 @@ pub struct Soc {
     /// core 1 was released once: a later run on 0x1EEE004 is the stock IPC's resume after a
     /// pause, not a release, and a later 0 -> 1 of 0x10008 bit 3 latches nothing (core 1 runs on).
     cpu1_released_once: bool,
+    /// core 1 ran `idle`: it sleeps until an interrupt from its own bank is pending, as the
+    /// chip's core does (`machine::run_cpu1` leaves it be meanwhile; before this its `idle`
+    /// did nothing, and a core 1 that idles and feeds the watchdog each round, Bubba
+    /// Machine's, cost as much as a busy one).
+    pub cpu1_idle: bool,
+    /// core 1 stopped on an instruction it could not run (a jump into erased flash: COSMOS
+    /// 0.23's package has its core 1 entry in a hole of 0xFF). The chip's core faults there
+    /// and cpu0 goes on alone (felucca-bsp's `cpu2_fallback` is built for a core 1 that fails),
+    /// so cpu1 stays stopped until a chip reset; the message says where.
+    pub cpu1_fault: Option<String>,
     /// FM1_AUDIO_TRACE: log each audio half-buffer (debugging the DMA's pace).
     audio_trace: bool,
     /// The CRC-16 unit's register (0x13504).
@@ -244,6 +261,15 @@ pub struct Soc {
     rand: u64,
     /// The cores' hardware lock (`lockset` / `lockclr`): which core holds it.
     lock_owner: Option<u32>,
+    /// core 1 runs beside cpu0 (`machine::run_dual`): a core that finds a lock held then waits
+    /// for the other (`waits`), which the runner hands the machine to. Not set by a runner
+    /// that steps the cores itself (fm1-emu's), nor while cpu0 runs alone.
+    pub cpu1_running: bool,
+    /// What each core spins on, with `cpu1_running`: the hardware lock the other core holds
+    /// (`lockset` denied) or a byte lock it found taken (`testset`). Set by the instruction,
+    /// taken by the runner that acts on it (`machine::run_dual`, `run_cpu1`): the core's next
+    /// try sets it again or not.
+    pub waits: [Option<Wait>; 2],
     /// FM1_GPIO_TRACE: GPIO register writes by address (debugging port use).
     pub gpio_writes: Option<std::collections::BTreeMap<u32, u64>>,
     unknown_log: Vec<UnknownAccess>,
@@ -399,10 +425,14 @@ impl Soc {
             sfr: Default::default(),
             paused: [false; 2],
             lock_owner: None,
+            cpu1_running: false,
+            waits: [None; 2],
             crc: 0,
             rand: 0x9e37_79b9_7f4a_7c15,
             cpu1_release: false,
             cpu1_released_once: false,
+            cpu1_idle: false,
+            cpu1_fault: None,
             audio_trace: std::env::var_os("FM1_AUDIO_TRACE").is_some(),
             xip_flash: true,
             sfc_key: None,
@@ -472,6 +502,8 @@ impl Soc {
         }
         self.usb.keep_recording(&mut old); // (a computer's recording goes on across the reset)
         (self.paused, self.lock_owner, self.cpu1_release, self.cpu1_released_once, self.crc) = ([false; 2], None, false, false, 0);
+        (self.cpu1_idle, self.cpu1_fault) = (false, None);
+        (self.cpu1_running, self.waits) = (false, [None; 2]);
         self.flash.chip_reset();
         cpu.set_plain_state(&boot.cpu);
         self.sfr_lo.clone_from(&boot.sfr_lo);
@@ -636,6 +668,23 @@ impl Soc {
     /// The highest-priority interrupt pending for core `core` (its own enable bank).
     pub fn pending_irq_for(&self, core: u32) -> Option<(u8, u8)> {
         self.periph.pending_irq_for(core)
+    }
+
+    /// Would `core` still spin on `w` (`waits`): the hardware lock held by the other core, the
+    /// byte lock not yet cleared (one outside the RAMs, which no `testset` should see: never
+    /// cleared, so the core waits the slice out rather than retrying it a round at a time)?
+    pub fn still_waits(&self, core: u32, w: Wait) -> bool {
+        match w {
+            Wait::Lock => self.lock_owner.is_some_and(|c| c != core),
+            Wait::Byte(a) => !matches!(self.ram_byte(a), Some(0)),
+        }
+    }
+
+    /// The byte at `a` in one of the RAMs (None: not in one).
+    fn ram_byte(&self, a: u32) -> Option<u8> {
+        [(&self.ram, RAM_BASE), (&self.ovl, OVL_BASE), (&self.sram2, SRAM2_BASE)]
+            .into_iter()
+            .find_map(|(r, base)| a.checked_sub(base).filter(|&o| (o as usize) < r.len()).map(|o| r.read8(o)))
     }
 
     pub fn unknown_accesses(&self) -> &[UnknownAccess] {
@@ -846,12 +895,25 @@ impl Bus for Soc {
     fn idle(&mut self, core: u32) {
         if core == 0 {
             self.periph.idle();
+        } else {
+            self.cpu1_idle = true; // (a runner stepping core 1 against the SoC: fm1-emu's)
+        }
+    }
+
+    fn spin(&mut self, core: u32, addr: u32) {
+        if self.cpu1_running {
+            self.waits[core as usize & 1] = Some(Wait::Byte(addr));
         }
     }
 
     fn hw_lock(&mut self, core: u32, set: bool) -> bool {
         match (set, self.lock_owner) {
-            (true, Some(c)) if c != core => false,
+            (true, Some(c)) if c != core => {
+                if self.cpu1_running {
+                    self.waits[core as usize & 1] = Some(Wait::Lock);
+                }
+                false
+            }
             (true, _) => {
                 self.lock_owner = Some(core);
                 true

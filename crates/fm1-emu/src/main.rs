@@ -479,6 +479,7 @@ fn main() -> ExitCode {
 
     let dump_every: u64 = 1 << 20;
     let mut stop = false;
+    let mut park = false; // (core 1 stopped on a fault this step: dropped below)
     soc.take_boot(&cpus[0]);
     for _ in 0..args.steps {
         // a chip reset (the watchdog, PR_PWR): cpu0 from its start, core 1 held again
@@ -524,6 +525,13 @@ fn main() -> ExitCode {
                     soc.advance(1);
                 }
                 continue;
+            }
+            if cpu.core_id == 1 && soc.cpu1_idle {
+                // asleep since its `idle`, until an interrupt from its bank is pending
+                if soc.pending_irq_for(1).is_none() {
+                    continue;
+                }
+                soc.cpu1_idle = false;
             }
             if (Some(cpu.pc) == args.break_pc || extra_breaks.contains(&cpu.pc)) && break_hits < break_max {
                 break_hits += 1;
@@ -651,6 +659,13 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                Err(e) if cpu.core_id == 1 => {
+                    // the chip's core 1 faults there and stops; cpu0 goes on alone
+                    println!("cpu1 stopped at step {total_steps} ({} ms): {e:?} at pc {:#010x} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms(), cpu.pc);
+                    soc.cpu1_fault = Some(format!("{e:?}"));
+                    park = true;
+                    break;
+                }
                 Err(e) => {
                     halt = Some(e);
                     report_core = ci;
@@ -660,6 +675,10 @@ fn main() -> ExitCode {
                 break;
                 }
             }
+        }
+        if park {
+            cpus.truncate(1);
+            park = false;
         }
         if stop {
             break;

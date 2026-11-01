@@ -85,6 +85,10 @@ pub trait Bus {
     fn hw_lock(&mut self, _core: u32, _set: bool) -> bool {
         true
     }
+    /// `testset` on `core` found the byte at `addr` taken: the core spins on it (the SDK's byte
+    /// locks: `testset b[r]; ifeq goto` back). A dual-core bus may hand the machine to the other
+    /// core, the one that holds it.
+    fn spin(&mut self, _core: u32, _addr: u32) {}
     /// Would the next tick be due?
     fn next_tick_due(&self) -> bool {
         true
@@ -2928,6 +2932,9 @@ impl Cpu {
                 let old = bus.read8(addr);
                 self.cc = old != 0;
                 bus.write8(addr, old | 0x80);
+                if old != 0 {
+                    bus.spin(self.core_id, addr);
+                }
             }
             24 => {
                 // `ifeq/ifne goto #off` (40/41 e8): off = 2*sext16(bits(16,31))

@@ -7,8 +7,16 @@
 //! budget stops its interpreter and compiled code alike. It stops early once it is back at
 //! the pc it started from with the same registers: a polling loop with nothing to do (the
 //! stock firmware's job loop, X0X's), which would otherwise cost as much as cpu0.
+//!
+//! The chip interleaves the cores instruction by instruction, so a lock is held for nanoseconds;
+//! here a core that finds one held (`lockset` denied, `testset` on a taken byte: `Soc::waits`)
+//! would spin through its whole slice, the holder not running. So it hands over instead: cpu1
+//! ends its run (cpu0's slice is next), cpu0 ends its slice early, and cpu1 then runs on while it
+//! holds the lock, the clock moving for cpu0's retries, which are not run (a FreeRTOS SMP kernel,
+//! Bubba Machine's, takes the hardware lock around every critical section: without this, most of
+//! its slow-path instructions were `lockset` retries).
 
-use crate::{p33, Soc, RAM_BASE, VEC_BASE};
+use crate::{p33, Soc, Wait, RAM_BASE, VEC_BASE};
 use fm1_core::{Bus, Cpu, PlainState};
 
 /// cpu0 runs in slices of this many instructions once cpu1 is running, cpu1 after each.
@@ -85,6 +93,9 @@ impl Bus for Core1Bus<'_> {
     fn hw_lock(&mut self, core: u32, set: bool) -> bool {
         self.soc.hw_lock(core, set)
     }
+    fn spin(&mut self, core: u32, addr: u32) {
+        self.soc.spin(core, addr)
+    }
     fn irq_window(&mut self) {
         // (cpu1's loop looks at its interrupts before every run; a short stretch ends soon)
         if self.soc.periph.any_pending() {
@@ -92,6 +103,12 @@ impl Bus for Core1Bus<'_> {
         }
     }
     fn service(&mut self) {
+        self.budget = self.budget.min(1);
+    }
+    fn idle(&mut self, _core: u32) {
+        // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
+        // only once an interrupt from its bank is pending
+        self.soc.cpu1_idle = true;
         self.budget = self.budget.min(1);
     }
     fn next_tick_due(&self) -> bool {
@@ -142,6 +159,9 @@ impl Bus for Core1Loads<'_> {
     }
     fn hw_lock(&mut self, core: u32, set: bool) -> bool {
         self.0.hw_lock(core, set)
+    }
+    fn spin(&mut self, core: u32, addr: u32) {
+        self.0.spin(core, addr)
     }
     fn next_tick_due(&self) -> bool {
         self.0.next_tick_due()
@@ -489,7 +509,8 @@ fn probe_loop(cpu: &mut Cpu, soc: &mut Soc, budget: u32) -> u32 {
 /// cpu0's block loop: interrupts taken between blocks, the SoC serviced when a tick is due.
 /// `pending_tick` carries a tick already spent on the next instruction across calls. Returns
 /// the instructions run: n, or fewer when cpu0 released cpu1 or the chip reset (it stops right
-/// there; after a reset `soc.resets` has counted up, and cpu0 is back at its start).
+/// there; after a reset `soc.resets` has counted up, and cpu0 is back at its start), or when
+/// it found a lock core 1 holds (`Soc::waits`, with core 1 running: `run_dual` hands over).
 pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool) -> Result<u32, String> {
     soc.take_boot(cpu);
     if soc.reset_due() {
@@ -540,6 +561,9 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
                     return Err(format!("{e:?} at pc {:#010x}", cpu.pc));
                 }
                 done += 1;
+                if soc.waits[0].is_some() {
+                    break; // spinning on a lock core 1 holds: core 1 runs now (run_dual)
+                }
             }
             Ok((k, due)) => {
                 done += k;
@@ -560,9 +584,13 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
 /// stock firmware's stub at 0x020001B8 and X0X's entry both put it there; older images
 /// without it: the RAM job loop at 0x01C022B6). It starts in supervisor mode.
 pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
+    if soc.cpu1_fault.is_some() {
+        return None; // (stopped on a fault: held until a chip reset)
+    }
     if !std::mem::take(&mut soc.cpu1_release) && soc.read32(0x10008) & 8 == 0 {
         return None;
     }
+    soc.cpu1_idle = false;
     let entry = soc.read32(0x01C7_FFF8);
     let in_code = (0x0200_0000..0x0300_0000).contains(&entry) || (RAM_BASE..RAM_BASE + ram_size as u32).contains(&entry);
     if std::env::var_os("FM1_DUAL_TRACE").is_some() {
@@ -577,16 +605,31 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 }
 
 /// Run cpu1 for up to `cycles` instructions: interrupts from its own bank, then blocks or
-/// single steps; back where it started with nothing changed means it is idle.
-pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> {
-    if soc.core_paused(1) || soc.reset_due() {
-        return Ok(());
+/// single steps; back where it started with nothing changed means it is idle. It also stops
+/// where it finds a lock cpu0 holds (`Soc::waits`: cpu0's slice is next, the rest of this run
+/// forfeited, as a polling loop's) and, given `until` (what cpu0 spins on: `run_dual`), once
+/// cpu0 would get it. Returns the instructions run, `cycles` at most (a stretch may run on a
+/// little past them).
+pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
+    if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
+        return Ok(0);
+    }
+    if soc.cpu1_idle {
+        // asleep since its `idle`: on again only with an interrupt from its bank pending
+        if !(soc.periph.any_pending() && soc.pending_irq_for(1).is_some()) {
+            return Ok(0);
+        }
+        soc.cpu1_idle = false;
     }
     let probe = (c1.pc, c1.regs, c1.sp);
-    let mut left = cycles.min(1 << 20);
+    let budget = cycles.min(1 << 20);
+    let mut left = budget;
     // first a block at a time, looking for the way back to where it started (a polling loop
-    // goes round in well under this); then, busy, in big stretches
-    let mut probing = 512u64;
+    // goes round in well under this); then, busy, in big stretches. With cpu0 spinning on what
+    // it holds, no probing and short calls: compiled or not, the calls end at the same
+    // instructions (the budget holds to the instruction), so what cpu0 misses of a byte lock
+    // released inside one is the same in both, and little.
+    let mut probing = if until.is_some() { 0 } else { 512u64 };
     while left > 0 {
         let irq = if soc.periph.any_pending() { soc.pending_irq_for(1) } else { None };
         if let Some((irq, prio)) = irq {
@@ -603,7 +646,7 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         // same points. (Melodee 1.4.5's core 1 polls in most slices, about 22 blocks a pass; a
         // call each was 12% of a Pixel 7 Pro's time.)
         let stretch = probing > 0 && irq.is_none() && c1.jit_on && c1.stop_checks;
-        let busy = if probing > 0 { 0 } else { left.min(256) };
+        let busy = if probing > 0 { 0 } else { left.min(if until.is_some() { SPIN_CALL } else { 256 }) };
         // (a stretch: its last call may end up to `STRETCH_ROOM` past what is left, and its ticks
         // never run out)
         let span = if stretch { probing.min(left) + fm1_core::STRETCH_ROOM as u64 } else { busy };
@@ -629,15 +672,29 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         };
         left = left.saturating_sub(k);
         probing = probing.saturating_sub(k);
+        // (first: a wait set by the step just made is for this run to take, whatever else ends it)
+        if soc.waits[1].take().is_some() {
+            break; // spinning on a lock cpu0 holds: cpu0's slice is next
+        }
         if soc.reset_due() {
             break; // (cpu1 wrote PR_PWR: `Core1Bus::stop_at_reset`)
+        }
+        if soc.cpu1_idle {
+            break; // asleep (`Core1Bus::idle`)
         }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
         }
+        if until.is_some_and(|w| !soc.still_waits(0, w)) {
+            break; // cpu0 would get what it spins on now: back to it
+        }
     }
-    Ok(())
+    Ok(budget - left)
 }
+
+/// cpu1's calls while cpu0 spins on a byte lock it holds (`run_cpu1`'s `until`): how far past
+/// the release cpu1 may run before cpu0 sees it.
+const SPIN_CALL: u64 = 64;
 
 /// cpu0 alone ran in stretches of this many instructions until it released cpu1, and the rest
 /// of the stretch it released it in was not run. The block loop stops at the release itself
@@ -681,6 +738,7 @@ fn run_dual_from(
     run0: &mut impl FnMut(&mut Soc, u32) -> Result<u32, String>,
 ) -> Result<u32, String> {
     let resets = soc.resets;
+    soc.cpu1_running = cpu1.is_some();
     while cpu1.is_none() {
         *cpu1 = released_cpu1(soc, ram_size).map(|mut c| {
             c.jit_on = jit_on;
@@ -699,26 +757,74 @@ fn run_dual_from(
     }
     let Some(c1) = cpu1.as_mut() else { return Ok(done) };
     soc.periph.room_cap = SLICE as u64;
+    soc.cpu1_running = true;
     while done < n {
-        let k = (n - done).min(SLICE);
-        let c0 = soc.periph.cycles;
-        let ran = if soc.core_paused(0) && !soc.reset_due() {
-            soc.advance(k as u64); // held by cpu1 (C0_CON bit 2): time runs on
-            if soc.reset_due() {
-                run0(soc, 0)?; // (a reset is cpu0's to carry out, held or not)
+        // a slice of cpu0, then cpu1 for the cycles it took. cpu0 stops short of the slice where
+        // it finds a lock core 1 holds (`Soc::waits`): cpu1 gets its cycles, then runs on while
+        // it holds the lock (to the slice's end at most), the clock moving for cpu0's retries,
+        // which are not run (the chip's cpu0 spins there, its interrupts disabled: the SDK's
+        // critical sections); then cpu0 goes on with the rest of the slice. The slice's cycles
+        // and instructions stay what they are, retries counted as instructions.
+        let mut k = (n - done).min(SLICE);
+        while k > 0 {
+            let c0 = soc.periph.cycles;
+            let ran = if soc.core_paused(0) && !soc.reset_due() {
+                soc.advance(k as u64); // held by cpu1 (C0_CON bit 2): time runs on
+                if soc.reset_due() {
+                    run0(soc, 0)?; // (a reset is cpu0's to carry out, held or not)
+                }
+                k
+            } else {
+                run0(soc, k)?
+            };
+            if soc.resets != resets {
+                return Ok(done + ran);
             }
-            k
-        } else {
-            run0(soc, k)?
-        };
-        if soc.resets != resets {
-            return Ok(done + ran);
+            done += ran;
+            k -= ran;
+            let dt = soc.periph.cycles - c0;
+            run_cpu1_on(c1, soc, dt, None);
+            if k == 0 {
+                break;
+            }
+            // (short of the slice with no lock to wait for: a latched release, see run_blocks;
+            // the rest of the slice is forfeited)
+            let Some(w) = soc.waits[0].take() else {
+                done += k;
+                break;
+            };
+            let mut spun = if soc.still_waits(0, w) { run_cpu1_on(c1, soc, k as u64, Some(w)) } else { 0 };
+            if soc.still_waits(0, w) {
+                spun = k as u64; // core 1 stopped still holding it (asleep, polling, a lock of its own): the rest of the slice would spin too
+            }
+            if spun > 0 {
+                soc.advance(spun);
+                done += spun as u32;
+                k -= spun as u32;
+                if soc.reset_due() {
+                    run0(soc, 0)?; // (as held: a reset is cpu0's to carry out)
+                    if soc.resets != resets {
+                        return Ok(done);
+                    }
+                }
+            }
         }
-        done += k;
-        let dt = soc.periph.cycles - c0;
-        run_cpu1(c1, soc, dt)?;
     }
     Ok(done)
+}
+
+/// `run_cpu1`, with a fault stopping core 1 for good: the chip's core 1 faults there and stops;
+/// cpu0 goes on alone (a firmware built for a core 1 that fails falls back to one core:
+/// felucca-bsp's cpu2_fallback).
+fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> u64 {
+    match run_cpu1(c1, soc, cycles, until) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("cpu1 stopped at {} ms: {e} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms());
+            soc.cpu1_fault = Some(e);
+            0
+        }
+    }
 }
 
 #[cfg(test)]
