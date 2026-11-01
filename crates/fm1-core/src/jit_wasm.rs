@@ -74,6 +74,9 @@ pub struct Jit {
 
 /// Entries of `Jit::cache` (a power of two).
 const CACHE: usize = 1 << 12;
+/// An entry nothing was remembered in: its pc is odd, which no instruction's is, so a region
+/// that exits to pc 0 (a null call) finds nothing here and faults in the interpreter as it should.
+const EMPTY: (u32, u32, u32, u32) = (1, 0, 0, 0);
 
 impl std::fmt::Debug for Jit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,7 +86,7 @@ impl std::fmt::Debug for Jit {
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, profile, stops: false, cache: vec![EMPTY; CACHE].into_boxed_slice() })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -151,7 +154,7 @@ impl Jit {
             }
         }
         self.rinfo[r as usize].0 = Box::new([]);
-        self.cache.fill((0, 0, 0, 0));
+        self.cache.fill(EMPTY);
     }
 
     /// Block `id` stays interpreted.
@@ -163,7 +166,7 @@ impl Jit {
     pub fn reset(&mut self) {
         self.state.clear();
         self.rinfo.clear();
-        self.cache.fill((0, 0, 0, 0));
+        self.cache.fill(EMPTY);
     }
 }
 
