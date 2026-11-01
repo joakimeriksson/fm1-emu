@@ -2,6 +2,7 @@
 # crates/fm1-plugin's must equal, with its notes in docs/releases/v<version>.md):
 #   - macOS (Apple silicon): the plugin (AU, VST3, CLAP; tested, validated, tools/package_plugin.sh)
 #     and fm1-live / fm1-emu (tools/package_apps.sh)
+#   - Windows x86-64: the plugin (VST3, CLAP; tested, validated, tools/package_plugin.ps1)
 #   - Linux arm64 and x86-64: fm1-live / fm1-emu
 # each built, smoke-tested on FM-1 SID's package, and published as one GitHub Release: the notes
 # file, then the merged pull requests GitHub lists. Run by hand (workflow_dispatch), or on a pull
@@ -23,6 +24,7 @@ on:
       - .github/workflows/release.yml
       - tools/package_apps.sh
       - tools/package_plugin.sh
+      - tools/package_plugin.ps1
       - docs/releases/**
   workflow_dispatch:
 
@@ -77,6 +79,7 @@ jobs:
       - name: Plugin tests
         run: |
           node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc  # (the fetch exits 0 on a failed download; without the file the engine tests skip themselves)
           cd crates/fm1-plugin && cargo test --release
 
       - name: Build, install, Apple's AU validator
@@ -117,6 +120,51 @@ jobs:
           name: macos-arm64
           path: dist/*
 
+  # The Windows plugin: the tests, the CLAP and the VST3 (tools/build_plugin.ps1), Steinberg's
+  # validator, the zip (tools/package_plugin.ps1). Unsigned. The runner has Rust (MSVC), Visual
+  # Studio, CMake and git.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Plugin tests
+        run: |
+          node tools/fetch_firmwares.mjs felucca
+          if (-not (Test-Path reference/firmwares/felucca.fwsc)) { throw 'felucca.fwsc was not fetched: the engine tests would skip themselves' }
+          cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
+
+      - name: Build the CLAP and VST3
+        shell: pwsh
+        env:
+          NO_INSTALL: '1'
+        run: tools/build_plugin.ps1
+
+      - name: Steinberg's VST3 validator
+        shell: pwsh
+        run: |
+          cmake -S target/plugin/build/cpm/vst3sdk -B target/plugin/vst3sdk-build -A x64 `
+            -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build target/plugin/vst3sdk-build --config Release --target validator
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:CLAP_PATH = "$PWD/target/plugin"
+          target/plugin/vst3sdk-build/bin/Release/validator.exe target/plugin/FM-1.vst3
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Package the plugin
+        shell: pwsh
+        run: tools/package_plugin.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: target/plugin/release/*.zip
+
   linux:
     strategy:
       matrix:
@@ -154,7 +202,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag'
-    needs: [macos, linux, catalog]
+    needs: [macos, windows, linux, catalog]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -174,8 +222,8 @@ jobs:
         run: |
           v=${GITHUB_REF_NAME#v}
           ls -laR dist
-          # the plugin's zip and three fm1-emu archives, as files (not folders)
+          # the plugin's two zips (macOS, Windows) and three fm1-emu archives, as files (not folders)
           files=$(find dist -type f \( -name '*.zip' -o -name '*.tar.gz' \))
-          test "$(echo "$files" | wc -l)" -eq 4 || { echo "expected 4 files"; exit 1; }
+          test "$(echo "$files" | wc -l)" -eq 5 || { echo "expected 5 files"; exit 1; }
           gh release create "$GITHUB_REF_NAME" $files --title "fm1-emu $v" \
             --notes-file "docs/releases/v$v.md" --generate-notes

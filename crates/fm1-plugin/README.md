@@ -106,7 +106,11 @@ workflow:
 3. builds Steinberg's validator and runs it on the VST3;
 4. packages the zip (`tools/package_plugin.sh`: the three plugins and an `INSTALL.txt`).
 
-Without signing secrets the release is unsigned (`INSTALL.txt` gives the command that lets macOS
+On a Windows runner it runs the tests, builds the CLAP and the VST3 (`tools\build_plugin.ps1`),
+runs Steinberg's validator and packages `fm1-plugin-<version>-windows-x86_64.zip`
+(`tools\package_plugin.ps1`: the two plugins and an `INSTALL.txt`), unsigned.
+
+Without signing secrets the macOS release is unsigned (`INSTALL.txt` gives the command that lets macOS
 open it). With these repository secrets it's signed with a Developer ID and notarized:
 - `MACOS_CERTIFICATE`: a "Developer ID Application" certificate as a base64 `.p12`;
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
@@ -123,6 +127,9 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   including when the same firmware is already running. For a browser backup that omits
   bring-your-own firmware, load the matching `.fwsc` first, then import the `.fm1save`.
   Invalid imports leave the current setup intact.
+  On a Mac, keep the files outside Desktop, Documents, Downloads and iCloud Drive: macOS keeps a
+  DAW's plugin host out of those folders without asking, and the load fails with "Operation not
+  permitted". `~/Music` or any other folder in your home works.
 - **Export save…** captures the running firmware and its latest flash changes as a `.fm1save`.
   Send it to someone else, import it in the browser, or open it in another VST3/AU/CLAP instance.
   It waits for flash writes to finish and writes the file in the background. Edits held only in
