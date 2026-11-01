@@ -94,6 +94,12 @@ impl Bus for Core1Bus<'_> {
     fn service(&mut self) {
         self.budget = self.budget.min(1);
     }
+    fn idle(&mut self, _core: u32) {
+        // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
+        // only once an interrupt from its bank is pending
+        self.soc.cpu1_idle = true;
+        self.budget = self.budget.min(1);
+    }
     fn next_tick_due(&self) -> bool {
         self.budget <= 1
     }
@@ -560,9 +566,13 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
 /// stock firmware's stub at 0x020001B8 and X0X's entry both put it there; older images
 /// without it: the RAM job loop at 0x01C022B6). It starts in supervisor mode.
 pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
+    if soc.cpu1_fault.is_some() {
+        return None; // (stopped on a fault: held until a chip reset)
+    }
     if !std::mem::take(&mut soc.cpu1_release) && soc.read32(0x10008) & 8 == 0 {
         return None;
     }
+    soc.cpu1_idle = false;
     let entry = soc.read32(0x01C7_FFF8);
     let in_code = (0x0200_0000..0x0300_0000).contains(&entry) || (RAM_BASE..RAM_BASE + ram_size as u32).contains(&entry);
     if std::env::var_os("FM1_DUAL_TRACE").is_some() {
@@ -579,10 +589,19 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 /// Run cpu1 for up to `cycles` instructions: interrupts from its own bank, then blocks or
 /// single steps; back where it started with nothing changed means it is idle.
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> {
-    if soc.core_paused(1) || soc.reset_due() {
+    if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
         return Ok(());
     }
+    if soc.cpu1_idle {
+        // asleep since its `idle`: on again only with an interrupt from its bank pending
+        if !(soc.periph.any_pending() && soc.pending_irq_for(1).is_some()) {
+            return Ok(());
+        }
+        soc.cpu1_idle = false;
+    }
     let probe = (c1.pc, c1.regs, c1.sp);
+    c1.probe[..16].copy_from_slice(&c1.regs);
+    c1.probe[16] = c1.sp;
     let mut left = cycles.min(1 << 20);
     // first a block at a time, looking for the way back to where it started (a polling loop
     // goes round in well under this); then, busy, in big stretches
@@ -631,6 +650,9 @@ pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64) -> Result<(), String> 
         probing = probing.saturating_sub(k);
         if soc.reset_due() {
             break; // (cpu1 wrote PR_PWR: `Core1Bus::stop_at_reset`)
+        }
+        if soc.cpu1_idle {
+            break; // asleep (`Core1Bus::idle`)
         }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
@@ -716,7 +738,15 @@ fn run_dual_from(
         }
         done += k;
         let dt = soc.periph.cycles - c0;
-        run_cpu1(c1, soc, dt)?;
+        if let Err(e) = run_cpu1(c1, soc, dt) {
+            if !soc.cpu1_survives {
+                return Err(e);
+            }
+            // the chip's core 1 faults there and stops; cpu0 goes on alone (a firmware built
+            // for a core 1 that fails falls back to one core: felucca-bsp's cpu2_fallback)
+            eprintln!("cpu1 stopped at {} ms: {e} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms());
+            soc.cpu1_fault = Some(e);
+        }
     }
     Ok(done)
 }
@@ -1041,6 +1071,83 @@ mod tests {
             assert_eq!(soc.resets, 1);
             assert!(c1.is_none(), "core 1 held again");
             assert_eq!(soc.read32(RAM_BASE + 0x10000), 0, "core 1 ran on after its reset (jit {jit})");
+        }
+    }
+
+    /// `idle;  *(int *)0x01C10000 = 0x600d;  for (;;);`: core 1 sleeps, then stores a word.
+    const CORE1_IDLE: [u8; 20] = [
+        0x01, 0x00, 0xc0, 0xff, 0x00, 0x00, 0xc1, 0x01, 0x41, 0xe0, 0x0d, 0x60, 0x81, 0x60, 0xf7, 0x9f, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn core_1_sleeps_on_idle_until_an_interrupt_from_its_bank_is_pending() {
+        for jit in [false, true] {
+            let (mut cpu, mut c1, mut soc, mut t) = two_cores(&CORE1_IDLE, jit);
+            let mut slices = |c1: &mut Option<Cpu>, soc: &mut Soc, n: usize| {
+                for _ in 0..n {
+                    run_dual(c1, soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+                }
+            };
+            slices(&mut c1, &mut soc, 8);
+            assert!(soc.cpu1_idle, "asleep after idle (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0, "ran on past idle (jit {jit})");
+            // a software interrupt (ILAT bit 0, IRQ 120) enabled for cpu0's bank only: not its
+            soc.write32(0x1eef13c, 0x3);
+            soc.write32(0x1eef1a0, 1);
+            slices(&mut c1, &mut soc, 8);
+            assert!(soc.cpu1_idle, "woke on an interrupt of the other core's bank (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0);
+            // enabled in its own bank (0x1EEF300): it wakes and goes on after the idle
+            soc.write32(0x1eef33c, 0x3);
+            slices(&mut c1, &mut soc, 8);
+            assert!(!soc.cpu1_idle, "still asleep (jit {jit})");
+            assert_eq!(soc.read32(RAM_BASE + 0x10000), 0x600d, "did not go on after the idle (jit {jit})");
+        }
+    }
+
+    /// Core 1 on words no instruction matches (erased flash, as COSMOS 0.23's core 1 entry).
+    const CORE1_ERASED: [u8; 8] = [0xff; 8];
+
+    #[test]
+    fn a_fault_on_core_1_halts_the_machine_unless_it_survives() {
+        for jit in [false, true] {
+            // the default: the machine halts there, as any fault
+            let (mut cpu, mut soc) = machine(&[&[0xf7, 0x9f], CORE1_ERASED.as_slice()].concat(), &[], false);
+            cpu.jit_on = jit;
+            soc.take_boot(&cpu);
+            soc.write32(0x01c7_fff8, XIP_BASE + 2);
+            soc.write32(0x10008, 8);
+            let (mut c1, mut t) = (None, false);
+            let mut halted = false;
+            for _ in 0..4 {
+                if run_dual(&mut c1, &mut soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).is_err() {
+                    halted = true;
+                    break;
+                }
+            }
+            assert!(halted, "ran on past core 1's fault (jit {jit})");
+            // opted in: core 1 stops alone, cpu0 goes on, the fault is kept until a reset
+            let (mut cpu, mut c1, mut soc, mut t) = {
+                let (mut cpu, mut soc) = machine(&[&[0xf7, 0x9f], CORE1_ERASED.as_slice()].concat(), &[], false);
+                cpu.jit_on = jit;
+                soc.cpu1_survives = true;
+                soc.take_boot(&cpu);
+                soc.write32(0x01c7_fff8, XIP_BASE + 2);
+                soc.write32(0x10008, 8);
+                (cpu, None, soc, false)
+            };
+            let before = cpu.insn_count;
+            for _ in 0..4 {
+                run_dual(&mut c1, &mut soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+            }
+            assert!(soc.cpu1_fault.is_some(), "the fault kept (jit {jit})");
+            assert!(cpu.insn_count > before + 2 * SLICE as u64, "cpu0 went on (jit {jit})");
+            // core 1 stays where it stopped
+            let stopped = c1.as_ref().map(|c| (c.pc, c.insn_count));
+            for _ in 0..4 {
+                run_dual(&mut c1, &mut soc, SLICE, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+            }
+            assert_eq!(c1.as_ref().map(|c| (c.pc, c.insn_count)), stopped, "core 1 ran on after its fault (jit {jit})");
         }
     }
 

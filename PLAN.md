@@ -1181,6 +1181,102 @@ What the counters say is left, by size (none done here):
 - Loads check RAM then XIP with two immediate pairs each; constants in the two spare callee-saved
   registers would save 2-4 instructions a load.
 
+## 5.35 The wasm JIT's FPU inline (2026-11-01)
+
+The float firmwares rendered below real time in the browser and clicked (Ravel 0.75x at 100 MHz)
+while the native JIT ran them at 2-3x: every FPU op (`3f e5`, fm1-isa's fpu.rs) left the
+generated wasm for the executor through `h_op` (269 M of Ravel's 1.93 G compiled instructions
+in 20 s; LOOM-8 31 M in 12 s). Now `block` computes them with wasm's own f32 instructions, which
+are the IEEE single precision the interpreter's Rust is in the same build, so the engine's own
+`fadd` makes both results, NaN payloads included:
+
+- `+ - * /`: `f32.add / sub / mul / div` on the registers reinterpreted (`f32.reinterpret_i32`,
+  back with `i32.reinterpret_f32`). `+` and `*` take b first: LLVM commuted the interpreter's
+  `x + y` and `x * y` for wasm, and when both operands are NaNs the engine passes the first
+  one's on (the self-test below found it: 0x7fc00000 + 0xffc00000).
+- `fmin` / `fmax`: not `f32.min` / `f32.max` (IEEE minimum / maximum, which propagate a NaN)
+  but the sequence LLVM expands Rust's `f32::min` / `max` into for wasm: `a' = a != a ? b : a`,
+  `b' = b != b ? a' : b`, `a' < b' ? a' : b'` (max: `>`). A NaN operand yields the other one;
+  equal operands (the two zeros) yield b, as the interpreter's build does. (jit.rs's `fminnm` /
+  `fmaxnm` are the same minNum semantics; on a tie of signed zeros they give the negative one.)
+- `ftoi` / `ftou` in the four roundings: `f32.nearest` (even) / `ceil` / `floor` first, then
+  `i32.trunc_sat_f32_s` / `_u` (0xfc 0 / 1), which truncates by itself (so the trunc rounding
+  emits nothing before it), saturates on overflow and sends a NaN to 0, as Rust's `as i32` /
+  `as u32`. `itof` / `utof`: `f32.convert_i32_s` / `_u`. `ftof`: nearest / trunc / ceil / floor.
+- The multiply-accumulates 7 / 8 (`R += R * R (f)`) stay with the executor, as in jit.rs (none
+  in the catalog's float firmwares: Ravel's and LOOM-8's FOp helper calls went to 0).
+- `fop_selftest` (`fm1_jit_selftest`, web/jit.test.mjs; skipped without a wasm build): every
+  inlined op alone in a block, on every pair of 44 edge values (NaNs with payloads, quiet and
+  signalling, both zeros, denormals, infinities, the integers' bounds, halves) and random words,
+  into a fresh, a source, a doubled and the second source register, must leave what `exec_fast`
+  leaves, and so must `run_fast` on the instruction word (the interpreter proper, its own copy
+  of the float code), in the engine at hand: the JIT's oracle test for wasm, as jit.rs's
+  random-state test is for AArch64.
+
+Ravel 0.74x -> 0.91x at 100 MHz (its quanta's p50 3.22 -> 2.46 ms), LOOM-8 2.87x -> 3.31x
+(interleaved A/B against the unchanged build, 20 s); PT/FM 1.32x and Felucca 2.37x unchanged:
+neither uses the FPU (PT/FM's helpers are `LdPre`, `StPre` and route 21's pair ops; Orange
+Cat, DUELL and FIZZ have no FPU ops either). JIT and interpreter audio byte-identical for
+Ravel, PT/FM, Felucca, Orange Cat, DUELL, LOOM-8 and FIZZ; the native catalog check unchanged
+(56 ok, 39 rebuilt). Bubba Machine (282 M FPU ops in 20 s) gives the same JIT audio as before,
+byte for byte, but its JIT and interpreter audio differ from 6.5 s on, with and without this
+change: that came with the cores' lock handover (d70ed00; at 52e1cb7 they agree), not with the
+FPU; its JIT also compiles 7500 regions in 20 s (RAM code dropped and rebuilt), 0.46x where the
+interpreter runs 1.15x.
+
+## 5.36 A countdown loop of one instruction runs its iterations in one go (2026-11-01)
+
+fm1-dock ran at 0.76x real time natively and 0.6x in the browser, every other firmware's speed
+notwithstanding, and its profile was unlike theirs: 76% of the browser's time in core 1's machinery
+(`run_stretch`, `run_cpu1`, `Jit::lookup`), 283 M `run_fast` calls for 297 M of core 1's instructions.
+Sampling both cores' pcs (fm1-live's `FM1_BENCH_PCS` samples core 0; a local patch added core 1)
+put half of all samples on one RAM address: `if (--r0 != 0) goto self` after `r0 = 256`, a software
+delay in core 1's polling loop. Each iteration is a block of one instruction that branches to its
+own start, and in a runner's stretch that start is the stop pc, so compiled code left after every
+iteration, on AArch64 as in wasm: one call per instruction, 60 M a second. The idle probe never
+matched, the counter differing at every visit.
+
+`run_fast` now runs such a block's iterations in one go, before the JIT or the interpreter sees it:
+a block of one `DecBr` with `!=` whose target is its own pc, entered at a call's start, runs as many
+iterations as fit the budget and the ticks before the next event (`tick_room`, as compiled code pays
+them: `add_ticks` for all but the first instruction of a call), the register down by one per
+iteration, the pc past the loop when the count ran out. Nothing else observes the iterations (one
+register, no bus), so the state after any number of instructions is the interpreter's; a stretch
+ends its call there and returns to the runner, as after a block run interpreted. In a stretch the
+iterations stop `STRETCH_ROOM` short of the budget, where compiled code's check at a block's entry
+would have stopped them (a review found the first version running up to 64 further than the
+compiled path on a count longer than the stretch; fm1-dock's 256 never is). One shape only: a
+two-instruction delay (`r -= 1; if r != 0 goto`) or another condition still pays a call per lap.
+
+fm1-dock: 0.76x -> 6.05x native, 0.59x -> 2.98x in the browser (node), no audio quantum over its
+2.9 ms where 1680 of 1723 were. Native CPU time unchanged to three digits on Felucca, X0X, Melodee
+and 386DX. Exactness: fm1-core's 66 and fm1-soc's 70 tests; the native catalog check, 94 ok, fm1-dock
+itself "rebuilt" (its 0.7 package is not the one hashed: JIT = interpreter, and master's audio over
+8 s with keys byte for byte; tests/catalog.json carries the new package and audio hashes); the wasm
+build's audio identical to master's on all 95.
+
+## 5.37 The wasm JIT goes from region to region without a round of run_fast's loop (2026-11-01)
+
+Counters on `jit_wasm::run`'s exits (a temporary build) said what ended a region run on Melodee:
+of 41 M in 5 s, half were edges out of the region (a jump or fall-through to a pc in another
+compiled region), each a round of `run_fast`'s loop: the block table, `Jit::lookup`, the region's
+RAM check, the call's prologue. `Jit` keeps a direct-mapped cache by pc of what `lookup` found
+(4096 entries; cleared with a dropped region and on `reset`), and after a region run that is not
+a stretch's call, `run_fast` goes straight to the region at the new pc while the budget allows and
+nothing careful is pending: `block_at` is pure, and what it checks of a RAM block `wasm_region_ok`
+checks of all the region's, so the round of the loop would have decided the same. A region that
+does not fit (k = 0) or was dropped goes round the loop as before, and nothing is tried once the
+next tick is due. An empty entry is one without a function (table index 0 is never a region's: a
+review found the first version's all-zero entry matching a jump to pc 0, a trap where `step`
+reports the fetch); a dropped region takes only its own entries out of the cache.
+
+On top of 5.35 and 5.36 (the wasm build of each, interleaved in node, the median of 3): Felucca
++7.8%, X0X +6.1%, 386DX +3.5%, Melodee +2.3%; byte-identical audio on all 95 catalog firmwares.
+Also tried in this pass, with the FPU, the six ops and the stretches that 5.35 brought: guest
+registers in wasm locals within a block (+1-5%, within what the rest moves; 5.35's author found
+the same and dropped it), a helper of its own for `sti` (neutral), SRAM2 as a third inline range
+(no gain, 3-6% code-size cost where it is unused). None kept.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.

@@ -300,6 +300,10 @@ pub struct Cpu {
     /// instructions are left, so a stretch knows where that block's call ends. (u32: compiled
     /// code stores it.)
     pub stop_rest: u32,
+    /// The runner's probe (`run_cpu1`): the registers and sp where its stretch began. Compiled
+    /// code for core 1 (wasm) makes the runner's polling test itself when it comes back to the
+    /// stop pc, and runs on when something changed.
+    pub probe: [u32; 17],
     /// Compile the checks for `stop_pc` / `stop_io` into this core's blocks (set before its
     /// JIT is made; core 1's).
     pub stop_checks: bool,
@@ -334,6 +338,26 @@ pub struct PlainState {
 impl PlainState {
     pub fn pc(&self) -> u32 {
         self.pc
+    }
+}
+
+/// The decoded-instruction cache (`Cpu::fetch_at`) and the block map (`Cpu::block_at`) are
+/// direct-mapped on the halfword index: 256K lines cover 512 KiB of XIP code without aliasing
+/// (Felucca's image is 441 KiB; 64K lines re-decoded ~1M times per 6 s). Code below the XIP window
+/// (RAM: ISRs, flash drivers, a firmware's hot loop) has 64K lines of its own after them, so a
+/// RAM line and an XIP line never share a slot: with one map for both, Ravel's spin loop in RAM
+/// and the XIP code at the same slot evicted each other 54K times in 8 s, and in the wasm JIT
+/// each line decoded anew was a block made anew and a region compiled anew, without end.
+const ICACHE_BITS: u32 = 18;
+const ICACHE_RAM_BITS: u32 = 16;
+const ICACHE_LINES: usize = (1 << ICACHE_BITS) + (1 << ICACHE_RAM_BITS);
+
+#[inline(always)]
+fn icache_slot(pc: u32) -> usize {
+    if pc < 0x0200_0000 {
+        (1 << ICACHE_BITS) + ((pc >> 1) & ((1 << ICACHE_RAM_BITS) - 1)) as usize
+    } else {
+        ((pc >> 1) & ((1 << ICACHE_BITS) - 1)) as usize
     }
 }
 
@@ -471,14 +495,11 @@ impl Cpu {
     }
 
     fn fetch_at<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<usize, CoreError> {
-        // 256K lines cover 512 KiB of code without aliasing (Felucca's
-        // image is 441 KiB; 64K lines re-decoded ~1M times per 6 s)
-        const BITS: u32 = 18;
         if self.icache.is_empty() {
-            self.icache = vec![Line::EMPTY; 1 << BITS];
-            self.icache_x = vec![None; 1 << BITS];
+            self.icache = vec![Line::EMPTY; ICACHE_LINES];
+            self.icache_x = vec![None; ICACHE_LINES];
         }
-        let slot = ((pc >> 1) & ((1 << BITS) - 1)) as usize;
+        let slot = icache_slot(pc);
         let hit = self.icache[slot].pc == pc;
         if hit && (0x0200_0000..0x0400_0000).contains(&pc) {
             return Ok(slot);
@@ -486,8 +507,14 @@ impl Cpu {
         let lo = bus.fetch32(pc) as u64;
         let hi = bus.fetch32(pc + 4) as u64;
         let win = (hi << 32) | lo;
-        if hit && self.icache_x[slot].map_or(false, |x| x.win == win) {
-            return Ok(slot);
+        // (RAM code: the line stands while the instruction's own bytes do; the rest of the window
+        // may be data a short instruction sits next to, which changing must not cost a decode)
+        if hit {
+            let len = self.icache[slot].len as u32;
+            let mask = if len >= 8 { u64::MAX } else { (1u64 << (8 * len)) - 1 };
+            if self.icache_x[slot].map_or(false, |x| (x.win ^ win) & mask == 0) {
+                return Ok(slot);
+            }
         }
         self.decodes += 1;
         let insn = decode_any(win, pc).map_err(CoreError::Decode)?;
@@ -611,10 +638,51 @@ impl Cpu {
             // only where calls end: see jit.rs's `compile`) if it is this block whole, else only
             // to its end
             let mut whole = false;
+            // (a stretch: a runner's call begins here)
+            let at_call = !stretch || n == bound;
             if stretch && n == bound {
                 let (to, all) = len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, pc, self.stop_pc);
                 bound = n + to;
                 whole = all;
+            }
+            // A countdown loop of one instruction, `if (--R != #i) goto self` (a software delay:
+            // fm1-dock's core 1 spends half its time in one), is a block that branches to its own
+            // start: every iteration was a block, a run_fast call in a stretch (the stop pc lies in
+            // it), 60 M calls a second. Its iterations are pure (one register, no bus), so as many
+            // as fit the budget and the ticks before the next event run here in one go, before the
+            // JIT or the interpreter: the same state after the same number of instructions either
+            // way (the register one per iteration, the ticks as compiled code pays them).
+            if len == 1 && !careful && at_call {
+                // SAFETY: build_block pushed start into bops (as the loop below relies on)
+                let op = unsafe { *self.bops.get_unchecked(start as usize) };
+                if let Fast::DecBr { r, cond: Cond::Ne, v, target } = op.fast {
+                    if target == pc && !op.careful && !op.pair_head {
+                        let extra = if n == 0 { 0 } else { 1 };
+                        // (a stretch: as far as compiled code runs before the room check at a
+                        // block's entry stops it, `STRETCH_ROOM` short of the budget)
+                        let cap = if stretch { (budget - n).saturating_sub(STRETCH_ROOM) } else { budget - n };
+                        let room = (bus.tick_room() + 1).saturating_sub(extra).min(cap as u64);
+                        let r0 = self.regs[(r & 15) as usize];
+                        // iterations until the decremented register equals v (2^32 when it does now)
+                        let total = match r0.wrapping_sub(v) as u64 { 0 => 1 << 32, t => t };
+                        let k = total.min(room);
+                        if k > 0 {
+                            self.regs[(r & 15) as usize] = r0.wrapping_sub(k as u32);
+                            if k == total {
+                                pc += op.len as u32; // fell through
+                            }
+                            n += k as u32;
+                            bus.add_ticks(k - 1 + extra);
+                            if stretch {
+                                // the runner's call was this block: it ends here (and the runner
+                                // looks, as after a block run interpreted)
+                                bound = n;
+                                interpreted = true;
+                            }
+                            continue;
+                        }
+                    }
+                }
             }
             let limit = if stretch { bound } else { budget };
             // (careful: inside a then-part or a rep loop with nothing else in progress, where a
@@ -705,9 +773,12 @@ impl Cpu {
             if self.jit_on && !careful {
                 if let Some(mem) = jit_mem {
                     if self.wjit.is_none() {
-                        self.wjit = jit_wasm::Jit::new(self.profile).map(Box::new);
+                        self.wjit = jit_wasm::Jit::new(self.profile).map(|mut j| {
+                            j.stops = self.stop_checks;
+                            Box::new(j)
+                        });
                     }
-                    let code = match self.wjit.as_mut().map(|j| j.lookup(id)) {
+                    let code = match self.wjit.as_mut().map(|j| j.lookup(id, pc)) {
                         // (a region with RAM blocks runs only while they are what memory holds)
                         Some((Some((f, at, r)), _)) => self.wasm_region_ok(bus, r).then_some((f, at)),
                         Some((None, true)) => {
@@ -727,20 +798,50 @@ impl Cpu {
                     if let Some((code, at)) = code {
                         let extra = if n == 0 { 0 } else { 1 };
                         sync!();
-                        // (the budget as the interpreter keeps it, to the instruction: each block
-                        // of the region runs only while it fits, else the interpreter goes on)
-                        let cap = limit - n;
+                        // a stretch's call of a block whole runs on, the code checking at each
+                        // block's entry where the runner wants it back (as jit.rs: the stop pc,
+                        // `stop_io`, the room); else the budget as the interpreter keeps it, to
+                        // the instruction: each block of the region runs only while it fits
+                        let open = stretch && whole && self.wjit.as_ref().is_some_and(|j| j.stops);
+                        let cap = if open { budget - n } else { limit - n };
                         // SAFETY: code was compiled for this bus type and memory map
                         let k = unsafe { jit_wasm::run(code, at, self, bus, extra, cap) };
                         if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
                         if k > 0 {
                             n += k;
-                            // (a stretch: its helpers don't say whether they reached a peripheral)
-                            interpreted = true;
+                            if open {
+                                // (it left at a block's entry or after an op: the next call's
+                                // block begins where it stands)
+                                bound = n;
+                            } else {
+                                // (a stretch: its helpers don't say whether they reached a peripheral)
+                                interpreted = true;
+                            }
                             pc = self.pc;
                             // (it left between the two instructions of a glued pair, or inside an
                             // if-else block's then-part)
                             careful = self.hold_irq != 0 || !self.pred_skips.is_empty();
+                            // straight on to the region at pc when its own check is all that is
+                            // left of the way round this loop (`block_at` is pure, and what it
+                            // checks of a RAM block `wasm_region_ok` checks of all the region's);
+                            // not in a stretch, whose calls the loop above bounds. A region that
+                            // does not fit (k = 0) or was dropped: round the loop, as ever
+                            while !stretch && !careful && n < limit && !self.no_ram_blocks && !bus.next_tick_due() {
+                                let Some((f, at, r)) = self.wjit.as_ref().and_then(|j| j.cached(pc)) else { break };
+                                if !self.wasm_region_ok(bus, r) {
+                                    break;
+                                }
+                                sync!();
+                                // SAFETY: as above; n > 0: the first instruction's tick is due
+                                let k = unsafe { jit_wasm::run(f, at, self, bus, 1, limit - n) };
+                                if self.profile { self.jit_entries += 1; self.jit_insns += k as u64; }
+                                if k == 0 {
+                                    break;
+                                }
+                                n += k;
+                                pc = self.pc;
+                                careful = self.hold_irq != 0 || !self.pred_skips.is_empty();
+                            }
                             continue;
                         }
                     }
@@ -937,7 +1038,7 @@ impl Cpu {
             return Ok(None);
         }
         if !self.bmap.is_empty() {
-            let id = self.bmap[(pc >> 1) as usize & (self.bmap.len() - 1)];
+            let id = self.bmap[icache_slot(pc)];
             if id != 0 {
                 let (bpc, start, len) = self.blocks[id as usize - 1];
                 if bpc == pc && (xip || self.ram_block_ok(bus, id as usize - 1)) {
@@ -1000,9 +1101,9 @@ impl Cpu {
             // an if-else block at the end, its then-part plain: compiled with the then-part in
             // tow (`jit_wasm`'s IfBlk), going on at the else part or past it
             if let Some(last) = tail.filter(|_| ops.len() + 1 == all_len) {
-                if let Fast::IfBlk { has_else: true, fam, then_d, else_d, .. } = last.fast {
+                if let Fast::IfBlk { has_else: true, then_d, else_d, .. } = last.fast {
                     let next = pc + ops.iter().chain([&last]).map(|o| o.len as u32).sum::<u32>();
-                    if let Some(then) = (fam < 8).then(|| self.then_part(bus, next, then_d)).flatten() {
+                    if let Some(then) = self.then_part(bus, next, then_d) {
                         let then_end = next.wrapping_add(then_d as u32);
                         ops.push(last);
                         ops.extend(then);
@@ -1116,7 +1217,7 @@ impl Cpu {
         if self.bmap.is_empty() || (!ram_tracked && !(0x0200_0000..0x0400_0000).contains(&pc)) {
             return None;
         }
-        let id = self.bmap[(pc >> 1) as usize & (self.bmap.len() - 1)];
+        let id = self.bmap[icache_slot(pc)];
         if id == 0 || self.blocks[id as usize - 1].0 != pc {
             return None;
         }
@@ -1125,9 +1226,8 @@ impl Cpu {
 
     #[inline(never)]
     fn build_block<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<Option<(usize, u32, u32)>, CoreError> {
-        const BITS: u32 = 18;
         if self.bmap.is_empty() {
-            self.bmap = vec![0; 1 << BITS];
+            self.bmap = vec![0; ICACHE_LINES];
         }
         if self.bops.len() > 1 << 22 {
             // (cannot happen for one image, but never grow without bound)
@@ -1206,7 +1306,7 @@ impl Cpu {
             self.bver.resize(self.blocks.len() - 1, u64::MAX);
             self.bver.push(bus.code_writes().unwrap_or(u64::MAX));
         }
-        let slot = (pc >> 1) as usize & ((1 << BITS) - 1);
+        let slot = icache_slot(pc);
         self.bmap[slot] = self.blocks.len() as u32;
         Ok(if len == 0 { None } else { Some((self.blocks.len() - 1, start, len)) })
     }
@@ -6680,7 +6780,7 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
 }
 
 /// `cmp_cond(fam, alt, ..)` as a `Cond`.
-fn cond_of_fam(fam: u64, alt: bool) -> Cond {
+pub(crate) fn cond_of_fam(fam: u64, alt: bool) -> Cond {
     match (fam, alt) {
         (0, false) => Cond::Eq,
         (0, true) => Cond::Ne,

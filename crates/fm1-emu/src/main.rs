@@ -23,7 +23,7 @@ const MAX_RAM: usize = (XIP_BASE - RAM_BASE) as usize;
 const USAGE: &str = "usage: fm1-emu --bin APP.bin | --fwsc FIRMWARE.fwsc [options]
 run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 0x02000000]
        [--steps N (5000000)] [--ms MS] [--ram BYTES (1048576, at most 4194304)] [--quiet]
-       [--flaky-core1 RATE [--seed N]]
+       [--flaky-core1 RATE [--seed N]] [--cpu1-survives (a fault on core 1 stops it alone; cpu0 goes on)]
 input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
         the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
 out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
@@ -86,6 +86,8 @@ struct Args {
     snap: Vec<u64>,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
+    /// `--cpu1-survives`: a fault on core 1 stops that core alone, cpu0 goes on (`Soc::cpu1_survives`)
+    cpu1_survives: bool,
     /// the flaky core's generator seed (the same seed, the same misreads; default 1)
     seed: Option<u64>,
 }
@@ -480,6 +482,7 @@ fn main() -> ExitCode {
 
     let dump_every: u64 = 1 << 20;
     let mut stop = false;
+    let mut park = false; // (core 1 stopped on a fault this step: dropped below)
     soc.take_boot(&cpus[0]);
     for _ in 0..args.steps {
         // a chip reset (the watchdog, PR_PWR): cpu0 from its start, core 1 held again
@@ -525,6 +528,13 @@ fn main() -> ExitCode {
                     soc.advance(1);
                 }
                 continue;
+            }
+            if cpu.core_id == 1 && soc.cpu1_idle {
+                // asleep since its `idle`, until an interrupt from its bank is pending
+                if soc.pending_irq_for(1).is_none() {
+                    continue;
+                }
+                soc.cpu1_idle = false;
             }
             if (Some(cpu.pc) == args.break_pc || extra_breaks.contains(&cpu.pc)) && break_hits < break_max {
                 break_hits += 1;
@@ -652,6 +662,13 @@ fn main() -> ExitCode {
                         }
                     }
                 }
+                Err(e) if cpu.core_id == 1 && args.cpu1_survives => {
+                    // the chip's core 1 faults there and stops; cpu0 goes on alone
+                    if !args.quiet { println!("cpu1 stopped at step {total_steps} ({} ms): {e:?} at pc {:#010x} (the chip's core would fault; cpu0 goes on alone)", soc.periph.ms(), cpu.pc); }
+                    soc.cpu1_fault = Some(format!("{e:?}"));
+                    park = true;
+                    break;
+                }
                 Err(e) => {
                     halt = Some(e);
                     report_core = ci;
@@ -661,6 +678,10 @@ fn main() -> ExitCode {
                 break;
                 }
             }
+        }
+        if park {
+            cpus.truncate(1);
+            park = false;
         }
         if stop {
             break;
@@ -929,6 +950,7 @@ fn parse_args() -> Option<Args> {
         keys: Vec::new(),
         snap: Vec::new(),
         flaky_core1: None,
+        cpu1_survives: false,
         seed: None,
     };
     let mut have_bin = false;
@@ -988,6 +1010,10 @@ fn parse_args() -> Option<Args> {
             }
             "--quiet" => {
                 args.quiet = true;
+                i += 1;
+            }
+            "--cpu1-survives" => {
+                args.cpu1_survives = true;
                 i += 1;
             }
             "--ms" => {
