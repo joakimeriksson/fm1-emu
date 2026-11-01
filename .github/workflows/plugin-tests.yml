@@ -7,6 +7,8 @@ on:
       - 'crates/fm1-core/**'
       - 'crates/fm1-soc/**'
       - 'tools/build_plugin.sh'
+      - 'tools/build_plugin.ps1'
+      - 'tools/fetch_firmwares.mjs'
       - '.github/workflows/plugin-tests.yml'
   workflow_dispatch:
 
@@ -29,3 +31,39 @@ jobs:
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP, AU and VST3 without installation
         run: env NO_INSTALL=1 tools/build_plugin.sh
+
+  # Windows: the same tests, the CLAP and the VST3 (tools/build_plugin.ps1), Steinberg's validator.
+  # The runner has Rust (MSVC), Visual Studio (2026 on windows-latest), CMake and git.
+  plugin-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Firmware for engine tests
+        run: node tools/fetch_firmwares.mjs felucca
+      - name: Unit and engine tests
+        run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
+      - name: Build CLAP and VST3 without installation
+        shell: pwsh
+        env:
+          NO_INSTALL: '1'
+        run: tools/build_plugin.ps1
+      - name: Steinberg's VST3 validator
+        shell: pwsh
+        run: |
+          cmake -S target/plugin/build/cpm/vst3sdk -B target/plugin/vst3sdk-build -A x64 `
+            -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build target/plugin/vst3sdk-build --config Release --target validator
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:CLAP_PATH = "$PWD/target/plugin"
+          target/plugin/vst3sdk-build/bin/Release/validator.exe target/plugin/FM-1.vst3
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fm1-plugin-windows-x86_64
+          path: |
+            target/plugin/FM-1.vst3
+            target/plugin/FM-1.clap

@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as persistence from './persistence.js';
+import * as tryout from './tryout.js';
 const settle = () => new Promise(resolve => setImmediate(resolve));
 class Element {
   constructor(text = '', value = '') {
@@ -34,7 +35,7 @@ function storage() {
       return revision;
     } };
 }
-async function page(disk = storage(), initialSearch = '', selected = '', manualBootTimeout = false) {
+async function page(disk = storage(), initialSearch = '', selected = '', manualBootTimeout = false, extra = {}) {
   let bootTimer;
   const elements = new Map();
   const document = { documentElement: new Element(),
@@ -71,7 +72,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     connect() {} disconnect() {}
   }
   const local = new Map(selected ? [['fm1.fw', selected]] : []);
-  const location = { search: initialSearch, origin: 'http://localhost', pathname: '/' };
+  const location = { search: initialSearch, origin: 'http://localhost', pathname: '/', href: `http://localhost/${initialSearch}` };
   const environment = {
     setTimeout(fn, ms) { if (manualBootTimeout && ms === 30000) { bootTimer = fn; return 'boot-timer'; } return setTimeout(fn, ms); },
     clearTimeout(id) { if (id !== 'boot-timer') clearTimeout(id); },
@@ -84,7 +85,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     requestAnimationFrame() {}, addEventListener() {}, AudioContext, AudioWorkletNode,
     matchMedia: () => ({ matches: false }), confirm: () => true,
     fetchPackage: async f => ({ bytes: new Uint8Array(960).fill(f.id === 'a' ? 1 : 2), url: f.package }),
-    ...persistence, SaveStore: class { constructor() { return disk; } } };
+    ...persistence, ...tryout, SaveStore: class { constructor() { return disk; } }, ...extra };
   const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8').replace(/^import .*;$/gm, '');
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
     startAudio, boot, flushRunning, setLatency, get running() { return running; },
@@ -226,4 +227,54 @@ test('the status line and the report give the emulation speed and the JIT; idle 
   assert.equal(p.api.perf.lowerClock(3), 60);
   p.api.setMhz(80);
   assert.equal(p.api.perf.lowerClock(1.2), null);    // (60 MHz would save only ~13%)
+});
+
+test("a try-out boots with its sectors and script from this origin, starts by itself and saves nothing", async () => {
+  const disk = storage(), fetched = [], told = [];
+  const sector = new Uint8Array(4100); new DataView(sector.buffer).setUint32(0, 0x96000, true); sector.fill(7, 4);
+  const files = { 'http://localhost/dock/tryit/m.flash': sector, 'http://localhost/dock/tryit/m.txt': '1500:mf07d4842f7\n' };
+  const fetch = async (url, init) => {
+    fetched.push([url, init]);
+    if (url in files) return { ok: true, arrayBuffer: async () => files[url].buffer, text: async () => files[url] };
+    return { json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: ['a', 'b'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) },
+      arrayBuffer: async () => new ArrayBuffer(0) };
+  };
+  const window = { parent: { postMessage(m, origin) { told.push([m.state, origin]); } } };
+  const p = await page(disk, '?fw=b&flash=/dock/tryit/m.flash&script=../dock/tryit/m.txt', '', false, { fetch, window });
+  while (!p.api.running) await settle();
+  await settle();
+  const boot = p.audio.messages.find(m => m.type === 'boot');
+  assert.equal(new TextDecoder().decode(boot.script), '1500:mf07d4842f7');
+  assert.equal(new DataView(boot.sectors).getUint32(0, true), 0x96000);
+  assert.equal(p.audio.flash[0x96000], 7);
+  assert.equal(p.api.fw.id, 'b');
+  assert.ok(fetched.filter(([u]) => u in files).every(([, init]) => init.redirect === 'error' && init.credentials === 'same-origin'));
+  // nothing stored, the flash kept for an export; the embedding page (this origin only) hears how it goes
+  p.audio.flash[0x96001] = 9; await p.api.flushRunning();
+  assert.equal(disk.writes.length, 0);
+  assert.equal(p.api.running.record.sectors.find(s => s.at === 0x96000).data[1], 9);
+  assert.match(p.elements.get('save-status').textContent, /try-out: not saved/);
+  assert.deepEqual(told.slice(0, 2), [['loading', 'http://localhost'], ['booting', 'http://localhost']]);
+  p.audio.port.onmessage({ data: { type: 'frame', seq: p.api.bootSeq, lcd: null, leds: new Float32Array(41), ms: 2100,
+    short: 0, halted: false, jit: null, playing: true, busy: 1, worst: 1, emulated: 1, idle: 0, quanta: 1, frames: 128 } });
+  assert.deepEqual(told.at(-1), ['playing', 'http://localhost']);
+  // another firmware ends the try-out: its own saved flash again, and saved
+  p.api.setFirmware('a'); p.elements.get('fw').listeners.change(); await p.api.boot(); await settle();
+  assert.doesNotMatch(p.location.search, /flash|script/);
+  p.api.setFirmware('b'); await p.api.boot(); await settle();
+  assert.notEqual(p.audio.flash[0x96000], 7);
+  assert.ok(disk.writes.length > 0);
+});
+
+test('a try-out from another site is refused: nothing fetched, nothing started', async () => {
+  const fetched = [];
+  const base = await page();
+  const fetch = async (url) => { fetched.push(url); return { json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: [{ id: 'a', name: 'a', version: '1', package: 'https://example.test/a.fwsc', author: 't', license: 'MIT', about: '' }] }), arrayBuffer: async () => new ArrayBuffer(0) }; };
+  for (const q of ['?flash=https://evil.test/m.flash', '?script=//evil.test/m.txt', '?flash=data:,x']) {
+    const p = await page(storage(), q, '', false, { fetch });
+    await settle();
+    assert.equal(p.audio, base.audio, q);          // (no audio graph made: nothing started)
+    assert.match(p.elements.get('status').textContent, /^try-out: only files from http:\/\/localhost/, q);
+  }
+  assert.ok(fetched.every(u => !/evil|data:/.test(u)));
 });

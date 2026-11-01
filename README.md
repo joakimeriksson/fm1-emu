@@ -46,6 +46,14 @@ M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the 
 are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
 too; `&embed=1` shows only the device and its controls, for a window on another site.)
+A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash
+sectors over the package's fresh flash (records of a 4-byte little-endian offset and the 4096-byte
+sector, as the saves keep them), `&script=PATH` plays an input script from the boot (fm1-live's
+`FM1_BENCH_KEYS`: `ms:mHEX` MIDI into the DIN jack, `ms:id` keys, `ms:eN:clicks` encoders). Both
+come from the page's own origin only, the try-out starts by itself where the browser lets it, and
+it is a session of its own: the browser's saved flash is neither loaded nor overwritten. fm1-dock's
+catalog uses it for its "Try it": a module installed and picked
+([fm1-dock's tools/tryit.py](https://github.com/joakimeriksson/fm1-dock/blob/main/tools/tryit.py)).
 
 <!-- firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
@@ -80,7 +88,7 @@ too; `&embed=1` shows only the device and its controls, for a window on another 
 | [FiMba-1 0.6.1](https://joakimeriksson.github.io/fm1-emu/?fw=fimba) | [jadamsowers](https://github.com/jadamsowers/fm1-fimba) | A physically modelled kalimba (thumb piano), with mbira patterns, tape and grains. |
 | [Flyfish 1.0.1-4e5efb8](https://joakimeriksson.github.io/fm1-emu/?fw=flyfish) | [delirioux](https://github.com/delirioux/flyfish) | One piece on the FM-1: Chopin's Étude Op. |
 | [FM-106 Beta4](https://joakimeriksson.github.io/fm1-emu/?fw=fm106) | [PatttF](https://github.com/PatttF/fm-106) | The Juno-106 emulation of KR-106 ported to the FM-1: six voices on both cores, the BBD stereo chorus, 128 factory presets and a 1980s Roland look. |
-| [fm1-dock 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=fm1dock) | [joakimeriksson](https://github.com/joakimeriksson/fm1-dock) | One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. |
+| [fm1-dock 0.7](https://joakimeriksson.github.io/fm1-emu/?fw=fm1dock) | [joakimeriksson](https://github.com/joakimeriksson/fm1-dock) | One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. |
 | [FM-1 Doom 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=fm1doom) | [zvenson](https://github.com/zvenson/fm1doom) | Doom on the FM-1: one arena from FreeDM, played on the keys and a knob, on the FM-1's screen, with synthesised sound effects and no music. |
 | [FM1-GM 1.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=fm1gm) | [jartificer](https://github.com/jartificer/fm1-gm) | A General MIDI sequencer with 16 tracks, 128 General MIDI instruments to choose from and a drum kit (on track 10). |
 | [FMEL-1 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=fmel) | [Antonio Altea](https://github.com/AntonioAltea/fmel-1) | Mellotron-style tape sounds, coloured with effects and lo-fi tape: flutes, strings and choirs as on the old tape frames, played from the keys. |
@@ -279,6 +287,18 @@ tools/build_plugin.sh
 This builds the plugin and installs `FM-1.component`, `FM-1.vst3` and `FM-1.clap` in
 `~/Library/Audio/Plug-Ins`. It then runs Apple's AU validator on them.
 
+**Build and install it yourself (Windows, x86-64).** You need Rust (MSVC), Visual Studio Build
+Tools with the C++ workload, CMake and git, then:
+
+```powershell
+tools\build_plugin.ps1
+```
+
+This builds `FM-1.vst3` and `FM-1.clap` and installs them in `%LOCALAPPDATA%\Programs\Common`
+(`VST3` and `CLAP`). The two go together: the VST3 loads the CLAP from the CLAP folder.
+[crates/fm1-plugin](crates/fm1-plugin/README.md) has the details, and where to put them for a
+DAW that only scans `C:\Program Files\Common Files`.
+
 **In GarageBand:**
 1. *Settings → Audio/MIDI*: tick *Enable Audio Units*, then quit and reopen GarageBand.
 2. Make a *Software Instrument* track and open its Smart Controls (**B**).
@@ -301,7 +321,8 @@ including Apple's AudioUnitSDK and Steinberg's VST3 SDK, which is MIT since 3.8.
 - GarageBand, as an AU;
 - Steinberg's VST3 test host.
 
-Logic, Ableton and the Windows / Linux builds haven't been tried yet. More in
+On Windows the VST3 passes Steinberg's validator too (47 of 47), but no Windows DAW has been
+tried yet. Logic, Ableton and the Linux build haven't been tried either. More in
 [crates/fm1-plugin](crates/fm1-plugin/README.md).
 
 ## How it works
