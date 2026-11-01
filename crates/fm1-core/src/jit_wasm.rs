@@ -339,6 +339,11 @@ const F32_GE: u8 = 0x60;
 const I32_ADD: u8 = 0x6a;
 const I32_SUB: u8 = 0x6b;
 const I32_MUL: u8 = 0x6c;
+const I32_DIV_S: u8 = 0x6d;
+const I32_DIV_U: u8 = 0x6e;
+const I32_REM_S: u8 = 0x6f;
+const I32_REM_U: u8 = 0x70;
+const I32_CLZ: u8 = 0x67;
 const I32_AND: u8 = 0x71;
 const I32_OR: u8 = 0x72;
 const I32_XOR: u8 = 0x73;
@@ -562,6 +567,28 @@ impl Gen<'_> {
         self.op(IF);
         self.op(VOID);
         self.nest += 1;
+    }
+    /// `if (result i32)`
+    fn if_i32(&mut self) {
+        self.op(IF);
+        self.op(T_I32);
+        self.nest += 1;
+    }
+    /// clamp local a, signed, into lo..=hi (`Un`'s sat16)
+    fn clamp(&mut self, lo: i32, hi: i32) {
+        self.i32c(hi as u32);
+        self.get(L_A);
+        self.get(L_A);
+        self.i32c(hi as u32);
+        self.op(I32_GT_S);
+        self.op(SELECT);
+        self.set(L_B);
+        self.i32c(lo as u32);
+        self.get(L_B);
+        self.get(L_B);
+        self.i32c(lo as u32);
+        self.op(I32_LT_S);
+        self.op(SELECT);
     }
     fn end(&mut self) {
         self.op(END);
@@ -1252,6 +1279,176 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
                 g.store(w, idx);
                 bus_used = true;
             }
+            Fast::LdPre { d, b, i, w, signed, inc } => {
+                // b = b + inc (a register's, or the immediate), then d = [b]: the base first, as
+                // exec_fast (d may be b: the load wins)
+                g.get(L_CPU);
+                g.ld_reg(b);
+                if i < 16 {
+                    g.ld_reg(i);
+                } else {
+                    g.i32c(inc);
+                }
+                g.op(I32_ADD);
+                g.tee(L_ADDR);
+                g.mem_op(I32_STORE, 2, off_reg(b));
+                g.load(w, signed, idx);
+                g.st_reg_from(d, L_VAL);
+                bus_used = true;
+            }
+            Fast::StPre { s, b, i, w, inc } => {
+                // b = b + inc, then [b] = s (s read after the base moved: it may be b, as exec_fast)
+                g.get(L_CPU);
+                g.ld_reg(b);
+                if i < 16 {
+                    g.ld_reg(i);
+                } else {
+                    g.i32c(inc);
+                }
+                g.op(I32_ADD);
+                g.tee(L_ADDR);
+                g.mem_op(I32_STORE, 2, off_reg(b));
+                g.ld_reg(s);
+                g.set(L_VAL);
+                g.store(w, idx);
+                bus_used = true;
+            }
+            Fast::LdPair { p, b, off } => {
+                // the address before either load (a pair that holds the base overwrites it)
+                g.addr(b, off);
+                g.get(L_ADDR);
+                g.set(L_B);
+                g.load(4, false, idx);
+                g.st_reg_from(2 * (p & 7), L_VAL);
+                g.get(L_B);
+                g.i32c(4);
+                g.op(I32_ADD);
+                g.set(L_ADDR);
+                g.load(4, false, idx);
+                g.st_reg_from(2 * (p & 7) + 1, L_VAL);
+                bus_used = true;
+            }
+            Fast::StPair { p, b, off } => {
+                g.addr(b, off);
+                g.get(L_ADDR);
+                g.set(L_B);
+                g.ld_reg(2 * (p & 7));
+                g.set(L_VAL);
+                g.store(4, idx);
+                g.get(L_B);
+                g.i32c(4);
+                g.op(I32_ADD);
+                g.set(L_ADDR);
+                g.ld_reg(2 * (p & 7) + 1);
+                g.set(L_VAL);
+                g.store(4, idx);
+                bus_used = true;
+            }
+            Fast::Un { d, s, k } => {
+                g.ld_reg(s);
+                g.set(L_A);
+                match k {
+                    0 => {
+                        g.get(L_A);
+                        g.i32c(u32::MAX);
+                        g.op(I32_XOR);
+                    }
+                    1 => {
+                        g.i32c(0);
+                        g.get(L_A);
+                        g.op(I32_SUB);
+                    }
+                    2 => {
+                        // |x| = (x ^ m) - m, m = x >> 31 (wrapping: the minimum stays)
+                        g.get(L_A);
+                        g.i32c(31);
+                        g.op(I32_SHR_S);
+                        g.set(L_B);
+                        g.get(L_A);
+                        g.get(L_B);
+                        g.op(I32_XOR);
+                        g.get(L_B);
+                        g.op(I32_SUB);
+                    }
+                    3 => {
+                        // rev8: the bytes reversed
+                        g.get(L_A);
+                        g.i32c(24);
+                        g.op(I32_SHL);
+                        g.get(L_A);
+                        g.i32c(0xff00);
+                        g.op(I32_AND);
+                        g.i32c(8);
+                        g.op(I32_SHL);
+                        g.op(I32_OR);
+                        g.get(L_A);
+                        g.i32c(8);
+                        g.op(I32_SHR_U);
+                        g.i32c(0xff00);
+                        g.op(I32_AND);
+                        g.op(I32_OR);
+                        g.get(L_A);
+                        g.i32c(24);
+                        g.op(I32_SHR_U);
+                        g.op(I32_OR);
+                    }
+                    4 => {
+                        g.get(L_A);
+                        g.op(I32_CLZ);
+                    }
+                    5 => g.clamp(-32768, 32767),
+                    _ => g.clamp(0, 65535),
+                }
+                g.set(L_VAL);
+                g.st_reg_from(d, L_VAL);
+            }
+            Fast::Div { d, a, b, k } => {
+                // by zero: 0, as exec_fast (the chip's result); the signed quotient of the minimum
+                // by -1 wraps there, where wasm's div_s traps: 0 - a instead (rem_s gives 0, as Rust)
+                g.ld_reg(a);
+                g.set(L_A);
+                g.ld_reg(b);
+                g.set(L_B);
+                g.get(L_B);
+                g.op(I32_EQZ);
+                g.if_i32();
+                g.i32c(0);
+                g.op(ELSE);
+                match k {
+                    0 => {
+                        g.get(L_B);
+                        g.i32c(u32::MAX);
+                        g.op(I32_EQ);
+                        g.if_i32();
+                        g.i32c(0);
+                        g.get(L_A);
+                        g.op(I32_SUB);
+                        g.op(ELSE);
+                        g.get(L_A);
+                        g.get(L_B);
+                        g.op(I32_DIV_S);
+                        g.end();
+                    }
+                    1 => {
+                        g.get(L_A);
+                        g.get(L_B);
+                        g.op(I32_DIV_U);
+                    }
+                    2 => {
+                        g.get(L_A);
+                        g.get(L_B);
+                        g.op(I32_REM_S);
+                    }
+                    _ => {
+                        g.get(L_A);
+                        g.get(L_B);
+                        g.op(I32_REM_U);
+                    }
+                }
+                g.end();
+                g.set(L_VAL);
+                g.st_reg_from(d, L_VAL);
+            }
             Fast::LdPost { d, b, w, signed, inc } => {
                 // d = [b]; then b = b + inc (b read after the load, as exec_fast)
                 g.ld_reg(b);
@@ -1591,6 +1788,83 @@ static mut SELFTEST_DETAIL: String = String::new();
 /// The mismatches `fop_selftest` found, the first of each op and register choice, one per line
 /// (empty: none).
 #[allow(static_mut_refs)]
+/// 16 bytes of RAM at 0x0200_0000 holding the instruction under test (the interpreter decodes
+/// and runs it from there: `run_fast`), nothing else (the self-tests)
+struct NoBus([u8; 16]);
+impl Bus for NoBus {
+    fn read8(&mut self, a: u32) -> u8 { self.0.get(a.wrapping_sub(0x0200_0000) as usize).copied().unwrap_or(0) }
+    fn read16(&mut self, a: u32) -> u16 { self.read8(a) as u16 | (self.read8(a + 1) as u16) << 8 }
+    fn read32(&mut self, a: u32) -> u32 { self.read16(a) as u32 | (self.read16(a + 2) as u32) << 16 }
+    fn write8(&mut self, _: u32, _: u8) {}
+    fn write16(&mut self, _: u32, _: u16) {}
+    fn write32(&mut self, _: u32, _: u32) {}
+    fn tick_room(&self) -> u64 { 1 << 40 }
+}
+fn no_mem() -> JitMem {
+    JitMem { ram: std::ptr::null_mut(), ram_base: 0, ram_len: 0, ram_code: std::ptr::null(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 }
+}
+
+/// The integer ops computed inline since the float ones (`Un`, `Div`) against the executor:
+/// every kind on the edge values (zero, the signs, the extremes, the halfword bounds) and
+/// random words, four register choices. The mismatches, 0 when all agree; the detail follows
+/// `fop_selftest`'s in `SELFTEST_DETAIL`.
+pub fn int_selftest() -> u32 {
+    let mem = no_mem();
+    let specials: [u32; 28] = [0, 1, 2, 3, 0xffff_ffff, 0xffff_fffe, 0x8000_0000, 0x7fff_ffff, 0x8000_0001, 0x7fff_fffe,
+        0x8000, 0x7fff, 0xffff, 0x1_0000, 0xffff_8000, 0xffff_7fff, 0xffff_0000, 0x0102_0304, 0x8070_6050, 0x00ff_ff00,
+        0xdead_beef, 10, 0xffff_fff6, 7, 0xffff_fff9, 0x4000_0000, 0xc000_0000, 0x12345678];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
+    let n = specials.len();
+    let (mut fails, mut bus) = (0u32, NoBus([0; 16]));
+    let mut seen: Vec<String> = Vec::new();
+    let mut fail = |what: String, x: u32, y: u32, msg: String| {
+        fails += 1;
+        if !seen.contains(&what) {
+            seen.push(what.clone());
+            unsafe { SELFTEST_DETAIL += &format!("{what} a {x:08x} b {y:08x}: {msg}\n"); }
+        }
+    };
+    let mut ops = Vec::new();
+    for (d, a, b) in [(0u8, 1u8, 2u8), (1, 1, 2), (0, 1, 1), (2, 1, 2)] {
+        for k in 0..7u8 {
+            ops.push(Fast::Un { d, s: a, k });
+        }
+        for k in 0..4u8 {
+            ops.push(Fast::Div { d, a, b, k });
+        }
+    }
+    for fast in ops {
+        let bop = crate::BOp { fast, len: 2, careful: false, pair_head: false, glue: false };
+        let m = compile::<NoBus>(&[(0, 0x0200_0000, vec![bop])], &mem, false);
+        let [r, w, o] = helpers::<NoBus>(false);
+        // SAFETY: a plain byte slice; the host copies it before returning
+        let f = unsafe { fm1_jit_compile(m.as_ptr(), m.len(), r, w, o) };
+        if f == 0 {
+            fail(format!("{fast:?}"), 0, 0, "the host could not compile the module".to_owned());
+            continue;
+        }
+        for i in 0..n * n + 256 {
+            let (x, y) = if i < n * n { (specials[i / n], specials[i % n]) } else { (rnd(), rnd()) };
+            let mut cpu = Cpu::new(0x0200_0000);
+            for r in 0..16 { cpu.regs[r] = rnd(); }
+            cpu.regs[1] = x;
+            cpu.regs[2] = y;
+            let mut want = Cpu::new(0x0200_0000);
+            want.regs = cpu.regs;
+            want.exec_fast(&mut bus, fast, 0x0200_0002);
+            want.pc = 0x0200_0002;
+            // SAFETY: `f` is the module just installed, built for NoBus
+            let k = unsafe { run::<NoBus>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) };
+            if k != 1 || cpu.regs != want.regs || cpu.pc != want.pc {
+                let d = match fast { Fast::Un { d, .. } | Fast::Div { d, .. } => d as usize, _ => 0 };
+                fail(format!("{fast:?}"), x, y, format!("ran {k}, r{d} {:08x}, the executor {:08x}", cpu.regs[d], want.regs[d]));
+            }
+        }
+    }
+    fails
+}
+
 pub fn fop_selftest_detail() -> &'static str {
     unsafe { SELFTEST_DETAIL.as_str() }
 }
@@ -1605,19 +1879,7 @@ pub fn fop_selftest_detail() -> &'static str {
 /// first of each op and register choice); a module the host could not compile counts as one.
 #[allow(static_mut_refs)]
 pub fn fop_selftest() -> u32 {
-    /// 16 bytes of RAM at 0x0200_0000 holding the instruction under test (the interpreter
-    /// decodes and runs it from there: `run_fast`), nothing else
-    struct NoBus([u8; 16]);
-    impl Bus for NoBus {
-        fn read8(&mut self, a: u32) -> u8 { self.0.get(a.wrapping_sub(0x0200_0000) as usize).copied().unwrap_or(0) }
-        fn read16(&mut self, a: u32) -> u16 { self.read8(a) as u16 | (self.read8(a + 1) as u16) << 8 }
-        fn read32(&mut self, a: u32) -> u32 { self.read16(a) as u32 | (self.read16(a + 2) as u32) << 16 }
-        fn write8(&mut self, _: u32, _: u8) {}
-        fn write16(&mut self, _: u32, _: u16) {}
-        fn write32(&mut self, _: u32, _: u32) {}
-        fn tick_room(&self) -> u64 { 1 << 40 }
-    }
-    let mem = JitMem { ram: std::ptr::null_mut(), ram_base: 0, ram_len: 0, ram_code: std::ptr::null(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 };
+    let mem = no_mem();
     let specials: Vec<u32> = [0.0f32, -0.0, 1.0, -1.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999997, 3.25, -7.75, 1e-3, 65536.25,
         8388607.5, 16777216.0, 123456.7, 2147483520.0, 2147483648.0, -2147483648.0, -2147483904.0, 4294967040.0, 4294967296.0,
         3e9, -3e9, 1e-40, -1e-40, f32::MIN_POSITIVE, f32::MAX, f32::MIN, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -f32::NAN]
