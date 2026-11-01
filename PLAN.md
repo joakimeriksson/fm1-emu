@@ -1181,6 +1181,49 @@ What the counters say is left, by size (none done here):
 - Loads check RAM then XIP with two immediate pairs each; constants in the two spare callee-saved
   registers would save 2-4 instructions a load.
 
+## 5.35 The wasm JIT's FPU inline (2026-11-01)
+
+The float firmwares rendered below real time in the browser and clicked (Ravel 0.75x at 100 MHz)
+while the native JIT ran them at 2-3x: every FPU op (`3f e5`, fm1-isa's fpu.rs) left the
+generated wasm for the executor through `h_op` (269 M of Ravel's 1.93 G compiled instructions
+in 20 s; LOOM-8 31 M in 12 s). Now `block` computes them with wasm's own f32 instructions, which
+are the IEEE single precision the interpreter's Rust is in the same build, so the engine's own
+`fadd` makes both results, NaN payloads included:
+
+- `+ - * /`: `f32.add / sub / mul / div` on the registers reinterpreted (`f32.reinterpret_i32`,
+  back with `i32.reinterpret_f32`). `+` and `*` take b first: LLVM commuted the interpreter's
+  `x + y` and `x * y` for wasm, and when both operands are NaNs the engine passes the first
+  one's on (the self-test below found it: 0x7fc00000 + 0xffc00000).
+- `fmin` / `fmax`: not `f32.min` / `f32.max` (IEEE minimum / maximum, which propagate a NaN)
+  but the sequence LLVM expands Rust's `f32::min` / `max` into for wasm: `a' = a != a ? b : a`,
+  `b' = b != b ? a' : b`, `a' < b' ? a' : b'` (max: `>`). A NaN operand yields the other one;
+  equal operands (the two zeros) yield b, as the interpreter's build does. (jit.rs's `fminnm` /
+  `fmaxnm` are the same minNum semantics; on a tie of signed zeros they give the negative one.)
+- `ftoi` / `ftou` in the four roundings: `f32.nearest` (even) / `ceil` / `floor` first, then
+  `i32.trunc_sat_f32_s` / `_u` (0xfc 0 / 1), which truncates by itself (so the trunc rounding
+  emits nothing before it), saturates on overflow and sends a NaN to 0, as Rust's `as i32` /
+  `as u32`. `itof` / `utof`: `f32.convert_i32_s` / `_u`. `ftof`: nearest / trunc / ceil / floor.
+- The multiply-accumulates 7 / 8 (`R += R * R (f)`) stay with the executor, as in jit.rs (none
+  in the catalog's float firmwares: Ravel's and LOOM-8's FOp helper calls went to 0).
+- `fop_selftest` (`fm1_jit_selftest`, web/jit.test.mjs; skipped without a wasm build): every
+  inlined op alone in a block, on every pair of 44 edge values (NaNs with payloads, quiet and
+  signalling, both zeros, denormals, infinities, the integers' bounds, halves) and random words,
+  into a fresh, a source, a doubled and the second source register, must leave what `exec_fast`
+  leaves, and so must `run_fast` on the instruction word (the interpreter proper, its own copy
+  of the float code), in the engine at hand: the JIT's oracle test for wasm, as jit.rs's
+  random-state test is for AArch64.
+
+Ravel 0.74x -> 0.91x at 100 MHz (its quanta's p50 3.22 -> 2.46 ms), LOOM-8 2.87x -> 3.31x
+(interleaved A/B against the unchanged build, 20 s); PT/FM 1.32x and Felucca 2.37x unchanged:
+neither uses the FPU (PT/FM's helpers are `LdPre`, `StPre` and route 21's pair ops; Orange
+Cat, DUELL and FIZZ have no FPU ops either). JIT and interpreter audio byte-identical for
+Ravel, PT/FM, Felucca, Orange Cat, DUELL, LOOM-8 and FIZZ; the native catalog check unchanged
+(56 ok, 39 rebuilt). Bubba Machine (282 M FPU ops in 20 s) gives the same JIT audio as before,
+byte for byte, but its JIT and interpreter audio differ from 6.5 s on, with and without this
+change: that came with the cores' lock handover (d70ed00; at 52e1cb7 they agree), not with the
+FPU; its JIT also compiles 7500 regions in 20 s (RAM code dropped and rebuilt), 0.46x where the
+interpreter runs 1.15x.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.
