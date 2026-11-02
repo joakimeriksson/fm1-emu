@@ -35,6 +35,15 @@
       ]
     },
     {
+      "name": "browser", "clip": "work/film/src/browser-felucca.mp4", "from": 1.0, "dur": 23.0,
+      "_source": "the page (web/build.sh, served locally) running Felucca 1.9.0 at 100 MHz from a ?script= of the same part on a MacBook, captured through Chrome's DevTools screencast; its audio is fm1-live's for the same script (wasm and native agree sample for sample on a single-core firmware), aligned on the LCD",
+      "captions": [
+        {"text": "In a browser, no download", "sub": "joakimeriksson.github.io/fm1-emu: the same emulator compiled to WebAssembly", "from": 0.3, "to": 6.0},
+        {"text": "Felucca by hugelton", "sub": "the original open firmware, played here from a script; the page takes your keyboard and any MIDI input", "from": 8.0, "to": 14.0},
+        {"text": "3x real time on a laptop", "sub": "the status line: emulated time per time spent emulating, at 100 MHz", "from": 16.0, "to": 22.0}
+      ]
+    },
+    {
       "name": "windows", "clip": "work/film/src/youtube.mp4", "from": 122.3, "dur": 24.0,
       "_source": "the Waveform Free tutorial on YouTube (the user's own take, downloaded from YouTube Studio): three FM-1 tracks, the bass just in, the electric piano at bar 5; its own captions at the bottom, ours at the top",
       "captions": [
