@@ -16,7 +16,8 @@ The scene list is JSON: {"scenes": [ {...}, ... ]} with, per scene,
     live      another fm1-live binary (an older release, for a before / after)
     from, dur the clip: seconds into the run, and its length
     captions  [{"text", "sub", "from", "to", "style"}]: seconds into the clip; style "title" is
-              centred and large, the default sits bottom left
+              centred and large, "top" sits top left (over a recording with its own captions at
+              the bottom), the default sits bottom left
     card      a full-frame card instead of the panel: {"lines": [[text, size], ...]} over the
               run's audio
     clip      a video file instead of a run (a screen recording: the plugin in a DAW, the page
@@ -75,7 +76,7 @@ def caption_png(path, text, sub=None, style=None):
         sw = d.textlength(sub, font=fs) if sub else 0
         bw = max(tw, sw) + 56
         bh = 84 + (40 if sub else 0)
-        x0, y0 = 36, H - bh - 36
+        x0, y0 = 36, (36 if style == "top" else H - bh - 36)
         d.rounded_rectangle((x0, y0, x0 + bw, y0 + bh), 18, fill=(0, 0, 0, 165))
         d.text((x0 + 28, y0 + 14), text, font=f, fill=(255, 255, 255, 255))
         if sub:

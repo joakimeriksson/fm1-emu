@@ -35,8 +35,13 @@
       ]
     },
     {
-      "name": "windows", "clip": "work/film/src/youtube.mp4", "from": 112.3, "dur": 34.0,
-      "_source": "the Waveform Free tutorial on YouTube (the user's own take, downloaded from YouTube Studio): three FM-1 tracks, the pad, the bass at bar 3, the electric piano at bar 5; its own captions"
+      "name": "windows", "clip": "work/film/src/youtube.mp4", "from": 122.3, "dur": 24.0,
+      "_source": "the Waveform Free tutorial on YouTube (the user's own take, downloaded from YouTube Studio): three FM-1 tracks, the bass just in, the electric piano at bar 5; its own captions at the bottom, ours at the top",
+      "captions": [
+        {"style": "top", "text": "The plugin on Windows", "sub": "VST3 and CLAP in Waveform Free: three FM-1 tracks, a firmware on each", "from": 0.3, "to": 5.5},
+        {"style": "top", "text": "And on the Mac", "sub": "AU, VST3 and CLAP, as before", "from": 7.0, "to": 11.5},
+        {"style": "top", "text": "Three emulated chips, in real time", "sub": "each track its own FM-1; the status bars show the headroom", "from": 13.5, "to": 20.5}
+      ]
     },
     {
       "name": "runs-polly", "fw": "polly", "ms": 8000, "from": 2.9, "dur": 4.0,
