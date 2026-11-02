@@ -913,18 +913,18 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fm1-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-isa",
 ]
 
 [[package]]
 name = "fm1-isa"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "fm1-plugin"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
  "dispatch2",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "fm1-soc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-core",
 ]
