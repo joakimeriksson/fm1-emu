@@ -59,6 +59,18 @@
       "captions": [{"text": "downloaded from its author", "sub": "Bunker Evolved by Kid Bunka: the page hosts no firmware", "from": 0.2, "to": 3.8}]
     },
     {
+      "name": "runs-bubba", "fwsc": "reference/firmwares/bubba.fwsc", "ms": 8000, "from": 2.9, "dur": 4.0,
+      "keys": "3000:PLAY,3200:PLAY^",
+      "_source": "not in the page's catalog yet: https://thefirmwarehub.com/fw/bubba-0.10.0-beta.fwsc (sha256 e1f44405...), unpacked as tools/fetch_firmwares.mjs does",
+      "captions": [{"text": "the newest among them", "sub": "Bubba Machine by Erbubar23: a six-track groovebox, its FreeRTOS on both cores", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "runs-ravel", "fwsc": "reference/firmwares/ravel.fwsc", "ms": 6000, "from": 1.3, "dur": 4.0,
+      "keys": "1500:C4,1500:E4,1500:G4,5000:C4^,5000:E4^,5000:G4^",
+      "_source": "not in the page's catalog yet: https://thefirmwarehub.com/fw/ravel-1.5.0.fwsc (sha256 6c3cb888...)",
+      "captions": [{"text": "and the ones that run from RAM", "sub": "Ravel by De-Pattern: an eight-track groovebox on an influence grid", "from": 0.2, "to": 3.8}]
+    },
+    {
       "name": "outro", "fw": "amb", "ms": 10000, "from": 1.0, "dur": 8.5,
       "card": {"lines": [
         ["FM-1 emulator 0.4.0", 84],
