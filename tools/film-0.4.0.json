@@ -35,12 +35,11 @@
       ]
     },
     {
-      "name": "browser", "clip": "work/film/src/browser-golana.mp4", "from": 1.0, "dur": 23.0,
-      "_source": "the page (web/build.sh, served locally) running Golana 1.3 at 100 MHz from a ?script= of the same part on a MacBook, captured through Chrome's DevTools screencast (tools/film_take.mjs); its audio is fm1-live's for the same script (wasm and native agree sample for sample on a single-core firmware), aligned on the LCD's changes (86 of 128 matched, the page's clock 0.05 % slow corrected)",
+      "name": "browser", "clip": "work/film/src/browser-golana.mp4", "from": 9.5, "dur": 11.0,
+      "_source": "the page (web/build.sh, served locally) running Golana 1.3 at 100 MHz from a ?script= of the same part on a MacBook, captured through Chrome's DevTools screencast (tools/film_take.mjs); its audio is fm1-live's for the same script (wasm and native agree sample for sample on a single-core firmware), aligned on the LCD's changes (86 of 128 matched, the page's clock 0.05 % slow corrected). The take is 27 s; the scene is its eighth-note stretch",
       "captions": [
-        {"text": "In a browser, no download", "sub": "joakimeriksson.github.io/fm1-emu: the same emulator compiled to WebAssembly", "from": 0.3, "to": 6.0},
-        {"text": "Golana by Gadlele", "sub": "an analog-style synth after the microKORG, played here from a script; the page takes your keyboard and any MIDI input", "from": 8.0, "to": 14.0},
-        {"text": "3x real time on a laptop", "sub": "the status line: emulated time per time spent emulating, at 100 MHz", "from": 16.0, "to": 22.0}
+        {"text": "In a browser, no download", "sub": "joakimeriksson.github.io/fm1-emu, the same emulator in WebAssembly: Golana by Gadlele, played from a script", "from": 0.3, "to": 5.2},
+        {"text": "3x real time on a laptop", "sub": "the status line: emulated time per time spent emulating, at 100 MHz", "from": 6.0, "to": 10.6}
       ]
     },
     {
