@@ -325,7 +325,35 @@ fn bench(o: &Opts, ms: u64) {
     let sample = std::env::var("FM1_BENCH_PCS").is_ok();
     let panel = std::env::var_os("FM1_BENCH_PANEL").is_some();
     let mut led_tail = false;
+    // FM1_BENCH_FRAMES=DIR[,MS]: a film of the run: the panel every MS emulated ms (40: 25 fps)
+    // as DIR/000000.ppm, 000001.ppm, ..., the keys the script holds down and the LEDs as they
+    // were lit since the last frame, and DIR/audio.raw, the audio from the boot (silence until
+    // the firmware starts its DAC), so frame 0 and sample 0 are the same instant
+    let film: Option<(String, u64)> = std::env::var("FM1_BENCH_FRAMES").ok().map(|v| {
+        let (dir, step) = v.split_once(',').unwrap_or((&v, "40"));
+        (dir.to_string(), step.parse().ok().filter(|&s| s > 0).unwrap_or(40))
+    });
+    let (mut next_frame, mut nframes) = (0u64, 0u32);
+    if let Some((dir, _)) = &film {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("{dir}: {e}");
+            std::process::exit(1);
+        }
+        let _ = m.soc.periph.led_take();
+    }
     while m.soc.periph.ms() < ms {
+        if let Some((dir, step)) = &film {
+            while m.soc.periph.ms() >= next_frame {
+                let leds = m.soc.periph.led_take();
+                let down = m.soc.periph.keys_down;
+                if let Err(e) = write_panel(&mut m, &down, &leds, &format!("{dir}/{nframes:06}.ppm")) {
+                    eprintln!("{dir}: {e}");
+                    std::process::exit(1);
+                }
+                nframes += 1;
+                next_frame += step;
+            }
+        }
         if panel && !led_tail && m.soc.periph.ms() + 40 >= ms {
             // (the LEDs' on-fractions from here: the last 40 ms, as --shot shows them)
             let _ = m.soc.periph.led_take();
@@ -393,6 +421,19 @@ fn bench(o: &Opts, ms: u64) {
         let bytes: Vec<u8> = m.soc.periph.audio.iter().flat_map(|s| s.to_le_bytes()).collect();
         let _ = std::fs::write(&path, bytes);
         println!("audio: {} samples -> {path}", m.soc.periph.audio.len());
+    }
+    if let Some((dir, step)) = &film {
+        // (the stream runs without a gap once started: its start is the end less its length)
+        let a = &m.soc.periph.audio;
+        let start_ms = m.soc.periph.ms() as f64 - a.len() as f64 / 2.0 / 44.1;
+        let pad = (start_ms.max(0.0) * 44.1).round() as usize * 2;
+        let mut bytes = vec![0u8; pad * 2];
+        bytes.extend(a.iter().flat_map(|s| s.to_le_bytes()));
+        let path = format!("{dir}/audio.raw");
+        match std::fs::write(&path, bytes) {
+            Ok(()) => println!("film: {nframes} frames every {step} ms -> {dir}/, audio from {start_ms:.1} ms -> {path}"),
+            Err(e) => eprintln!("{path}: {e}"),
+        }
     }
     usb_audio_save(&m);
     dump_ram(&mut m);
@@ -946,10 +987,13 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
-env: FM1_BENCH_KEYS='T[-T2]:PLAY,T:n7,T:enc0:+3,T:pot:512,T:ms:mHEX'  scripted input (--bench, --shot;
-                         times in ms, mHEX: MIDI bytes into the DIN jack)
+env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;
+                         times in ms; ^ releases, @VEL the velocity, eN an encoder's clicks, mHEX: MIDI
+                         bytes into the DIN jack; @FILE: the script from a file)
      FM1_BENCH_WAV=FILE    --bench: the audio (44.1 kHz stereo s16le, no header)
      FM1_BENCH_PANEL=FILE  --bench: the panel at the end (PPM)
+     FM1_BENCH_FRAMES=DIR[,MS]  --bench: a film: the panel every MS ms (40) as DIR/000000.ppm..., and
+                           DIR/audio.raw from the boot (tools/film.py turns them into a video)
      FM1_DUMPRAM=FILE      --bench, --shot: the 1 MiB of RAM at the end
      FM1_BENCH_JSON=FILE   --bench: the speed as JSON
      FM1_BENCH_NOKEYS, FM1_WARMUP_MS=N (1000), FM1_BENCH_THREAD, FM1_BENCH_TRACE, FM1_BENCH_PCS,

@@ -1,0 +1,63 @@
+{
+  "scenes": [
+    {
+      "name": "open-melodee", "fw": "melodee", "ms": 6800, "from": 1.3, "dur": 5.2,
+      "keys": "1500:C4,1500:E4,1500:G4,2950:C4^,2950:E4^,2950:G4^,3100:F4,3100:A4,3100:C5,4550:F4^,4550:A4^,4550:C5^,4700:G4,4700:B4,4700:D5,6400:G4^,6400:B4^,6400:D5^",
+      "captions": [
+        {"style": "title", "text": "FM-1 emulator 0.4.0", "sub": "the M-VAVE FM-1 and its firmwares, in a browser, on a computer, in a DAW", "from": 0.3, "to": 4.9},
+        {"text": "Melodee", "sub": "keremimo", "from": 0.3, "to": 4.9}
+      ]
+    },
+    {
+      "name": "open-dub", "fw": "dub", "ms": 6000, "from": 1.5, "dur": 4.0,
+      "captions": [{"text": "DUB-1", "sub": "sbegueria: generative dub techno, playing from the moment it is on", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "open-fomajam", "fw": "fomajam", "ms": 7000, "from": 2.4, "dur": 4.0,
+      "keys": "2500:PLAY,2700:PLAY^",
+      "captions": [{"text": "FOMAJAM", "sub": "konsumer: a step-grid drum machine after the 909, 808, 707 and 606", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "open-386dx", "fw": "386dx", "ms": 8000, "from": 2.9, "dur": 4.5,
+      "keys": "3000:PLAY,3200:PLAY^",
+      "captions": [{"text": "386DX", "sub": "seajaysec: a karaoke robot with a band", "from": 0.2, "to": 4.3}]
+    },
+    {
+      "name": "open-min1", "fw": "min1", "ms": 6000, "from": 1.5, "dur": 4.0,
+      "captions": [{"text": "MIN-1", "sub": "Reytian: a tiny minimalist ensemble after Philip Glass", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "faster-dock", "fw": "fm1dock", "ms": 9800, "from": 1.3, "dur": 8.3,
+      "keys": "1500:C4,1500:E4,1500:G4,2950:C4^,2950:E4^,2950:G4^,3100:F4,3100:A4,3100:C5,4550:F4^,4550:A4^,4550:C5^,4700:G4,4700:B4,4700:D5,6150:G4^,6150:B4^,6150:D5^,6300:C4,6300:E4,6300:G4,6300:C5,9400:C4^,9400:E4^,9400:G4^,9400:C5^",
+      "captions": [
+        {"text": "FM-1 Dock: 8x faster", "sub": "both cores at work: 0.3.0 ran it at 0.74x real time, 0.4.0 at 6.4x", "from": 0.3, "to": 4.2},
+        {"text": "Faster everywhere", "sub": "the browser compiles the FPU inline and runs core 1 in whole stretches", "from": 4.4, "to": 8.0}
+      ]
+    },
+    {
+      "name": "runs-polly", "fw": "polly", "ms": 8000, "from": 2.9, "dur": 4.0,
+      "keys": "3000:PLAY,3200:PLAY^",
+      "captions": [{"text": "81 community firmwares", "sub": "Polly by charlesvestal: a pocket arranger after the QY70", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "runs-tribe", "fw": "tribe", "ms": 8000, "from": 2.9, "dur": 4.0,
+      "keys": "3000:PLAY,3200:PLAY^",
+      "captions": [{"text": "each one unchanged", "sub": "TRIBE by apiel: the very package you would install on an FM-1", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "runs-bunker", "fw": "bunker", "ms": 8000, "from": 2.9, "dur": 4.0,
+      "keys": "3000:PLAY,3200:PLAY^",
+      "captions": [{"text": "downloaded from its author", "sub": "Bunker Evolved by Kid Bunka: the page hosts no firmware", "from": 0.2, "to": 3.8}]
+    },
+    {
+      "name": "outro", "fw": "amb", "ms": 10000, "from": 1.0, "dur": 8.5,
+      "card": {"lines": [
+        ["FM-1 emulator 0.4.0", 84],
+        ["joakimeriksson.github.io/fm1-emu", 46],
+        [" ", 30],
+        ["the plugin for macOS and Windows, fm1-live for macOS and Linux", 34],
+        ["with jamminstein, eubide and the firmware authors", 34]
+      ]}
+    }
+  ]
+}
