@@ -594,7 +594,10 @@ impl Cpu {
         if self.stop_pc != 0 {
             return self.run_stretch(bus, budget);
         }
-        self.run_fast_in::<B, false>(bus, budget)
+        if self.cost_model {
+            return self.run_fast_in::<B, false, true>(bus, budget);
+        }
+        self.run_fast_in::<B, false, false>(bus, budget)
     }
 
     /// `run_fast` as a runner's stretch (`stop_pc`): the same loop with the stretch's per-block
@@ -602,12 +605,17 @@ impl Cpu {
     /// there, interpreted Melodee ran 15% slower).
     #[inline(never)]
     fn run_stretch<B: Bus>(&mut self, bus: &mut B, budget: u32) -> Result<(u32, bool), CoreError> {
-        self.run_fast_in::<B, true>(bus, budget)
+        if self.cost_model {
+            return self.run_fast_in::<B, true, true>(bus, budget);
+        }
+        self.run_fast_in::<B, true, false>(bus, budget)
     }
 
-    /// `run_fast`'s loop; `STRETCH`: `stop_pc` is set (`run_stretch`).
+    /// `run_fast`'s loop; `STRETCH`: `stop_pc` is set (`run_stretch`); `COST`: `cost_model` is
+    /// (FM1_STRICT's measured costs: a copy of the loop with them, so the default one has none of
+    /// their tests per instruction, which cost it 30%).
     #[inline(always)]
-    fn run_fast_in<B: Bus, const STRETCH: bool>(&mut self, bus: &mut B, budget: u32) -> Result<(u32, bool), CoreError> {
+    fn run_fast_in<B: Bus, const STRETCH: bool, const COST: bool>(&mut self, bus: &mut B, budget: u32) -> Result<(u32, bool), CoreError> {
         if trace_on() {
             return Ok((0, false));
         }
@@ -911,18 +919,18 @@ impl Cpu {
                 let next_pc = pc + op.len as u32;
                 if !(careful || op.careful) {
                     // plain micro-op: cannot start or end a pair, block or loop
-                    if self.cost_model {
+                    if COST {
                         bus.fetch_cost(pc);
                     }
                     pc = self.exec_fast(bus, op.fast, next_pc).unwrap_or(next_pc);
                     n += 1;
-                    if self.cost_model {
+                    if COST {
                         let at = next_pc - op.len as u32;
                         bus.add_ticks((op_cost8(&op.fast, op.len, pc != next_pc, pc < at) - 1) as u64);
                     }
                 } else {
                     sync!();
-                    if self.cost_model {
+                    if COST {
                         bus.fetch_cost(pc);
                     }
                     // (it counts what it runs in insn_count itself; a swapped pair is two)
@@ -930,7 +938,7 @@ impl Cpu {
                     n += r & 3;
                     synced = n;
                     pc = self.pc;
-                    if self.cost_model {
+                    if COST {
                         // (an op the plain path cannot run: each instruction it ran by its class,
                         // as `step` charges them; each has had its one tick)
                         let at = next_pc - op.len as u32;
