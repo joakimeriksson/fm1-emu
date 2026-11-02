@@ -19,6 +19,9 @@ The scene list is JSON: {"scenes": [ {...}, ... ]} with, per scene,
               centred and large, the default sits bottom left
     card      a full-frame card instead of the panel: {"lines": [[text, size], ...]} over the
               run's audio
+    clip      a video file instead of a run (a screen recording: the plugin in a DAW, the page
+              in a browser), scaled and letterboxed to the frame, with its own audio; `from` and
+              `dur` cut it, the captions go over it
 Needs ffmpeg (libx264, overlay, xfade, acrossfade, loudnorm) and Pillow for the captions.
 """
 import json
@@ -118,26 +121,36 @@ def render(sc, root, out):
 def scene(sc, root, work):
     out = os.path.join(work, sc["name"])
     os.makedirs(out, exist_ok=True)
-    frames = render(sc, root, out)
     clip = os.path.join(out, "clip.mp4")
-    inputs = ["-f", "s16le", "-ar", "44100", "-ac", "2", "-i", os.path.join(frames, "audio.raw")]
-    if "card" in sc:
+    if "clip" in sc:
+        src = sc["clip"] if os.path.isabs(sc["clip"]) else os.path.join(root, sc["clip"])
+        inputs = ["-i", src]
+        first = f"[0:v]scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2,fps={FPS},format=rgba[v0]"
+    else:
+        frames = render(sc, root, out)
+        inputs = ["-f", "s16le", "-ar", "44100", "-ac", "2", "-i", os.path.join(frames, "audio.raw")]
+        first = "[0:v]format=rgba[v0]"
+    if "clip" in sc:
+        pass
+    elif "card" in sc:
         card = os.path.join(out, "card.png")
         card_png(card, sc["card"]["lines"])
         inputs = ["-loop", "1", "-framerate", FPS, "-i", card] + inputs
     else:
         inputs = ["-framerate", FPS, "-i", os.path.join(frames, "%06d.ppm")] + inputs
-    fc, last = ["[0:v]format=rgba[v0]"], "v0"
+    fc, last = [first], "v0"
+    # (a clip is one input with both streams; a run is the frames [0] and the audio [1])
+    nin, audio = (1, "0:a") if "clip" in sc else (2, "1:a")
     for i, c in enumerate(sc.get("captions", [])):
         png = os.path.join(out, f"cap{i}.png")
         caption_png(png, c["text"], c.get("sub"), c.get("style"))
         inputs += ["-loop", "1", "-framerate", FPS, "-i", png]
         a, b = c["from"] + sc.get("from", 0), c["to"] + sc.get("from", 0)
-        fc.append(f"[{i + 2}:v]format=rgba,fade=in:st={a}:d=0.3:alpha=1,fade=out:st={b - 0.3}:d=0.3:alpha=1[c{i}]")
+        fc.append(f"[{i + nin}:v]format=rgba,fade=in:st={a}:d=0.3:alpha=1,fade=out:st={b - 0.3}:d=0.3:alpha=1[c{i}]")
         fc.append(f"[{last}][c{i}]overlay=0:0:enable='between(t,{a},{b})'[v{i + 1}]")
         last = f"v{i + 1}"
     fc.append(f"[{last}]format=yuv420p[vout]")
-    fc.append("[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
+    fc.append(f"[{audio}]loudnorm=I=-16:TP=-1.5:LRA=11[aout]")
     cmd = ["ffmpeg", "-y", "-loglevel", "error"] + inputs + ["-filter_complex", ";".join(fc),
            "-map", "[vout]", "-map", "[aout]", "-ss", sc.get("from", 0), "-t", sc["dur"],
            "-c:v", "libx264", "-crf", "18", "-preset", "medium", "-c:a", "aac", "-b:a", "192k",
