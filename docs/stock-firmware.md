@@ -78,11 +78,17 @@ it into erased flash; felucca-bsp's `cpu2_fallback` is built for that); `fm1_cpu
 it happened. Compiled
 code is capped to a slice (`Periph::room_cap`): unbounded, a JIT loop waiting on cpu1 ran for up
 to 2^30 instructions before cpu1 ran at all. A core that finds a lock held (`lockset` denied, a
-`testset` on a taken byte: `Soc::waits`) hands the machine over rather than spinning its slice
-out: cpu1 ends its run, cpu0 ends its slice and cpu1 runs on while it holds the lock, the clock
-moving for cpu0's retries (Bubba Machine's FreeRTOS SMP takes the hardware lock around every
-critical section: 3x faster with this). `fm1-live` and the browser build share this code;
-`fm1-emu` interleaves the cores instruction by instruction.
+`testset` on a taken byte with `ifeq goto` back to it: `Soc::waits`) hands the machine over
+rather than spinning its slice out: cpu1 ends its run, cpu0 ends its slice and cpu1 runs on while
+it holds the lock, to its `lockclr` or within 64 instructions of the store that clears the byte
+(compiled code stores RAM without the bus, so the store itself cannot end the run), the clock
+moving for cpu0's retries (Bubba Machine's FreeRTOS SMP takes the hardware lock around every critical section: 3x
+faster with this). cpu0's interrupts wait up to a slice during a handover: nothing for the SDK's
+critical sections, which disable them, visible for a firmware that spins with them enabled. A
+`testset` taken once, with no loop back to it (a try-lock, a claim-a-job byte), records no wait.
+With a flaky core 1 (`--flaky-core1`) a misread `testset` records one too, so that mode's timing
+is not the one before the handover. `fm1-live` and the browser build share this code; `fm1-emu`
+interleaves the cores instruction by instruction.
 
 Users: the stock firmware (synth rendering on cpu1), X0X, Melodee 1.0.1, ChoralRoot. With two
 cores the JIT and the interpreter interleave them at slightly different points, so their audio is

@@ -85,9 +85,9 @@ pub trait Bus {
     fn hw_lock(&mut self, _core: u32, _set: bool) -> bool {
         true
     }
-    /// `testset` on `core` found the byte at `addr` taken: the core spins on it (the SDK's byte
-    /// locks: `testset b[r]; ifeq goto` back). A dual-core bus may hand the machine to the other
-    /// core, the one that holds it.
+    /// `testset` on `core` found the byte at `addr` taken and spins on it (the SDK's byte
+    /// locks: `testset b[r]; ifeq goto` back to it). A dual-core bus may hand the machine to
+    /// the other core, the one that holds it.
     fn spin(&mut self, _core: u32, _addr: u32) {}
     /// Would the next tick be due?
     fn next_tick_due(&self) -> bool {
@@ -3138,7 +3138,10 @@ impl Cpu {
                 let old = bus.read8(addr);
                 self.cc = old != 0;
                 bus.write8(addr, old | 0x80);
-                if old != 0 {
+                // taken, with `ifeq goto` back to it next (`40 e8 fd ff`: the SDK's byte
+                // spinlock): the core spins on this byte. A try-lock, or a claim-a-job byte
+                // that is often set, takes no such loop and records no wait.
+                if old != 0 && bus.fetch32(next_pc) == 0xfffd_e840 {
                     bus.spin(self.core_id, addr);
                 }
             }
