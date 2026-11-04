@@ -24,8 +24,9 @@ const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private
 const catalog = await (await fetch("firmwares.json")).json();
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
+let hubWait;
 const newcomers = DEVICE === "fm1"
-  ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => setTimeout(() => ok([]), 3000))])
+  ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => { hubWait = setTimeout(() => ok([]), 3000); })]).finally(() => clearTimeout(hubWait))
   : [];
 catalog.firmwares.push(...newcomers);
 const byId = new Map(catalog.firmwares.map((f) => [f.id, f]));
