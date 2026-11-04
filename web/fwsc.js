@@ -121,6 +121,13 @@ export function appFromPackage(file) {
 // fetch; a test's its own.)
 const HUB = "https://thefirmwarehub.com/";
 const hubCatalogs = new WeakMap();
+// A Hub package's version from its name, <id>-<version>.fwsc (a build id after "+" left off).
+// The Hub's own "version" is its latest release tag, which runs ahead of the package it hosts
+// when it has not taken a release's package yet. Null when the name is not of that form.
+export function packageVersion(id, pkg) {
+  const base = String(pkg).split("/").pop().replace(/\.fwsc$/, "");
+  return base.startsWith(id + "-") ? base.slice(id.length + 1).replace(/\+[0-9a-f]+$/, "") : null;
+}
 async function hubPackage(id, fetchFn) {
   try {
     if (!hubCatalogs.has(fetchFn)) {
@@ -130,7 +137,9 @@ async function hubPackage(id, fetchFn) {
       }));
     }
     const h = (await hubCatalogs.get(fetchFn))?.firmwares?.find((h) => h.id === id);
-    return h?.pkg ? { url: new URL(h.pkg, HUB).href, version: h.version == null ? null : String(h.version) } : null;
+    if (!h?.pkg) return null;
+    const version = packageVersion(h.id, h.pkg) ?? (h.version == null ? null : String(h.version));
+    return { url: new URL(h.pkg, HUB).href, version };
   } catch {
     hubCatalogs.delete(fetchFn);
     return null;
