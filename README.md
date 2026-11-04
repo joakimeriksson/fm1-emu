@@ -39,7 +39,7 @@ keeps USB, the installers and the rescue.
 
 ## What runs
 
-153 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
+154 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here (its packages, fetched from the Hub; `tools/hub_catalog.mjs` follows its catalog), and a
 few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/). Also FM-1 SID, and
 M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the Hub doesn't list
@@ -82,6 +82,7 @@ catalog uses it for its "Try it": a module installed and picked
 | [Caravel 0.11.0](https://joakimeriksson.github.io/fm1-emu/?fw=caravel) | [BonszaiMusic](https://github.com/bonszaimusic/caravel) | Multi-engine synth firmware with DRONE, STASIS texture capture, Pair Morph, and per-track Random Morph and Morph Journey for evolving, ambient and experimental sound design. |
 | [Carnac OS 0.9.6](https://joakimeriksson.github.io/fm1-emu/?fw=carnac) | [OrbVorgis](https://github.com/OwenKirby/carnac-os) | A dual-timbral wavetable synth after Carnac's standing stones: 15 morphing wavetable banks, seven voice architectures, a MAQ 16/3-style sequencer for modulated sequences and a chord sequencer for progressions, spring, tomb and tank reverbs. |
 | [Chipbox 1.4.0-helpfulharold](https://joakimeriksson.github.io/fm1-emu/?fw=chipbox) | [Pasquale Barilla](https://github.com/pbarilla/chipbox) | A chiptune groovebox with replicas of the NES, Game Boy and Sega Master System sound chips, in three views: RACK for the 16 steps of a page, CHIP to set up each channel, SONG to chain the pages into a song. |
+| [CHOPPAH 0.87](https://joakimeriksson.github.io/fm1-emu/?fw=choppah) | [profikid](https://github.com/profikid/fm1-break-choppah) | An Amen break chopper: eight classic breaks cut into 16 slices on the white keys, hold a key to loop it, and a generator that rearranges the break live, with a four-slot FX chain and a DJ filter. |
 | [ChoralRoot 0.29.2](https://joakimeriksson.github.io/fm1-emu/?fw=choralroot) | [Quixotic7](https://github.com/Quixotic7/ChoralRootFM1) | A port of the Choral Root synth. |
 | [fm1-chord 0.3](https://joakimeriksson.github.io/fm1-emu/?fw=chord) | [math0ne](https://github.com/math0ne/fm1-chord) | A chord machine after the HiChord, with extras: chords in a key under the white keys, slash chords and inversions, sounds, envelopes, effects and a looper. |
 | [CLATTER Pocket 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=clatter) | [allmyfriendsaresynths](https://github.com/clickysteve/clatter-pocket) | A generative drum machine on the LXR sound engine. |
