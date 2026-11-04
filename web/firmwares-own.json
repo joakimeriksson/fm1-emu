@@ -90,12 +90,12 @@
     {
       "id": "choppah",
       "name": "CHOPPAH",
-      "version": "0.75",
+      "version": "0.76",
       "author": "profikid",
       "license": "MPL-2.0",
       "about": "An Amen break chopper: eight classic breaks cut into 16 slices on the white keys, hold a key to loop it, and a generator that rearranges the break live, with a four-slot FX chain and a DJ filter.",
       "repo": "https://github.com/profikid/fm1-break-choppah",
-      "package": "https://profikid.github.io/fm1-break-choppah/firmware/choppah-0.75.fwsc",
+      "package": "https://profikid.github.io/fm1-break-choppah/firmware/choppah-0.76.fwsc",
       "installer": "https://profikid.github.io/fm1-break-choppah/install/"
     }
   ]
