@@ -21,7 +21,7 @@ fn a_note_sounds_when_it_is_due() {
     let (audio_tx, mut audio) = rtrb::RingBuffer::new(16384);
     let sh = shared.clone();
     let t = std::thread::spawn(move || engine::run(sh, params, rx, midi_rx, audio_tx));
-    tx.send(Cmd::Lead(2048)).unwrap();
+    tx.send(Cmd::Block(1024)).unwrap(); // (with the default lead, 2048 ahead)
     tx.send(Cmd::Boot { pkg: Arc::new(pkg), sectors: Vec::new() }).unwrap();
 
     // 4 s of frames, taken as they come; the note at 3 s (C4, held)
@@ -64,7 +64,7 @@ fn it_runs_when_the_host_takes_no_audio() {
     let (audio_tx, _audio) = rtrb::RingBuffer::new(16384);
     let sh = shared.clone();
     let t = std::thread::spawn(move || engine::run(sh, params, rx, midi_rx, audio_tx));
-    tx.send(Cmd::Lead(2048)).unwrap();
+    tx.send(Cmd::Block(1024)).unwrap(); // (with the default lead, 2048 ahead)
     tx.send(Cmd::Boot { pkg: Arc::new(pkg), sectors: Vec::new() }).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3000));
     let (lit, speed) = {

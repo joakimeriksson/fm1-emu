@@ -174,7 +174,11 @@ about 35 ms (lead and block) + 12 ms (the host's output block) + the firmware's 
 more. Three things bring it down:
 - the host's buffer size: 128 frames takes the host's share from 24 ms to 6 ms;
 - the lead: 6 ms instead of 23 takes off 17 ms, when the emulation keeps up; "frames late" in
-  the status bar says when it does not, and the lead goes back up;
+  the status bar says when it does not, and the lead goes back up. The machine takes a new
+  lead at once; the host is told the new latency through a restart request, which the AU
+  wrapper does not act on, so an AU host (Logic, GarageBand) keeps compensating by the old
+  figure for sequenced notes until the plugin is loaded again. VST3 and CLAP hosts take it
+  at once;
 - the firmware: its own key scan and DMA half buffer, as on the device. Measured in the
   emulator at 240 MHz, a note to its first sample: Felucca 6–8 ms, Melodee 7 ms, Golana and
   Caravel 4–5 ms, FOMAJAM 38 ms, CS-1 and 386DX 45–60 ms (their own attack included).

@@ -1321,7 +1321,14 @@ It is now a setting, "Lead" in the window and a host parameter (`lead`, non-auto
 23 ms as before (the default, so projects play as they did), 12 ms or 6 ms. Changing it sends
 the machine's thread the new lead and tells the host the new latency (`set_latency_samples`
 from `process`). A lead that is too short for the emulation's uneven pace shows as "frames
-late" in the status bar, which is the user's cue to go back up. With a 128-frame host buffer
+late" in the status bar, which is the user's cue to go back up. The machine's thread reads the
+parameter every round (the host's block it is told once); the latency report goes through
+nih-plug's CLAP wrapper, which while processing asks the host for a restart, and clap-wrapper's
+AU side does nothing on that request, so an AU host keeps the old latency for its sequenced
+notes until the plugin is loaded again (VST3 and CLAP hosts take it at once). Shrinking the
+lead while playing also leaves the frames already rendered at the old lead in the ring for one
+old lead's time, during which stamped notes are taken as they come: a hiccup of under 20 ms,
+once per change. With a 128-frame host buffer
 and the 6 ms lead a Felucca note sounds about 20 ms after the key: 9 ms lead and block, 3 ms
 the host's block, 7 ms Felucca's own, plus the driver.
 

@@ -42,8 +42,8 @@ pub enum Cmd {
     /// SMK-37: an analog input (fm1_soc::smk's ANALOG_*), the next keys' velocity (µs)
     Analog { idx: u8, value: u16 },
     Vel(u32),
-    /// The ring's lead in frames (from the host's block size).
-    Lead(usize),
+    /// The host's block in the machine's frames: the ring's lead is that plus the Lead parameter.
+    Block(usize),
 }
 
 /// What the editor shows: the screen, the LEDs and how the machine is doing.
@@ -191,7 +191,7 @@ pub fn run(
     let mut m: Option<Machine> = None;
     // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
     let lcd_timed = fm1_soc::lcd_timed_from_env();
-    let mut lead = 2048usize;
+    let mut block = 1024usize;
     let mut made: u64 = 0; // frames pushed since boot
     let mut due: VecDeque<Midi> = VecDeque::new();
     let mut pot = u16::MAX;
@@ -260,9 +260,11 @@ pub fn run(
                         m.soc.periph.smk_vel_us = us;
                     }
                 }
-                Cmd::Lead(l) => lead = l,
+                Cmd::Block(b) => block = b,
             }
         }
+        // the ring's lead: the host's block and the Lead parameter, as the window sets it
+        let lead = block + params.lead.value().frames();
         // a new clock: the machine's timers count its cycles, so boot it again on the new one,
         // with what the firmware wrote to its flash
         let mhz = params.clock.value().mhz();

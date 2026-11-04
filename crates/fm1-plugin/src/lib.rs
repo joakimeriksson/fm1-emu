@@ -117,17 +117,16 @@ impl Clock {
 /// played live waits this long, plus the host's own buffers, before it sounds; the host makes up
 /// the reported latency only for notes it places itself. 1024 frames is the lead the plugin had
 /// through 0.4.0; a shorter one shows as "frames late" in the status bar when the emulation
-/// falls behind for longer than it. [`Lead::ALL`] is the menu's order.
+/// falls behind for longer than it. The machine's thread reads it every round; the plugin
+/// reports the new latency from `process`, which an AU host does not take while it runs (see
+/// the README). Each saves its frames as its id; [`Lead::ALL`] is the menu's order.
 #[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lead {
     #[id = "1024"]
-    #[name = "23 ms"]
     Safe,
     #[id = "512"]
-    #[name = "12 ms"]
     Low,
     #[id = "256"]
-    #[name = "6 ms"]
     Lowest,
 }
 
@@ -318,7 +317,7 @@ impl Plugin for Fm1 {
         self.block = (cfg.max_buffer_size as f64 * self.ratio).ceil() as usize;
         self.lead_of = self.params.lead.value();
         self.lead = self.block + self.lead_of.frames();
-        let _ = link.cmds.send(Cmd::Lead(self.lead));
+        let _ = link.cmds.send(Cmd::Block(self.block));
         ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
         let fw = self.params.firmware.lock().unwrap().clone();
         let sectors = self.params.flash.lock().unwrap().clone();
@@ -327,14 +326,13 @@ impl Plugin for Fm1 {
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
-        // a new lead: the machine's thread keeps that much, and the host hears of the latency
+        // a new lead: the machine's thread reads the parameter itself; the host hears of the
+        // latency here (through nih-plug a restart request, which the AU wrapper does not act on:
+        // an AU host keeps the latency it was told until the plugin is loaded again)
         let want = self.params.lead.value();
         if want != self.lead_of {
             self.lead_of = want;
             self.lead = self.block + want.frames();
-            if let Some(link) = &self.link {
-                let _ = link.cmds.send(Cmd::Lead(self.lead));
-            }
             ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
         }
         let start = self.taken;
@@ -430,5 +428,15 @@ mod tests {
         assert!(Clock::ALL.windows(2).all(|w| w[0].mhz() < w[1].mhz()));
         let ids = Clock::ids().unwrap();
         assert!(Clock::ALL.iter().all(|c| ids[c.to_index()] == c.mhz().to_string()));
+    }
+
+    #[test]
+    fn leads_save_their_frames_and_the_menu_goes_up() {
+        let ids = Lead::ids().unwrap();
+        assert_eq!(Lead::ALL.len(), Lead::variants().len());
+        assert!(Lead::ALL.iter().all(|l| ids[l.to_index()] == l.frames().to_string()));
+        assert!(Lead::ALL.windows(2).all(|w| w[0].frames() < w[1].frames()));
+        assert_eq!(Lead::Safe.frames(), 1024, "the lead the plugin had through 0.4.0");
+        assert_eq!(Lead::ALL.map(Lead::name), ["6 ms", "12 ms", "23 ms"]);
     }
 }
