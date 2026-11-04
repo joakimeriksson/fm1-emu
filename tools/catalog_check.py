@@ -4,7 +4,9 @@
     tools/catalog_check.py [--live target/release/fm1-live] [--shard I/N] [--jobs N] [--update] [ID ...]
 
 Each firmware in web/firmwares.json (fetched into reference/firmwares/ by tools/fetch_firmwares.mjs)
-plays 8 s at 240 MHz with keys, MIDI and PLAY on a script, as a fm1-live --bench. It fails when
+plays 8 s at 240 MHz with keys, MIDI and PLAY on a script, as a fm1-live --bench, booted from its
+package as the page boots it (fm1-live --fwsc: the package's other sectors too, which some
+firmwares need before they make a sound). It fails when
   - the JIT and the interpreter give different audio (the interpreter is the JIT's oracle),
   - the audio is short (the emulator stopped), or
   - the audio is not the one in tests/catalog.json: an emulator change that moves a firmware's sound
@@ -42,13 +44,13 @@ MIN = 44100 * 4                # under a second of audio (44.1 kHz stereo s16le)
 
 def sha(b): return hashlib.sha256(b).hexdigest()
 
-def play(xip, jit, tmp):
+def play(pkg, jit, tmp):
     wav = os.path.join(tmp, "jit.raw" if jit else "int.raw")
     env = dict(os.environ, FM1_BENCH_WAV=wav, FM1_BENCH_KEYS=KEYS)
     env.pop("FM1_NO_JIT", None)
     if not jit:
         env["FM1_NO_JIT"] = "1"
-    r = subprocess.run([live, "--bin", xip, "--mhz", "240", "--bench", str(MS)], env=env,
+    r = subprocess.run([live, "--fwsc", pkg, "--mhz", "240", "--bench", str(MS)], env=env,
                        capture_output=True, text=True, timeout=600)
     speed = next((w[:-1] for line in r.stdout.splitlines() if "ms emulated" in line
                   for w in line.split() if w.endswith("x")), "?")
@@ -56,12 +58,12 @@ def play(xip, jit, tmp):
     return audio, speed
 
 def check(fid, want):
-    xip, pkg = (os.path.join(fw_dir, fid + e) for e in (".xip.bin", ".fwsc"))
-    if not os.path.exists(xip):
+    pkg = os.path.join(fw_dir, fid + ".fwsc")
+    if not os.path.exists(pkg):
         return fid, "missing", None, "not fetched"
     pkg_sha = sha(open(pkg, "rb").read())[:16]
     with tempfile.TemporaryDirectory() as tmp:
-        (j, js), (i, is_) = play(xip, True, tmp), play(xip, False, tmp)
+        (j, js), (i, is_) = play(pkg, True, tmp), play(pkg, False, tmp)
     note = f"{js}x / {is_}x real time"
     n = min(len(j), len(i))
     if n < MIN:

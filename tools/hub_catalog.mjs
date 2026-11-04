@@ -17,7 +17,7 @@ const OWN = new URL("../web/firmwares-own.json", import.meta.url);
 const OURS = { salt: "felucca-salt", floyd: "sloop-floyd", sloopbanks: "sloop-banks" };
 // listed on the Hub, not run here yet
 const SKIP = {
-  bubba: "boots to a black screen, no sound",
+  lsdjburrito: "boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do",
 };
 // first in the list (the page's default first), then by id
 const FIRST = ["mvave", "felucca", "felucca-salt"];
@@ -52,10 +52,13 @@ function ourId(h) {
   return h.id;
 }
 
-// a repository's licence (GitHub's SPDX id), for firmwares new to the list
+// a repository's licence (GitHub's SPDX id), for a firmware new to the list whose Hub entry has
+// none ("lic"); GITHUB_TOKEN when set, as the unauthenticated API allows 60 asks an hour
 async function licence(repo) {
   try {
-    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers: { "User-Agent": "fm1-emu hub_catalog" } });
+    const headers = { "User-Agent": "fm1-emu hub_catalog" };
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers });
     const j = await r.json();
     const id = j.license?.spdx_id;
     return id && id !== "NOASSERTION" ? id : "see the repository";
@@ -77,7 +80,7 @@ for (const h of hub.firmwares) {
     name: h.name,
     version: String(h.version),
     author: o.author || h.author,
-    license: o.license || (h.repo ? await licence(h.repo) : "see the repository"),
+    license: o.license || h.lic || (h.repo ? await licence(h.repo) : "see the repository"),
     about: o.about || h.what,
     repo: o.repo || (h.repo ? `https://github.com/${h.repo}` : h.site),
     package: new URL(h.pkg, HUB).href,
