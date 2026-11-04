@@ -142,8 +142,11 @@ const note = "Community firmwares for the M-VAVE FM-1: the FM-1 Firmware Hub's l
   "this repository's FM-1 SID, M-VAVE's own, a few from fm1-editor.com/firmware). Generated: edit " +
   "web/firmwares-own.json (the default too), not this file. The web page fetches each package when started and " +
   "unpacks it with web/fwsc.js; tools/fetch_firmwares.mjs does the same into reference/firmwares for " +
-  "fm1-live. \"hub\": the firmware's id on the Hub (its card: thefirmwarehub.com/#fw-<hub>).";
-const json = `{\n  "note": ${JSON.stringify(note)},\n  "default": ${JSON.stringify(ownFile.default ?? cur.default)},\n  "firmwares": [\n` +
+  "fm1-live. \"hub\": the firmware's id on the Hub (its card: thefirmwarehub.com/#fw-<hub>). \"skipped\": Hub " +
+  "firmwares not run here, by the Hub's id, with why; the page lists the Hub's other firmwares not in this file " +
+  "after these, marked as not yet run here (web/fwsc.js hubNewcomers).";
+const json = `{\n  "note": ${JSON.stringify(note)},\n  "default": ${JSON.stringify(ownFile.default ?? cur.default)},\n` +
+  `  "skipped": ${JSON.stringify(SKIP)},\n  "firmwares": [\n` +
   firmwares.map(entry).join(",\n") + "\n  ]\n}\n";
 JSON.parse(json); // (still JSON)
 

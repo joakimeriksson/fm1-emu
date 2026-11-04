@@ -3,7 +3,7 @@
 // that runs the emulator. Every firmware boots from its whole update package (.fwsc), unpacked
 // in the wasm: a catalog entry's fetched from its author's site, or one opened from this
 // computer (M-VAVE's own: their server does not let other pages fetch it).
-import { fetchPackage } from "./fwsc.js";
+import { fetchPackage, hubNewcomers, hubCardUrl } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
 import { tryOutOf, loadTryOut } from "./tryout.js";
 
@@ -22,6 +22,12 @@ const stored = (k) => { try { return localStorage.getItem(k); } catch { return n
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
 const catalog = await (await fetch("firmwares.json")).json();
+// The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
+// does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
+const newcomers = DEVICE === "fm1"
+  ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => setTimeout(() => ok([]), 3000))])
+  : [];
+catalog.firmwares.push(...newcomers);
 const byId = new Map(catalog.firmwares.map((f) => [f.id, f]));
 // the FM-1 Firmware Hub's ids too, where they differ (its cards link here with ?fw=<its id>)
 for (const f of catalog.firmwares) if (f.hub && !byId.has(f.hub)) byId.set(f.hub, f);
@@ -114,7 +120,13 @@ function setBoard(b) {
 setBoard(DEV.board);
 
 // ---------------------------------------------------------------- firmware and clock
-for (const f of catalog.firmwares) fwSel.add(new Option(`${f.name} ${f.version}`, f.id));
+for (const f of catalog.firmwares) if (!f.untested) fwSel.add(new Option(`${f.name} ${f.version}`, f.id));
+if (newcomers.length) {
+  const group = document.createElement("optgroup");
+  group.label = "New on the Hub, not yet run here";
+  for (const f of newcomers) group.append(new Option(`${f.name} ${f.version}`, f.id));
+  fwSel.append(group);
+}
 for (const c of new Set([...CLOCKS, mhz].sort((a, b) => a - b))) mhzSel.add(new Option(`${c} MHz`, c));
 fwSel.value = fw.id;
 mhzSel.value = mhz;
@@ -127,7 +139,8 @@ const MIDI_NOTES = {
   choralroot: NO_NOTE, hortator: NO_NOTE, "sloop-alg": NO_NOTE, x0x: NO_NOTE,
 };
 const cards = new Map();
-const hubCard = (f) => `https://thefirmwarehub.com/#fw-${f.hub}`;
+const hubCard = (f) => hubCardUrl(f.hub);
+const UNTESTED = "New on the Hub: not yet run in the emulator, so it may not work here";
 // the FM-1 page: which entries have an SMK-37 build (that catalog names them)
 const twins = new Map();
 if (DEVICE === "fm1") {
@@ -173,6 +186,7 @@ if (DEVICE === "fm1") {
       el("p", "what", f.byo && DEVICE === "fm1" ? "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. " +
         "Bring your own copy (see below)." : f.about));
     if (DEVICE === "fm1" && MIDI_NOTES[f.id]) card.append(el("div", "midi", MIDI_NOTES[f.id]));
+    if (f.untested) card.append(el("div", "untested", UNTESTED));
     card.append(links);
     list.append(card);
     cards.set(f.id, card);
@@ -272,6 +286,12 @@ function showFirmware() {
     what.className = "what";
     what.textContent = fw.about;
     parts = [b, `by ${fw.author}`, links, what];
+    if (fw.untested) {
+      const note = document.createElement("span");
+      note.className = "untested";
+      note.textContent = UNTESTED + ".";
+      parts.push(" ", note);
+    }
   }
   if (loadedUrl) {
     const p = document.createElement("a");

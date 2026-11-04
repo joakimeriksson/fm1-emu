@@ -43,7 +43,9 @@ keeps USB, the installers and the rescue.
 runs here (its packages, fetched from the Hub; `tools/hub_catalog.mjs` follows its catalog), and a
 few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/). Also FM-1 SID, and
 M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the Hub doesn't list
-are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. Each
+are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. The page
+also lists, last and marked as not yet run here, whatever else the Hub has a package for, so a new
+firmware is playable the day it is published. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
 too; `&embed=1` shows only the device and its controls, for a window on another site.)
 A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash

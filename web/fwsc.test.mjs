@@ -2,7 +2,7 @@
 // version comes) is found again through the Hub's catalog.json.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchPackage } from './fwsc.js';
+import { fetchPackage, hubNewcomers } from './fwsc.js';
 
 test('a Hub package that has gone is fetched as the one the Hub lists now', async () => {
   const asked = [];
@@ -38,4 +38,31 @@ test('a failed Hub catalog is asked again', async () => {
   await assert.rejects(fetchPackage(entry, fetchFn), /skiff-1\.3\.3\.fwsc: 404/);
   up = true;
   assert.equal((await fetchPackage(entry, fetchFn)).version, '1.4');
+});
+
+test("the Hub's newcomers: listed with a package, not in the catalog by either id, not skipped", async () => {
+  const hub = { firmwares: [
+    { id: 'sloop', version: '2.8', pkg: 'fw/sloop-2.8.fwsc' },                  // ours
+    { id: 'fm1sid', version: '0.3', pkg: 'fw/fm1sid-0.3.fwsc' },               // ours under another id
+    { id: 'lsdjburrito', version: '1', pkg: 'fw/lsdjburrito-1.fwsc' },         // skipped
+    { id: 'cosmos', version: '0.1' },                                           // no package yet
+    { id: 'caravel', version: '0.12.0', pkg: 'fw/caravel-0.11.0.fwsc', name: 'Caravel', author: 'BonszaiMusic',
+      repo: 'bonszaimusic/caravel', lic: 'GPL-3.0', what: 'A multi-engine synth.' },
+  ] };
+  let asked = 0;
+  const fetchFn = async (url) => { asked++; return url.endsWith('catalog.json') ? new Response(JSON.stringify(hub)) : new Response('', { status: 404 }); };
+  const catalog = { skipped: { lsdjburrito: 'no audio until a song is sent' }, firmwares: [
+    { id: 'sloop', hub: 'sloop' }, { id: 'sid', hub: 'fm1sid' }, { id: 'mvave' },
+  ] };
+  const got = await hubNewcomers(catalog, fetchFn);
+  assert.deepEqual(got.map((f) => f.id), ['caravel']);
+  assert.equal(got[0].version, '0.11.0', "the package's version, not the Hub's release tag");
+  assert.equal(got[0].package, 'https://thefirmwarehub.com/fw/caravel-0.11.0.fwsc');
+  assert.equal(got[0].repo, 'https://github.com/bonszaimusic/caravel');
+  assert.equal(got[0].untested, true);
+  // the same read serves a later package fallback
+  await fetchPackage({ id: 'sloop', package: 'https://thefirmwarehub.com/fw/sloop-2.7.fwsc', hub: 'sloop' }, fetchFn).catch(() => {});
+  assert.equal(asked, 1 + 2, 'one catalog read, then the old and the new package');
+  // a Hub that cannot be read: nothing new, the page as it is
+  assert.deepEqual(await hubNewcomers(catalog, async () => new Response('', { status: 503 })), []);
 });
