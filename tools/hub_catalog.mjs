@@ -59,12 +59,31 @@ async function licence(repo) {
     const headers = { "User-Agent": "fm1-emu hub_catalog" };
     if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
     const r = await fetch(`https://api.github.com/repos/${repo}`, { headers });
-    const j = await r.json();
-    const id = j.license?.spdx_id;
+    if (!r.ok) {
+      console.log(`  (GitHub did not answer for ${repo}: ${r.status}${r.status === 403 ? "; GITHUB_TOKEN raises the limit" : ""})`);
+      return "see the repository";
+    }
+    const id = (await r.json()).license?.spdx_id;
     return id && id !== "NOASSERTION" ? id : "see the repository";
-  } catch {
+  } catch (e) {
+    console.log(`  (GitHub did not answer for ${repo}: ${e.message})`);
     return "see the repository";
   }
+}
+
+// The package's version: its name is <id>-<version>.fwsc, a build id after "+". The Hub's
+// "version" is its latest release tag, which runs ahead of the package it hosts for a release
+// whose package it has not taken yet (FM1 Quest 43 with fm1quest-42.fwsc).
+function pkgVersion(h) {
+  const base = h.pkg.split("/").pop().replace(/\.fwsc$/, "");
+  const v = base.startsWith(h.id + "-") ? base.slice(h.id.length + 1) : String(h.version);
+  return v.replace(/\+[0-9a-f]+$/, "");
+}
+// A firmware's licence: one set by hand in our own list; else the Hub's; else the one an earlier
+// run asked GitHub for (unless that ask failed); else GitHub's now.
+async function licenceOf(h, o, mine) {
+  const kept = o.license && o.license !== "see the repository" ? o.license : null;
+  return mine?.license || h.lic || kept || (h.repo ? await licence(h.repo) : "see the repository");
 }
 
 const firmwares = [];
@@ -78,9 +97,9 @@ for (const h of hub.firmwares) {
   firmwares.push({
     id,
     name: h.name,
-    version: String(h.version),
+    version: pkgVersion(h),
     author: o.author || h.author,
-    license: o.license || h.lic || (h.repo ? await licence(h.repo) : "see the repository"),
+    license: await licenceOf(h, o, own.find((f) => f.id === id)),
     about: o.about || h.what,
     repo: o.repo || (h.repo ? `https://github.com/${h.repo}` : h.site),
     package: new URL(h.pkg, HUB).href,

@@ -57,6 +57,7 @@
     },
     {
       "id": "quest",
+      "hub": "fm1quest",
       "name": "FM1 Quest",
       "version": "0.21",
       "author": "hericdk",
@@ -68,6 +69,7 @@
     },
     {
       "id": "sid",
+      "hub": "fm1sid",
       "name": "FM-1 SID",
       "version": "0.3",
       "author": "joakimeriksson",

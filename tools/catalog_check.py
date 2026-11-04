@@ -94,11 +94,20 @@ for fid, status, _, note in results:
     print(f"{fid:<14} {status:<8} {note}")
 count = {s: sum(1 for r in results if r[1] == s) for s in ("ok", "rebuilt", "new", "changed", "missing", "FAIL")}
 print(", ".join(f"{n} {s}" for s, n in count.items() if n) or "nothing to check")
+orphans = sorted(k for k in golden if k not in cat)
 if update:
     for fid, status, got, _ in results:
         if got:
             golden[fid] = got
+    # a firmware gone from the catalog takes its hash with it (a whole, unfiltered run: a shard
+    # or a run of some ids only says what it would drop)
+    if orphans and not ids and shards == 1:
+        print(f"dropped from tests/catalog.json (not in the catalog): {', '.join(orphans)}")
+        for k in orphans:
+            del golden[k]
     with open(golden_path, "w") as f:
         json.dump(dict(sorted(golden.items())), f, indent=1)
         f.write("\n")
+if orphans and (not update or ids or shards > 1):
+    print(f"in tests/catalog.json, not in the catalog: {', '.join(orphans)} (a whole --update drops them)")
 sys.exit(1 if count["FAIL"] else 0)
