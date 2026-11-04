@@ -12,7 +12,9 @@ const cell = (s) => s.replace(/\|/g, "\\|");
 const blurb = (f) => (f.about.match(/^.*?\.(?=\s|$)/) || [f.about])[0];
 
 const TABLES = [
-  { catalog: "../web/firmwares.json", page: SITE, stock: "FM-1.fwsc", marker: "firmwares" },
+  // (count: the sentence before the table, "N community firmwares": the rows but M-VAVE's own and
+  // FM-1 SID, which it names on their own)
+  { catalog: "../web/firmwares.json", page: SITE, stock: "FM-1.fwsc", marker: "firmwares", count: ["mvave", "sid"] },
   { catalog: "../web/smk37/firmwares.json", page: `${SITE}smk37/`, stock: "SMK-37 Pro_016.fwsc", marker: "smk37-firmwares" },
 ];
 
@@ -32,6 +34,12 @@ for (const t of TABLES) {
   const a = text.indexOf(BEGIN), b = text.indexOf(END);
   if (a < 0 || b < a) throw new Error(`README.md has no ${BEGIN} ... ${END} section`);
   text = `${text.slice(0, a + BEGIN.length)}\n${table}\n${text.slice(b)}`;
+  if (t.count) {
+    const n = cat.firmwares.filter((f) => !t.count.includes(f.id)).length;
+    const line = /^\d+ community firmwares: /m;
+    if (!line.test(text)) throw new Error('README.md has no "N community firmwares:" line');
+    text = text.replace(line, `${n} community firmwares: `);
+  }
   counts.push(`${rows.length} ${t.marker}`);
 }
 if (process.argv.includes("--check")) {

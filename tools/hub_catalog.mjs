@@ -3,12 +3,13 @@
 // packages never change under their name, sent with Access-Control-Allow-Origin: *; an old one is
 // removed when a new version comes, and web/fwsc.js then asks the Hub's catalog), then our
 // own list, web/firmwares-own.json (hand-edited: FM-1 SID, M-VAVE's own, ... the firmwares the Hub
-// does not list). For a firmware the Hub lists, what is ours is kept (the page's description, the
-// licence, the installer link; from our own list, else from the last web/firmwares.json) and the
-// rest comes from the Hub. The Hub's catalog changes every few hours: run this when it has.
+// does not list). For a firmware the Hub lists, what is ours is kept (the page's description and
+// the installer link, from our own list, else from the last web/firmwares.json; a licence from our
+// own list, else the Hub's, else the last file's) and the rest comes from the Hub. The Hub's catalog changes every few hours: run this when it has.
 //   node tools/hub_catalog.mjs [--check] [--catalog=hub.json]
 // (--check: only say whether the file is current; --catalog: the Hub's catalog from a file)
 import { readFileSync, writeFileSync } from "node:fs";
+import { packageVersion } from "../web/fwsc.js";
 
 const HUB = "https://thefirmwarehub.com/";
 const OUT = new URL("../web/firmwares.json", import.meta.url);
@@ -71,19 +72,20 @@ async function licence(repo) {
   }
 }
 
-// The package's version: its name is <id>-<version>.fwsc, a build id after "+". The Hub's
-// "version" is its latest release tag, which runs ahead of the package it hosts for a release
-// whose package it has not taken yet (FM1 Quest 43 with fm1quest-42.fwsc).
+// The package's version (web/fwsc.js's packageVersion: the Hub's "version" is its latest release
+// tag, which runs ahead of the package it hosts for a release whose package it has not taken yet,
+// FM1 Quest 43 with fm1quest-42.fwsc). A package not named <id>-<version>.fwsc is said.
 function pkgVersion(h) {
-  const base = h.pkg.split("/").pop().replace(/\.fwsc$/, "");
-  const v = base.startsWith(h.id + "-") ? base.slice(h.id.length + 1) : String(h.version);
-  return v.replace(/\+[0-9a-f]+$/, "");
+  const v = packageVersion(h.id, h.pkg);
+  if (v == null) console.log(`  CHECK: the Hub's ${h.id} has a package not named after it, ${h.pkg}: its version ${h.version} taken as the package's`);
+  return v ?? String(h.version);
 }
-// A firmware's licence: one set by hand in our own list; else the Hub's; else the one an earlier
-// run asked GitHub for (unless that ask failed); else GitHub's now.
-async function licenceOf(h, o, mine) {
+// A firmware's licence: one in our own list (o is that entry for an id of ours: the own list is
+// last into old); else the Hub's; else the one an earlier run asked GitHub for, unless that ask
+// failed; else GitHub's now.
+async function licenceOf(h, o) {
   const kept = o.license && o.license !== "see the repository" ? o.license : null;
-  return mine?.license || h.lic || kept || (h.repo ? await licence(h.repo) : "see the repository");
+  return (own.some((f) => f.id === o.id) && o.license) || h.lic || kept || (h.repo ? await licence(h.repo) : "see the repository");
 }
 
 const firmwares = [];
@@ -99,7 +101,7 @@ for (const h of hub.firmwares) {
     name: h.name,
     version: pkgVersion(h),
     author: o.author || h.author,
-    license: await licenceOf(h, o, own.find((f) => f.id === id)),
+    license: await licenceOf(h, o),
     about: o.about || h.what,
     repo: o.repo || (h.repo ? `https://github.com/${h.repo}` : h.site),
     package: new URL(h.pkg, HUB).href,

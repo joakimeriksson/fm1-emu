@@ -66,7 +66,8 @@ struct Opts {
     shot: Option<u64>,
     /// What runs, for the window title.
     name: String,
-    /// M-VAVE's stock firmware from its update package (fm1_soc::stock_from_package)
+    /// A firmware from its update package (fm1_soc::stock_from_package): a community firmware's,
+    /// M-VAVE's own; `--fw <id>` fills it with the catalog's
     fwsc: Option<String>,
     /// a DX7 32-voice bank for the stock firmware's slots 1-32
     syx: Option<String>,

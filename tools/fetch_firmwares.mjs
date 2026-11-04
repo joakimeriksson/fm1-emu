@@ -1,6 +1,6 @@
-// Fetch the firmwares in web/firmwares.json into reference/firmwares/ for fm1-live --fw:
-// <id>.fwsc (the package as published), <id>.app.bin (its app) and <id>.xip.bin (the app behind
-// 0x120 bytes of padding, loaded at 0x02000120). Same download and unpacking as the web page.
+// Fetch the firmwares in web/firmwares.json into reference/firmwares/<id>.fwsc, the package as
+// published, for fm1-live --fw and tools/catalog_check.py, which boot it as the web page does.
+// Same download as the web page; the app is unpacked only to say its size.
 //   node tools/fetch_firmwares.mjs [id ...]
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -34,12 +34,7 @@ for (const f of cat.firmwares) {
     failed.length = 0;
     const { bytes, url } = await fetchPackage(f, patient);
     const app = appFromPackage(bytes);
-    const out = root + "reference/firmwares/" + f.id;
-    writeFileSync(out + ".fwsc", bytes);
-    writeFileSync(out + ".app.bin", app);
-    const xip = new Uint8Array(0x120 + app.length);
-    xip.set(app, 0x120);
-    writeFileSync(out + ".xip.bin", xip);
+    writeFileSync(root + "reference/firmwares/" + f.id + ".fwsc", bytes);
     console.log(`${f.id.padEnd(13)} ${url.replace(/\/$/, "").split("/").pop().padEnd(36)} app ${app.length} bytes`);
     for (const why of failed) console.log(`${"".padEnd(13)} (${why})`);
   } catch (e) {
