@@ -4,7 +4,7 @@
 //! that is the host's "Master" parameter), and a bar to load a firmware package.
 
 use crate::engine::Cmd;
-use crate::{panel, panel_smk, Clock, Fm1Params, Link};
+use crate::{panel, panel_smk, Clock, Fm1Params, Lead, Link};
 use fm1_soc::Board;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, widgets};
@@ -129,6 +129,17 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                             setter.begin_set_parameter(&params.clock);
                             setter.set_parameter(&params.clock, c);
                             setter.end_set_parameter(&params.clock);
+                        }
+                    }
+                });
+                bar.label("Lead").on_hover_text("How far ahead of the host the firmware runs, beyond one host block: a note you play waits this long, plus the host's own buffers, before it sounds. 23 ms is room for any firmware; try less, and go back up if \"frames late\" appear in the status bar");
+                let now = params.lead.value();
+                egui::ComboBox::from_id_salt("lead").width(70.0).selected_text(now.name()).show_ui(bar, |menu| {
+                    for l in Lead::ALL {
+                        if menu.selectable_label(l == now, l.name()).clicked() && l != now {
+                            setter.begin_set_parameter(&params.lead);
+                            setter.set_parameter(&params.lead, l);
+                            setter.end_set_parameter(&params.lead);
                         }
                     }
                 });

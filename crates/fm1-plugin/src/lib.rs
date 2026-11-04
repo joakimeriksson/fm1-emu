@@ -60,6 +60,10 @@ pub struct Fm1Params {
     /// The emulated CPU's clock. Changing it reboots the firmware (its flash is kept).
     #[id = "clock"]
     pub clock: EnumParam<Clock>,
+    /// How far ahead of the host the machine runs beyond one host block: the delay a played
+    /// note hears. Changing it changes the latency the plugin reports.
+    #[id = "lead"]
+    pub lead: EnumParam<Lead>,
 }
 
 /// The emulated clock. The emulator runs one instruction a cycle at the chip's nominal 240 MHz,
@@ -108,6 +112,41 @@ impl Clock {
     }
 }
 
+/// The machine's lead over the host beyond one host block: room for a DMA half buffer (half the
+/// firmwares hand out 256 or 512 frames at once) and for the emulation's uneven pace. A note
+/// played live waits this long, plus the host's own buffers, before it sounds; the host makes up
+/// the reported latency only for notes it places itself. 1024 frames is the lead the plugin had
+/// through 0.4.0; a shorter one shows as "frames late" in the status bar when the emulation
+/// falls behind for longer than it. [`Lead::ALL`] is the menu's order.
+#[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lead {
+    #[id = "1024"]
+    #[name = "23 ms"]
+    Safe,
+    #[id = "512"]
+    #[name = "12 ms"]
+    Low,
+    #[id = "256"]
+    #[name = "6 ms"]
+    Lowest,
+}
+
+impl Lead {
+    pub const ALL: [Lead; 3] = [Lead::Lowest, Lead::Low, Lead::Safe];
+
+    pub fn frames(self) -> usize {
+        match self {
+            Lead::Safe => 1024,
+            Lead::Low => 512,
+            Lead::Lowest => 256,
+        }
+    }
+
+    pub fn name(self) -> String {
+        format!("{} ms", (self.frames() as f64 / 44.1).round())
+    }
+}
+
 impl Default for Fm1Params {
     fn default() -> Self {
         Self {
@@ -121,6 +160,7 @@ impl Default for Fm1Params {
             channel: IntParam::new("MIDI channel", 0, IntRange::Linear { min: 0, max: 16 })
                 .with_value_to_string(Arc::new(|v| if v == 0 { "as sent".into() } else { v.to_string() })),
             clock: EnumParam::new("CPU clock", Clock::Mhz240).non_automatable(),
+            lead: EnumParam::new("Lead", Lead::Safe).non_automatable(),
         }
     }
 }
@@ -155,8 +195,10 @@ pub struct Fm1 {
     audio: Option<rtrb::Consumer<[f32; 2]>>,
     /// machine frames per host sample
     ratio: f64,
-    /// how far ahead of the host the machine runs, in its frames
+    /// how far ahead of the host the machine runs, in its frames: a host block and the lead chosen
     lead: usize,
+    block: usize,
+    lead_of: Lead,
     /// frames taken from the ring, and the resampler between the last two
     taken: u64,
     frac: f64,
@@ -174,6 +216,8 @@ impl Default for Fm1 {
             audio: None,
             ratio: 1.0,
             lead: 2048,
+            block: 1024,
+            lead_of: Lead::Safe,
             taken: 0,
             frac: 0.0,
             cur: [0.0; 2],
@@ -270,8 +314,10 @@ impl Plugin for Fm1 {
     fn initialize(&mut self, _layout: &AudioIOLayout, cfg: &BufferConfig, ctx: &mut impl InitContext<Self>) -> bool {
         let link = self.start();
         self.ratio = RATE / cfg.sample_rate as f64;
-        // a host block's frames, and room for a DMA half and the emulation's unevenness
-        self.lead = (cfg.max_buffer_size as f64 * self.ratio).ceil() as usize + 1024;
+        // a host block's frames, and the lead chosen: room for a DMA half and the emulation's unevenness
+        self.block = (cfg.max_buffer_size as f64 * self.ratio).ceil() as usize;
+        self.lead_of = self.params.lead.value();
+        self.lead = self.block + self.lead_of.frames();
         let _ = link.cmds.send(Cmd::Lead(self.lead));
         ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
         let fw = self.params.firmware.lock().unwrap().clone();
@@ -281,6 +327,16 @@ impl Plugin for Fm1 {
     }
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        // a new lead: the machine's thread keeps that much, and the host hears of the latency
+        let want = self.params.lead.value();
+        if want != self.lead_of {
+            self.lead_of = want;
+            self.lead = self.block + want.frames();
+            if let Some(link) = &self.link {
+                let _ = link.cmds.send(Cmd::Lead(self.lead));
+            }
+            ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
+        }
         let start = self.taken;
         let ch = self.params.channel.value() as u8;
         while let Some(ev) = ctx.next_event() {
