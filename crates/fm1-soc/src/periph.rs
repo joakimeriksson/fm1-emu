@@ -77,6 +77,8 @@ pub const IRQ_SPI1: u8 = 16;
 pub const IRQ_SARADC: u8 = 24;
 pub const IRQ_SPI2: u8 = 37;
 pub const IRQ_UART1: u8 = 20;
+pub const IRQ_BLE_RX: u8 = 29;
+pub const IRQ_BLE_EVENT: u8 = 45;
 /// The UART's clock (CLK_CON1 selects PLL48M; OTCNT counts it).
 const UART_HZ: u64 = 48_000_000;
 /// Bits per MIDI byte on the wire (start, 8 data, stop) and the baud rate.
@@ -235,6 +237,9 @@ pub struct Periph {
     /// the transfer under way finishes.
     pub spi2_pending: bool,
     spi2_next: u64,
+    /// BLE baseband IRQs (Optimist's ble_hw_wl82.c): rx packet and connection event.
+    pub ble_rx_pending: bool,
+    pub ble_event_pending: bool,
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
@@ -386,6 +391,8 @@ impl Default for Periph {
             adc_next: u64::MAX,
             spi2_pending: false,
             spi2_next: u64::MAX,
+            ble_rx_pending: false,
+            ble_event_pending: false,
             usb_next: u64::MAX,
             usb_period: 0,
             wdt_at: u64::MAX,
@@ -443,6 +450,17 @@ impl Periph {
 
     pub fn cycle_of_ms(&self, ms: u64) -> u64 {
         ms * self.hz / 1000
+    }
+
+    /// I2S frames the DAC clock has counted since boot: 24 MHz / 544 a second whatever the CPU
+    /// clock, the pace the DMA keeps (half_period). `audio` holds the ones the firmware made;
+    /// the difference is its silence from boot until it started the DMA.
+    pub fn audio_frames_so_far(&self) -> u64 {
+        Self::audio_frames_at(self.cycles, self.hz)
+    }
+
+    pub fn audio_frames_at(cycles: u64, hz: u64) -> u64 {
+        (cycles as u128 * T4_HZ as u128 / (hz as u128 * FRAME_T4 as u128)) as u64
     }
 
     fn t5_period(&self) -> u64 {
@@ -780,6 +798,7 @@ impl Periph {
     pub fn any_pending(&self) -> bool {
         self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+            || self.ble_rx_pending || self.ble_event_pending
     }
 
     /// Has core `core` (0, 1) source `n` enabled (its ICFG nibble's bit 0)?
@@ -838,6 +857,12 @@ impl Periph {
         }
         if self.alnk_pend & 0xf0 != 0 && self.alnk_con0 & 0x800 != 0 {
             consider(IRQ_ALNK0);
+        }
+        if self.ble_rx_pending {
+            consider(IRQ_BLE_RX);
+        }
+        if self.ble_event_pending {
+            consider(IRQ_BLE_EVENT);
         }
         for b in 0..8u8 {
             if self.ilat & (1 << b) != 0 {
@@ -1544,5 +1569,15 @@ mod tests {
         p.apply(&Action::Midi { b: 0xf8 });
         run_to(&mut p, 7 * byte + ms, &mut got);
         assert_eq!((got.len(), p.midi_dropped()), (5, 1));
+    }
+
+    #[test]
+    fn audio_frames_follow_the_dac_clock() {
+        // 24 MHz / 544 = 44117.6 frames per second, however fast the CPU runs
+        assert_eq!(Periph::audio_frames_at(0, CPU_HZ), 0);
+        assert_eq!(Periph::audio_frames_at(5440, CPU_HZ), 1);
+        assert_eq!(Periph::audio_frames_at(CPU_HZ, CPU_HZ), 44_117);
+        assert_eq!(Periph::audio_frames_at(160_000_000, 160_000_000), 44_117);
+        assert_eq!(Periph::audio_frames_at(60 * 60 * CPU_HZ, CPU_HZ), 60 * 60 * 44_117 + 2329);
     }
 }
