@@ -24,7 +24,8 @@ import collections, hashlib, os, random, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "work", "fuzz")
-TC = "/fm1/reference/toolchain/jieli-linux-toolchains-20250324.1"
+# the newest JieLi toolchain under reference/toolchain (docs/recon.md names the archive)
+TC = "/fm1/reference/toolchain/" + sorted(n for n in os.listdir(os.path.join(ROOT, "reference", "toolchain")) if n.startswith("jieli-linux-toolchains-"))[-1]
 SLOT = 32
 
 args = sys.argv[1:]

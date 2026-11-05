@@ -6,7 +6,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 app="$1"; out="$2"; base="${3:-0x02000120}"
 rel_app="${app#$ROOT/}"; rel_out="${out#$ROOT/}"
-TC=/fm1/reference/toolchain/jieli-linux-toolchains-20250324.1
+# the newest JieLi toolchain under reference/toolchain (docs/recon.md: pkgman.jieliapp.com's archive)
+TC="/fm1/reference/toolchain/$(ls "$ROOT/reference/toolchain" | grep '^jieli-linux-toolchains-' | sort | tail -1)"
 docker run --rm --platform linux/amd64 -v "$ROOT":/fm1 -w /fm1 debian:bookworm-slim bash -c "
 set -e
 mkdir -p work/probe
