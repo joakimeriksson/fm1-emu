@@ -1338,6 +1338,51 @@ Not a regression of 0.4.0: the page's catalog still pins `melodee-1.4.5.fwsc`, w
 1.6.0 package reached that page through `fetchPackage`'s fallback to the Hub's current package,
 taken when the pinned download fails (it failed once that evening, not again). 1.4.5 is the
 film's Melodee.
+## 5.40 A played note's delay: the plugin's lead as a setting (2026-11-04)
+
+A user of 0.4.0: "the trigger latency is still longer than 20 ms, including Mac AU plugin and
+browser". Where a note played live spends its time, at 44.1 kHz:
+
+- The plugin (AU and VST3 alike): the machine's thread runs one host block plus 1024 frames
+  ahead of the host (`lead`, crates/fm1-plugin/src/engine.rs), and a note from the host or the
+  window is taken at the frame that far ahead. With a 512-frame host buffer that is 35 ms, plus
+  the host's own output block, 12 ms, plus the firmware's. The plugin reports the lead as its
+  latency and the host makes up for it, but only for notes the host places itself; a played one
+  hears all of it.
+- The page: keys and MIDI go to the worklet as they happen and are applied at once, with the
+  machine up to one DMA half buffer ahead of the audio clock (5.29's pace: 0 for Felucca and
+  the stock firmware, 5.8 or 11.6 ms for the firmwares with 256- or 512-frame halves), plus
+  the AudioContext's output (`?latency=interactive`, a few ms on macOS).
+- The firmware itself, its key scan and DMA half, as on the device. Measured headless at
+  240 MHz (fm1-live --bench, FM1_BENCH_KEYS, a MIDI note or a key at a known ms to the first
+  sample off the level before it, so a slow attack counts): Felucca 6.4 / 7.6 ms (MIDI / key),
+  Melodee 7.2 / 7.6, Golana 3.6 / 4.7, Caravel 4.2 / 5.4, MC-1 3.6 / 33.8, FOMAJAM 38 / 40,
+  386DX 46 / 54, CS-1 46 / 63; AMB and DUB hundreds of ms, their pads' attacks.
+
+So the plugin's fixed 1024 frames (23 ms) were the largest single piece under our control.
+It is now a setting, "Lead" in the window and a host parameter (`lead`, non-automatable):
+23 ms as before (the default, so projects play as they did), 12 ms or 6 ms. Changing it sends
+the machine's thread the new lead and tells the host the new latency (`set_latency_samples`
+from `process`). A lead that is too short for the emulation's uneven pace shows as "frames
+late" in the status bar, which is the user's cue to go back up. The machine's thread reads the
+parameter every round (the host's block it is told once); the latency report goes through
+nih-plug's CLAP wrapper, which while processing asks the host for a restart, and clap-wrapper's
+AU side does nothing on that request, so an AU host keeps the old latency for its sequenced
+notes until the plugin is loaded again (VST3 and CLAP hosts take it at once). Shrinking the
+lead while playing also leaves the frames already rendered at the old lead in the ring for one
+old lead's time, during which stamped notes are taken as they come: a hiccup of under 20 ms,
+once per change. With a 128-frame host buffer
+and the 6 ms lead a Felucca note sounds about 20 ms after the key: 9 ms lead and block, 3 ms
+the host's block, 7 ms Felucca's own, plus the driver.
+
+Not done, in the order it would pay:
+- A measured number on the status bar: the lead in ms, plus the host's block, so the user sees
+  what the setting does instead of a name.
+- The page: a note is applied where the machine is, up to a half buffer ahead; stamping it to
+  the frame the audio clock is at would cost that half buffer back, but the machine has
+  already rendered past it. Only a smaller pace (`?ahead=256` exists) helps, at 5.29's cost.
+- The device's own figure for comparison: the probes of [harbor-probes] could time a MIDI note
+  to the DAC on the chip. Without it, the firmware column above is the emulator's word.
 
 ## 6. Phase 5 — Boot & integration
 

@@ -153,17 +153,36 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   - on the SMK-37 the pads, faders and wheels work too.
 - **The status bar** shows the emulation's speed against real time, and counts the frames that
   came late when the computer couldn't keep up.
+- **Lead** is how far ahead of the host the firmware runs beyond one host block, 23, 12 or
+  6 ms. See "Latency" below.
 
 ## How it runs
 
 The firmware makes its audio in DMA halves, and how long a half takes to emulate varies. So the
 machine runs on a thread of its own, a little ahead of the host:
-- **Frames:** it keeps a ring of its 44.1 kHz frames about one host block plus 1024 frames ahead
-  of what the host has taken.
+- **Frames:** it keeps a ring of its 44.1 kHz frames one host block plus the lead (1024, 512
+  or 256 frames) ahead of what the host has taken.
 - **MIDI timing:** host MIDI arrives stamped with the frame it belongs to, and the machine takes
   it when it reaches that frame. A note sounds where the host placed it, and the delay is a
   constant the plugin reports to the host as its latency, so the host compensates for it.
 - **Sample rate:** the output is resampled to the host's rate.
+
+**Latency.** The host makes up the reported latency for notes it places itself: a sequenced
+note lands where it was put. A note played live hears all of it, plus the host's own buffers,
+plus the time the firmware itself takes. At a 512-frame host buffer and the 23 ms lead that is
+about 35 ms (lead and block) + 12 ms (the host's output block) + the firmware's own, 50 ms or
+more. Three things bring it down:
+- the host's buffer size: 128 frames takes the host's share from 24 ms to 6 ms;
+- the lead: 6 ms instead of 23 takes off 17 ms, when the emulation keeps up; "frames late" in
+  the status bar says when it does not, and the lead goes back up. The machine takes a new
+  lead at once; the host is told the new latency through a restart request, which the AU
+  wrapper does not act on, so an AU host (Logic, GarageBand) keeps compensating by the old
+  figure for sequenced notes until the plugin is loaded again. VST3 and CLAP hosts take it
+  at once;
+- the firmware: its own key scan and DMA half buffer, as on the device. Measured in the
+  emulator at 240 MHz, a note to its first sample: Felucca 6–8 ms, Melodee 7 ms, Golana and
+  Caravel 4–5 ms, FOMAJAM 38 ms, CS-1 and 386DX 45–60 ms (their own attack included).
+With a 128-frame buffer and the 6 ms lead a Felucca note sounds about 20 ms after the key.
 
 **A host that takes no audio:** some hosts show the window without processing audio, such as
 Steinberg's test host, or a track that isn't playing. If the host hasn't taken any frames for

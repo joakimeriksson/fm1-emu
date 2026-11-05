@@ -4,7 +4,7 @@
 //! that is the host's "Master" parameter), and a bar to load a firmware package.
 
 use crate::engine::Cmd;
-use crate::{panel, panel_smk, Clock, Fm1Params, Link};
+use crate::{panel, panel_smk, Clock, Fm1Params, Lead, Link};
 use fm1_soc::Board;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, widgets};
@@ -122,16 +122,9 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 bar.add(widgets::ParamSlider::for_param(&params.channel, setter).with_width(90.0));
                 bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Lower it if this computer can't keep up with a heavy firmware (\"frames late\"); raise it if a firmware runs out of time. Changing it restarts the firmware");
                 // a menu in the clocks' order (the parameter's own order keeps v0.2.0's projects)
-                let now = params.clock.value();
-                egui::ComboBox::from_id_salt("clock").width(90.0).selected_text(now.name()).show_ui(bar, |menu| {
-                    for c in Clock::ALL {
-                        if menu.selectable_label(c == now, c.name()).clicked() && c != now {
-                            setter.begin_set_parameter(&params.clock);
-                            setter.set_parameter(&params.clock, c);
-                            setter.end_set_parameter(&params.clock);
-                        }
-                    }
-                });
+                enum_menu(bar, setter, "clock", &params.clock, &Clock::ALL, 90.0, Clock::name);
+                bar.label("Lead").on_hover_text("How far ahead of the host the firmware runs, beyond one host block: a note you play waits this long, plus the host's own buffers, before it sounds. 23 ms is room for any firmware; try less, and go back up if \"frames late\" appear in the status bar. An AU host learns the new latency when the plugin is loaded again");
+                enum_menu(bar, setter, "lead", &params.lead, &Lead::ALL, 70.0, Lead::name);
                 bar.separator();
                 let status = if !ui.msg.is_empty() {
                     ui.msg.clone()
@@ -307,6 +300,23 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
 /// and that window takes no clicks until it closes; without one it opened behind the host. The
 /// answer lands in the returned slot (a path, or None if cancelled).
 type Answer = Arc<std::sync::Mutex<Option<Option<std::path::PathBuf>>>>;
+/// A menu for an enum parameter, in the order given (not the enum's own, which the saved index
+/// keeps), setting it through the host.
+fn enum_menu<T: Enum + PartialEq + Copy + 'static>(
+    bar: &mut egui::Ui, setter: &ParamSetter, salt: &str, param: &EnumParam<T>, order: &[T], width: f32, name: fn(T) -> String,
+) {
+    let now = param.value();
+    egui::ComboBox::from_id_salt(salt).width(width).selected_text(name(now)).show_ui(bar, |menu| {
+        for &v in order {
+            if menu.selectable_label(v == now, name(v)).clicked() && v != now {
+                setter.begin_set_parameter(param);
+                setter.set_parameter(param, v);
+                setter.end_set_parameter(param);
+            }
+        }
+    });
+}
+
 type Job = Arc<std::sync::Mutex<Option<Result<String, String>>>>;
 #[derive(Clone, Copy)]
 enum FileAction { Load, Export }
