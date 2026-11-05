@@ -1295,6 +1295,50 @@ field) are each a few instructions, and the `Cpu` and `Soc` structs grew. A nati
 the two builds side by side is the way to find it; the catalog check (interpreted, every
 firmware) is where it costs time, users run the JIT.
 
+## 5.39 Melodee 1.6.0's resource region: a package that is not the whole install (open, 2026-11-02)
+
+Found filming the 0.4.0 release: the page booted Melodee 1.6.0 (on the Hub since 2026-11-02) to
+**Setup unfinished / Factory sounds missing / Install the update again**, where 1.4.5 boots to its
+PROPHET screen. 1.6.0 moved its factory sounds, the Rubik font and the Bluetooth radio program out of
+the application into a **resource region** of data flash, `0xCB000`-`0xDFFFF` (21 sectors, up to
+the OTA staging; `firmware/src/res.c`), read in place through XIP: a 32-byte header at `0xCB000`
+(magic `MRS1`, payload length, the payload's CRC-32, a header CRC written last as the commit record)
+and the payload from `0xCB020`. The region is **not in the package**: it is a file of its own,
+`melodee-1.6.0-res.bin` (53,876 bytes: the header, then the payload) among the GitHub release's
+assets, which the web installer fetches beside the package and writes through **editor command 82**
+over the editor's connection (`web/fm1res.js`: status `[0]`, begin `[1]` erases the region after
+moving old preset banks out, 256-byte chunks, verify). The Hub serves the package only
+(`fw/melodee-1.6.0-res.bin`: 404). Booted from its package alone, as every package boots here
+(docs/stock-firmware.md), the region is erased and the firmware asks for the update again. Older
+Melodee kept preset banks in that range, which is why the firmware moves them first.
+
+So "boots from its package, byte-identical" is no longer the whole install for every firmware: a
+firmware may need files its installer writes afterwards. Melodee is the first; the SMK-37's USR
+bank (5.34's layout) was the nearest thing before, solved by a bank of our own.
+
+What to do (not done):
+
+1. **fm1-live / fm1-emu:** `--res FILE[@ADDR]` (or a general `--flash-write ADDR FILE`): lay the
+   file into the flash image at `0xCB000` before the boot. Laid verbatim, the file is an installed
+   region (the header first, as `res.c` checks it: magic, length, CRC-32 of what follows).
+2. **The page:** the catalog entry names the resource file and its address (`"res": {"url", "at"}`),
+   fetched as the package is (from the author's release: CORS to check; the Hub does not mirror it)
+   and laid over the flash at boot, kept with the save as the package is. `?flash=` already lays
+   sectors over a try-out's flash, so a sector file made once from the installed region is the
+   quick way for fm1-dock-style try-outs.
+3. **The honest alternative,** the installer's path: feed command 82 with the file through the
+   emulated USB (fm1-live `--usb`, or a `FM1_BENCH_KEYS` `mHEX` script), which also tests Melodee's
+   `res_begin` / write / verify and the preset-bank migration. Worth doing once as a test; too slow
+   for every boot (the write is 256 bytes a round trip).
+4. **The catalog:** the Hub tool marks Bubba Machine "boots to a black screen" from before
+   jamminstein's fix, and the page's list (95) is behind the Hub's (148): refresh it, and when
+   Melodee moves to 1.6.0 there, its entry needs 2.
+
+Not a regression of 0.4.0: the page's catalog still pins `melodee-1.4.5.fwsc`, which runs; the
+1.6.0 package reached that page through `fetchPackage`'s fallback to the Hub's current package,
+taken when the pinned download fails (it failed once that evening, not again). 1.4.5 is the
+film's Melodee.
+
 ## 6. Phase 5 — Boot & integration
 
 - Boot stock firmware to a stable idle/main-loop state.
