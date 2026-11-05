@@ -5,6 +5,7 @@
 // computer (M-VAVE's own: their server does not let other pages fetch it).
 import { fetchPackage } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
+import { tryOutOf, loadTryOut } from "./tryout.js";
 
 const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // The device this page is for: the FM-1 (index.html) or the SMK-37 (smk37/index.html, <html
@@ -29,6 +30,26 @@ for (const f of catalog.firmwares) if (f.hub && !byId.has(f.hub)) byId.set(f.hub
 // firmware this browser starts with on the full page.
 const EMBED = document.documentElement.hasAttribute("data-embed");
 let fw = byId.get(params.get("fw")) || byId.get(stored(DEV.key + "fw")) || byId.get(catalog.default) || catalog.firmwares[0];
+// ?flash= / ?script=: a try-out of that firmware (web/tryout.js), from this site's own files: a session of its
+// own (this browser's saved flash neither loaded nor saved), started at once where the browser lets it play
+let tryOut = null, tryOutError = null;
+try {
+  tryOut = tryOutOf(params, location.href);
+  if (tryOut) Object.assign(tryOut, { fw, files: null, told: null });
+} catch (error) { tryOutError = `try-out: ${error.message}`; }
+// how the try-out goes, to the page that embeds this one when it is on this origin (never elsewhere)
+function tell(state, text = "") {
+  if (typeof window === "undefined" || window.parent === window) return;
+  try { window.parent.postMessage({ source: "fm1-emu", type: "tryout", state, text }, location.origin); } catch { /* not ours */ }
+}
+function endTryOut() {
+  if (!tryOut) return;
+  tryOut = null;
+  const q = new URLSearchParams(location.search);
+  q.delete("flash");
+  q.delete("script");
+  history.replaceState(null, "", `?${q}`);
+}
 let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
@@ -263,12 +284,15 @@ function showFirmware() {
   q.set("fw", fw.id);
   q.set("mhz", mhz);
   history.replaceState(null, "", `?${q}`);
-  document.getElementById("fullpage").href = fw.id === "local" ? "./" : `./?fw=${fw.id}`;
+  const full = new URLSearchParams(fw.id === "local" ? "" : { fw: fw.id });
+  if (tryOut) for (const k of ["flash", "script"]) if (q.has(k)) full.set(k, q.get(k));
+  document.getElementById("fullpage").href = `./${String(full) ? `?${full}` : ""}`;
 }
 showFirmware();
 
 fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
+  endTryOut();
   loadedUrl = null;
   if (!EMBED) store(DEV.key + "fw", fw.id);
   showFirmware();
@@ -765,6 +789,11 @@ function sameSectors(a, b) {
 function saveSnapshot(session, flash, flashRevision) {
   session.flash = flash;
   const sectors = changedSectors(session.base, flash);
+  if (session.ephemeral) {                 // a try-out: kept for an export, never stored
+    session.record = { ...session.record, sectors };
+    if (running === session) saveMessage("A try-out: not saved in this browser (Export a backup keeps it)");
+    return Promise.resolve();
+  }
   session.record = { ...session.record, sectors };
   memoryRecords.set(session.record.hash, session.record);
   if (!session.forceSave && session.revision && sameSectors(session.persistedSectors || [], sectors)) {
@@ -819,23 +848,33 @@ function boot(options = {}) {
   const task = async () => {
     if (seq !== bootSeq) return false;
     const importedBank = bank;
-    let got;
+    let got, trying = null;
     try {
       got = await packageOf(f);
+      if (tryOut && tryOut.fw === f && !options.imported) {
+        tell("loading");
+        try {
+          trying = tryOut.files ||= await loadTryOut(tryOut, fetch);
+        } catch (error) {             // (the firmware boots as it would without the try-out)
+          tell("error", error.message);
+          tryOutError = `try-out: ${error.message}`;
+          endTryOut();
+        }
+      }
       const hash = await packageHash(got.bytes);
-      let record = memoryRecords.get(hash);
-      if (!record) {
+      let record = trying ? null : memoryRecords.get(hash);
+      if (!record && !trying) {
         try { record = await saveStore.load(hash); } catch (error) { saveFailure(error); }
       }
       if (seq !== bootSeq) return false;
       await flushRunning(true);
       // flushRunning may have updated this firmware's most recent snapshot.
-      record = options.imported
+      record = trying ? null : options.imported
         ? { ...options.imported, revision: memoryRecords.get(hash)?.revision || options.imported.revision }
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
-      const sectors = record?.sectors || [];
-      const session = { seq, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const sectors = trying ? trying.sectors : record?.sectors || [];
+      const session = { seq, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
@@ -857,10 +896,12 @@ function boot(options = {}) {
       });
       node.port.postMessage({ type: "boot", seq, wasm: wasm.slice(0), package: got.bytes.slice().buffer,
         sectors: packSectors(sectors).buffer, syx: importedBank ? importedBank.slice().buffer : null,
+        script: trying?.script ? new TextEncoder().encode(trying.script).buffer : null,
         mhz: clock, jit: params.get("jit") !== "0",
         // (?ahead=0: each quantum emulates only for its own frames, as before the even pace)
         ahead: params.has("ahead") ? Number(params.get("ahead")) : undefined });
       status.textContent = `booting ${f.name}…`;
+      if (trying) { tryOut.told = null; tell("booting"); }
       await ready;
       if (bank === importedBank) bank = null; // imports seed flash once; saved edits win on later boots
       return true;
@@ -870,6 +911,7 @@ function boot(options = {}) {
       node?.port.postMessage({ type: "resume" });
       if (seq === bootSeq) status.textContent = error instanceof NeedFile
         ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+      if (trying) tell("error", error.message);
       return false;
     }
   };
@@ -878,8 +920,18 @@ function boot(options = {}) {
 }
 
 // the audio graph: a context with the chosen buffer, the emulator's worklet node in it
-async function startAudio() {
+async function startAudio(auto = false) {
   ac = new AudioContext({ sampleRate: 44100, latencyHint: latency });
+  // (auto: without a click, only where the browser lets this page play: else the context is closed again)
+  if (auto && ac.state !== "running" && !await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), 500);
+    ac.onstatechange = () => { if (ac.state === "running") { clearTimeout(timer); resolve(true); } };
+  })) {
+    ac.onstatechange = null;
+    await ac.close();
+    ac = null;
+    return false;
+  }
   await ac.audioWorklet.addModule("worklet.js");
   node = new AudioWorkletNode(ac, "fm1", { numberOfInputs: 0, outputChannelCount: [2] });
   node.connect(ac.destination);
@@ -888,6 +940,7 @@ async function startAudio() {
   // Boot now waits for a worklet acknowledgement; let its thread run even on browsers
   // that create an AudioContext suspended until the Start gesture is resumed explicitly.
   await ac.resume();
+  return true;
 }
 
 // what the audio thread sends: the screen and LEDs with its timing, boot and error news
@@ -908,7 +961,7 @@ function onWorklet(e) {
   if (m.type === "flash-changed") {
     const session = sessions.get(m.seq);
     if (session) session.observedRevision = m.revision;
-    if (session === running) saveMessage("Saving…");
+    if (session === running && !session.ephemeral) saveMessage("Saving…");
     return;
   }
   if (m.type === "snapshot") {
@@ -941,6 +994,10 @@ function onWorklet(e) {
     return;
   }
   if (m.type !== "frame" || booting || m.seq !== bootSeq) return;
+  if (running?.ephemeral && tryOut?.files && tryOut.told !== m.seq && m.ms >= tryOut.files.end + 500) {
+    tryOut.told = m.seq;                          // (its input script has played: the machine is the visitor's)
+    tell("playing");
+  }
   // Preserve an update not yet drawn when a status-only message arrives.
   if (!m.lcd && frame?.lcd) m.lcd = frame.lcd;
   frame = m;
@@ -948,9 +1005,9 @@ function onWorklet(e) {
   const now = performance.now();
   if (!last || now - last.t > 1000) {
     perf.second(m);
-    status.textContent = m.halted ? `${fw.name}: the emulated CPU halted` :
+    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (m.halted ? `${fw.name}: the emulated CPU halted` :
       `${fw.name} · ${mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
-      `${(m.ms / 1000).toFixed(1)} s`;
+      `${(m.ms / 1000).toFixed(1)} s`);
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
     status.title = [`speed: how much faster than real time the emulator runs this firmware on this device ` +
       `(emulated time per time spent emulating; below 1x the sound breaks up)`,
@@ -961,18 +1018,29 @@ function onWorklet(e) {
   }
 }
 
-startBtn.addEventListener("click", async () => {
+async function start(auto = false) {
   startBtn.disabled = true;
   status.textContent = "starting audio…";
-  if (!node) await startAudio();
+  if (!node && !await startAudio(auto)) {         // (auto: the browser wants a click first)
+    startBtn.disabled = false;
+    status.textContent = "click Start to play the try-out";
+    tell("start");
+    return;
+  }
   const started = await boot();
   if (!started) { startBtn.disabled = false; return; }
   if (midiSel.value) midiOpen();                  // (an input picked on an earlier visit)
   await ac.resume();
   startBtn.hidden = true;
   // a phone on its side: the synth fills the screen, so bring all of it into view
-  if (matchMedia("(orientation: landscape) and (max-height: 560px)").matches) canvas.scrollIntoView({ block: "center" });
-});
+  if (!auto && matchMedia("(orientation: landscape) and (max-height: 560px)").matches) canvas.scrollIntoView({ block: "center" });
+}
+startBtn.addEventListener("click", () => start());
+if (tryOutError) status.textContent = tryOutError;
+else if (tryOut) {
+  saveMessage("A try-out: it starts from the firmware's own flash and is not saved in this browser");
+  start(true);
+}
 
 // Persistence controls use the running machine's identity, even while another firmware is selected.
 const action = fn => async () => { try { await fn(); } catch (error) { saveFailure(error); } };

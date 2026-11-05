@@ -166,6 +166,14 @@ impl SpiFlash {
         }
     }
 
+    /// The chip reset (`Soc::chip_reset`): SPI0 back to off, and the command in progress, if
+    /// chip select was low, abandoned (a page program's bytes are not programmed). The flash
+    /// itself keeps its power, its contents and its write enable.
+    pub fn chip_reset(&mut self) {
+        (self.con, self.buf, self.cs_low, self.cmd, self.nbytes) = (0, 0, false, 0, 0);
+        self.pending_prog.clear();
+    }
+
     /// Has the power been cut (FM1_FLASH_CUT reached)?
     pub fn cut(&self) -> bool { self.cut_at.is_some_and(|c| self.ops >= c) }
 

@@ -6,6 +6,7 @@ and the plugin's (`crates/fm1-plugin/Cargo.toml`, a workspace of its own) are th
 
 - on macOS (Apple silicon): the plugin (AU, VST3, CLAP; Apple's AU validator and Steinberg's VST3
   validator) and fm1-live / fm1-emu;
+- on Windows x86-64: the plugin (VST3, CLAP; Steinberg's VST3 validator), unsigned;
 - on Linux arm64 and x86-64: fm1-live / fm1-emu;
 
 smoke-tests each fm1-live on FM-1 SID's package, plays the whole catalog with the JIT and

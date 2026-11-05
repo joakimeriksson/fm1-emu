@@ -39,111 +39,178 @@ keeps USB, the installers and the rescue.
 
 ## What runs
 
-81 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
+153 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here (its packages, fetched from the Hub; `tools/hub_catalog.mjs` follows its catalog), and a
 few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/). Also FM-1 SID, and
 M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the Hub doesn't list
 are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
 too; `&embed=1` shows only the device and its controls, for a window on another site.)
+A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash
+sectors over the package's fresh flash (records of a 4-byte little-endian offset and the 4096-byte
+sector, as the saves keep them), `&script=PATH` plays an input script from the boot (fm1-live's
+`FM1_BENCH_KEYS`: `ms:mHEX` MIDI into the DIN jack, `ms:id` keys, `ms:eN:clicks` encoders). Both
+come from the page's own origin only, the try-out starts by itself where the browser lets it, and
+it is a session of its own: the browser's saved flash is neither loaded nor overwritten. fm1-dock's
+catalog uses it for its "Try it": a module installed and picked
+([fm1-dock's tools/tryit.py](https://github.com/joakimeriksson/fm1-dock/blob/main/tools/tryit.py)).
 
 <!-- firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
 |---|---|---|
 | [M-VAVE stock firmware](https://joakimeriksson.github.io/fm1-emu/?fw=mvave) | [M-VAVE](https://github.com/joakimeriksson/fm1-emu/blob/master/docs/stock-firmware.md) | The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. Bring your own `FM-1.fwsc`. |
-| [Felucca 1.6.1](https://joakimeriksson.github.io/fm1-emu/?fw=felucca) | [hugelton](https://github.com/hugelton/Felucca) | The original open firmware: a four-operator FM synth with sequencer, arpeggiator and effects. |
+| [Felucca 1.8.2-beta](https://joakimeriksson.github.io/fm1-emu/?fw=felucca) | [hugelton](https://github.com/hugelton/Felucca) | The original open firmware: a four-operator FM synth with sequencer, arpeggiator and effects. |
 | [Felucca [Salt] 0.9-salt14](https://joakimeriksson.github.io/fm1-emu/?fw=felucca-salt) | [ChanceTheMaker](https://github.com/ChanceTheMaker/Felucca) | A Felucca fork with its own sound and editor changes. |
-| [386DX 1.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=386dx) | [seajaysec](https://github.com/seajaysec/386-DX-FM1-KaraokeBot) | A karaoke robot with a band: it sings songs from karaoke and MIDI files, or lines you type, to the notes you play. |
+| [386DX 2.0](https://joakimeriksson.github.io/fm1-emu/?fw=386dx) | [seajaysec](https://github.com/seajaysec/386-DX-FM1-KaraokeBot) | A karaoke robot with a band: it sings songs from karaoke and MIDI files, or lines you type, to the notes you play. |
+| [AISLING 0.4](https://joakimeriksson.github.io/fm1-emu/?fw=aisling) | [CU_STE](https://github.com/stephencummins/fm1-aisling) | A generative Irish ambient instrument: harps in a jig's threes and a flute over a held drone, with surf, wind and rain. |
 | [AMB-1 1.3](https://joakimeriksson.github.io/fm1-emu/?fw=amb) | [charlesvestal](https://github.com/charlesvestal/fm1-amb) | A generative ambient machine inspired by Music for Airports. |
+| [Amenity 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=amenity) | [Presethead](https://github.com/ejtb76/amenity) | A live jungle tool built around the Amen break. |
 | [April OS BETA 1.1](https://joakimeriksson.github.io/fm1-emu/?fw=april) | [beashoko](https://github.com/beashoko/april-os) | A sampler inspired by the Casio SK-1: no synth engines, only samples, recorded through the installer page's microphone bridge. |
-| [BEETLE 1.4.25](https://joakimeriksson.github.io/fm1-emu/?fw=beetle) | [Joppe Sikken (SikkenWorks)](https://github.com/SikkenWorks/BEETLE) | A tracker for the FM-1: patterns written top to bottom, step by step, with note, instrument, chord and effect columns, the way trackers have always worked. |
+| [Arctic Scream 1.3.1](https://joakimeriksson.github.io/fm1-emu/?fw=arctic) | [p0larpatch](https://github.com/PolarPatch/Arctic-scream-FM-1) | Dark ambient drones and feedback screams from the frozen tundra. |
+| [Arcturus S6 1.7](https://joakimeriksson.github.io/fm1-emu/?fw=arcturus) | [Zeptosecond DSP](https://github.com/zeptosecond-dsp/Arcturus-S6) | An experimental, self-playing wavetable instrument for generative, evolving soundscapes. |
+| [B1 5.6](https://joakimeriksson.github.io/fm1-emu/?fw=b1) | [Joppe Sikken (SikkenWorks)](https://github.com/SikkenWorks/B1-Drawbar-Organ) | B1 turns the M-VAVE FM1 into a compact drawbar rock organ with 91 shared tonewheels, nine drawbars per registration, percussion, Leslie, B3/ROCK tones, MIDI and expressive live controls. |
+| [BB1 1.5](https://joakimeriksson.github.io/fm1-emu/?fw=bb1) | [Ole Big Beat / TexasRADIO](https://github.com/TexasRADIO/bb1-firmware) | Two independent drum layers and Dillo, an Open303-derived acid bass, through tape echo and spring reverb: a synthesised 808 and seven sampled machines, 67 songs, 21 eras and 205 ACID phrases. |
+| [BEETLE 1.8.2](https://joakimeriksson.github.io/fm1-emu/?fw=beetle) | [Joppe Sikken (SikkenWorks)](https://github.com/SikkenWorks/BEETLE) | A tracker for the FM-1: patterns written top to bottom, step by step, with note, instrument, chord and effect columns, the way trackers have always worked. |
+| [BEETLE BLUE 1.3](https://joakimeriksson.github.io/fm1-emu/?fw=beetleblue) | [Joppe Sikken (SikkenWorks)](https://github.com/SikkenWorks/BEETLE-BLUE) | BEETLE BLUE turns your M-VAVE FM1 into a six-lane drum tracker. |
+| [Berlinan 0.5.1](https://joakimeriksson.github.io/fm1-emu/?fw=berlinan) | [Jiří Píša](https://github.com/jiripisa/fm1-berlinan) | A generative Berlin School MIDI sequencer: a small ensemble of voices that repeat, phase against each other on loops of unequal length and earn their mutations over time. |
+| [Bigorna 2026.10.31](https://joakimeriksson.github.io/fm1-emu/?fw=bigorna) | [Nuno Zimas](https://github.com/nzimas/bigorna) | Rhythmic noise, power noise, industrial and IDM after the Elektron Digitone II: six tracks, four machines (4-OP, DRUM, WAVY, HIVE), parameter locks on a 16-step sequencer, a looper, send effects and USB audio. |
+| [Blop 1.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=blop) | [Obsimo](https://github.com/OSR-Experiment/OSR-1) | Explore sound with your Blop: one-finger chords from 38 grids, chord rhythms, a bass with its own riffs and a few discreet drums with sidechain, while a little creature swims to your chords in an aquarium on the screen. |
+| [bocjuhn 1.0.0-rc7](https://joakimeriksson.github.io/fm1-emu/?fw=bocjuhn) | [ryuji kanagawa](https://github.com/IanP06/bocjuhn) | An experimental instrument with six tracks and eight sound engines. |
+| [Bubba Machine 0.10.0-beta](https://joakimeriksson.github.io/fm1-emu/?fw=bubba) | [Erbubar23](https://github.com/Erbubar23/bubba-machine) | A six-track groovebox written from scratch: TR drums from Plaits' 808 and 909 models, a sampler with a 16-slice slicer, a bass and three free tracks (analog, 6-op FM, 303 acid), scenes and fills, all at 44.1 kHz. |
 | [Bunker Evolved 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=bunker) | [Kid Bunka](https://github.com/kidbee85-beep/bunker-evolved) | Generative ambient: four editable layers from 64 sound recipes, 24 worlds, 24 motifs and 32 scales. |
 | [Bytemania 1.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=bytemania) | [lloyd (llozd)](https://github.com/llozd/bytemania) | A bytebeat synth: play one-line formulas, tweak them with the knobs, and write your own, with a random button in the formula creator that is really fun. |
-| [Carnac OS 0.9.3](https://joakimeriksson.github.io/fm1-emu/?fw=carnac) | [OrbVorgis](https://github.com/OwenKirby/carnac-os) | A dual-timbral wavetable synth after Carnac's standing stones: 15 morphing wavetable banks, seven voice architectures, a MAQ 16/3-style sequencer for modulated sequences and a chord sequencer for progressions, spring, tomb and tank reverbs. |
-| [Chipbox 1.2.4](https://joakimeriksson.github.io/fm1-emu/?fw=chipbox) | [Pasquale Barilla](https://github.com/pbarilla/chipbox) | A chiptune groovebox with replicas of the NES, Game Boy and Sega Master System sound chips, in three views: RACK for the 16 steps of a page, CHIP to set up each channel, SONG to chain the pages into a song. |
-| [ChoralRoot 0.26.1](https://joakimeriksson.github.io/fm1-emu/?fw=choralroot) | [Quixotic7](https://github.com/Quixotic7/ChoralRootFM1) | A port of the Choral Root synth. |
+| [Caravel 0.11.0](https://joakimeriksson.github.io/fm1-emu/?fw=caravel) | [BonszaiMusic](https://github.com/bonszaimusic/caravel) | Multi-engine synth firmware with DRONE, STASIS texture capture, Pair Morph, and per-track Random Morph and Morph Journey for evolving, ambient and experimental sound design. |
+| [Carnac OS 0.9.6](https://joakimeriksson.github.io/fm1-emu/?fw=carnac) | [OrbVorgis](https://github.com/OwenKirby/carnac-os) | A dual-timbral wavetable synth after Carnac's standing stones: 15 morphing wavetable banks, seven voice architectures, a MAQ 16/3-style sequencer for modulated sequences and a chord sequencer for progressions, spring, tomb and tank reverbs. |
+| [Chipbox 1.4.0-helpfulharold](https://joakimeriksson.github.io/fm1-emu/?fw=chipbox) | [Pasquale Barilla](https://github.com/pbarilla/chipbox) | A chiptune groovebox with replicas of the NES, Game Boy and Sega Master System sound chips, in three views: RACK for the 16 steps of a page, CHIP to set up each channel, SONG to chain the pages into a song. |
+| [ChoralRoot 0.29.2](https://joakimeriksson.github.io/fm1-emu/?fw=choralroot) | [Quixotic7](https://github.com/Quixotic7/ChoralRootFM1) | A port of the Choral Root synth. |
 | [fm1-chord 0.3](https://joakimeriksson.github.io/fm1-emu/?fw=chord) | [math0ne](https://github.com/math0ne/fm1-chord) | A chord machine after the HiChord, with extras: chords in a key under the white keys, slash chords and inversions, sounds, envelopes, effects and a looper. |
-| [Clipper 1.1-experimental](https://joakimeriksson.github.io/fm1-emu/?fw=clipper) | [isod89](https://github.com/isod89/clipper-fm1) | A deep synth grown out of SLOOP: 23 engines and 407 sounds, from HYBRID (three oscillators, two filters, a mod matrix) to six-operator FM, wavetables, wave sequencing, a Juno and physical models; arp, step sequencer, MPE and a web editor for every parameter. |
-| [CoralFlower 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=coralflower) | [FicusFicusov](https://github.com/FicusFicusov/CoralFlower) | Chords after the Orchid, with a UX made for the FM-1: one key turns every note into a chord with a bass, 27 scales, an arpeggiator, a looper, a plate reverb, and a pixel flower that grows as you play. |
+| [CLATTER Pocket 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=clatter) | [allmyfriendsaresynths](https://github.com/clickysteve/clatter-pocket) | A generative drum machine on the LXR sound engine. |
+| [Clipper 1.3.1](https://joakimeriksson.github.io/fm1-emu/?fw=clipper) | [isod89](https://github.com/isod89/clipper-fm1) | A deep synth grown out of SLOOP: 23 engines and 407 sounds, from HYBRID (three oscillators, two filters, a mod matrix) to six-operator FM, wavetables, wave sequencing, a Juno and physical models; arp, step sequencer, MPE and a web editor for every parameter. |
+| [CoralFlower 0.6.1](https://joakimeriksson.github.io/fm1-emu/?fw=coralflower) | [FicusFicusov](https://github.com/FicusFicusov/CoralFlower) | Chords after the Orchid, with a UX made for the FM-1: one key turns every note into a chord with a bass, 27 scales, an arpeggiator, a looper, a plate reverb, and a pixel flower that grows as you play. |
 | [CS-1 2026.10.22](https://joakimeriksson.github.io/fm1-emu/?fw=cs1) | [twochannels](https://github.com/twochannels/CS-1) | A Yamaha CS-80 in spirit: eight voices of two channels, high- and low-pass filters in series, ring modulator, the touch response and 22 tones from the owner's manual. |
 | [CTL-1 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=ctl) | [charlesvestal](https://github.com/charlesvestal/fm1-ctl) | A MIDI controller: the keys play in a scale with its chords on the black keys, four banks of knobs, an arpeggiator and Euclidean drums, with General MIDI sounds of its own. |
 | [Cut-A-Dor 1.2.1](https://joakimeriksson.github.io/fm1-emu/?fw=cutador) | [Kid Bunka](https://github.com/kidbee85-beep/cut-a-dor-release) | A beat dojo for scratch DJs and beatmakers: boom bap, lo-fi and breaks from 16 rhythm families with swing and fills, an eight-lane 32-step sequencer, punch-in effects you record bar by bar, a bass voice. |
-| [Del Rio 0.7](https://joakimeriksson.github.io/fm1-emu/?fw=delrio) | [Jess Del Rio](https://github.com/jsopdebeeck/fm1-delrio) | A rhythm box of ceremony percussion: djembe, cajon, udu, clapsticks, maracas and triangle, their real strokes on the black keys, a step sequencer on the white keys and 31 rhythms from the literature. |
+| [DARK-1 1.0.4](https://joakimeriksson.github.io/fm1-emu/?fw=dark1) | [Polystellarflow](https://github.com/sparky480v/Dark-1) | Dark-music firmware for the FM-1: 21 genres, 210 pieces, from dark techno and cinema to dark ambient, witch house and dungeon synth. |
+| [Daurade 0.1-7e8d7ae](https://joakimeriksson.github.io/fm1-emu/?fw=daurade) | [delirioux](https://github.com/delirioux/daurade) | Generative French house after a certain robotic duo: a filtered loop opening over sixteen bars, a mix that pumps on every kick and a robot voice singing the hook. |
+| [Del Rio 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=delrio) | [Jess Del Rio](https://github.com/jsopdebeeck/fm1-delrio) | A rhythm box of ceremony percussion: djembe, cajon, udu, clapsticks, maracas and triangle, their real strokes on the black keys, a step sequencer on the white keys and 31 rhythms from the literature. |
+| [Demake 0.4.24](https://joakimeriksson.github.io/fm1-emu/?fw=demake) | [Sequencist](https://github.com/InigoHernandez/demake-synth) | An ambient lofi machine on 64 of its author's own pedal recordings: three synths, each with a piano roll, eight patterns, its own reverb, delay or tape echo and motion; huge shared reverbs, colour and old media over the whole mix; a chord machine and an arpeggiator, sixteen scenes, a song mode. |
 | [Dinghy 0.4](https://joakimeriksson.github.io/fm1-emu/?fw=dinghy) | [zvenson](https://github.com/zvenson/dinghy) | Your base for your own FM-1 firmware: everything under it done and documented (updates, USB rescue, USB-MIDI, USB audio, keys, screen, settings), a 4-voice sine on top. |
-| [DRIFT 0.8](https://joakimeriksson.github.io/fm1-emu/?fw=drift) | [FBNFRTG](https://github.com/FBNFRTG/drift-fm1) | An ambient instrument for live sessions: warm synths, spacious pads and delicate plucks over a generative Euclidean sequencer on one track, with delays and reverbs from spring to shimmer. |
-| [DUB-1 1.3.0](https://joakimeriksson.github.io/fm1-emu/?fw=dub) | [sbegueria](https://github.com/sbegueria/fm1-dub) | A generative dub techno machine that plays itself from the moment it is on: chord stabs into a tape echo, FM pings, a sub bass on five grooves, a ducking kick, crackle, and an eight-bar arrangement with breaks and fills. |
-| [DUELL 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=duell) | [OSCILL/R](https://github.com/oscillr/DUELL) | A multimorphing bitimbral synthesizer: two complete parts, three ways to play them together, and a morph that glides between two versions of every sound. |
+| [DRIFT 0.9.6](https://joakimeriksson.github.io/fm1-emu/?fw=drift) | [FBNFRTG](https://github.com/FBNFRTG/drift-fm1) | An ambient instrument for live sessions: warm synths, spacious pads and delicate plucks over a generative Euclidean sequencer on one track, with delays and reverbs from spring to shimmer. |
+| [DUB-1 1.4.3](https://joakimeriksson.github.io/fm1-emu/?fw=dub) | [sbegueria](https://github.com/sbegueria/fm1-dub) | A generative dub techno machine that plays itself from the moment it is on: chord stabs into a tape echo, FM pings, a sub bass on five grooves, a ducking kick, crackle, and an eight-bar arrangement with breaks and fills. |
+| [DUELL 1.1](https://joakimeriksson.github.io/fm1-emu/?fw=duell) | [OSCILL/R](https://github.com/oscillr/DUELL) | A multimorphing bitimbral synthesizer: two complete parts, three ways to play them together, and a morph that glides between two versions of every sound. |
+| [Dungeon Tracker 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=dungeontracker) | [Bourbon Weather](https://github.com/BourbonWX/Dungeon-Tracker) | A four-track groovebox that is a dungeon crawler: your party plays the music, the rogue drums, the fighter bass, the cleric pads and the mage the melody. |
 | [Evander's Music Box 1.5.2](https://joakimeriksson.github.io/fm1-emu/?fw=emb) | [Michail Tsakiroglou](https://github.com/MikeTsak/Evanders-Music-Box--FM-1-LARP-firmware) | A bard's instrument for LARP, medieval and high fantasy: recorder, hurdy-gurdy, harp and a tavern kit on four tracks, encounters and songs for the table. |
-| [ETCH 1.61](https://joakimeriksson.github.io/fm1-emu/?fw=etch) | [SikkenWorks](https://github.com/SikkenWorks/ETCH) | Draw the sound: a waveform drawn and changed with the knobs, morphed into another one, and a third modulating the result. |
+| [ESTAMPIE 0.3.7](https://joakimeriksson.github.io/fm1-emu/?fw=estampie) | [Drew Robinson](https://github.com/ocean/estampie) | A groovebox for lively mediæval dance music: hurdy-gurdy, lutes, shawms and frame drums over drones, four tracks with 64-step sequencers, mediæval modes and temperaments, and velocity from the FM-1's own keys. |
+| [ETCH 1.88](https://joakimeriksson.github.io/fm1-emu/?fw=etch) | [SikkenWorks](https://github.com/SikkenWorks/ETCH) | Draw the sound: a waveform drawn and changed with the knobs, morphed into another one, and a third modulating the result. |
 | [Fart Machine One 1.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=fart) | [adamcharleswilsonmusic-code](https://github.com/adamcharleswilsonmusic-code/Fart-Machine-One) | A questionable musical instrument: eleven artisanal farts, reverb, delay and a sixteen-step sequencer. |
-| [Felucca 8 Patterns 1.6.1_and_sequences](https://joakimeriksson.github.io/fm1-emu/?fw=felucca8) | [echoe](https://github.com/echoe/Felucca_8_patterns) | Felucca 1.5.1 with eight sequences a track to switch between and chain one after another; the user samples are left out to make room. |
+| [Felucca 8 Patterns 1.6.1_and_sequences_2](https://joakimeriksson.github.io/fm1-emu/?fw=felucca8) | [echoe](https://github.com/echoe/Felucca_8_patterns) | Felucca 1.5.1 with eight sequences a track to switch between and chain one after another; the user samples are left out to make room. |
 | [FiMba-1 0.6.1](https://joakimeriksson.github.io/fm1-emu/?fw=fimba) | [jadamsowers](https://github.com/jadamsowers/fm1-fimba) | A physically modelled kalimba (thumb piano), with mbira patterns, tape and grains. |
-| [Flyfish 1.0.1-4e5efb8](https://joakimeriksson.github.io/fm1-emu/?fw=flyfish) | [delirioux](https://github.com/delirioux/flyfish) | One piece on the FM-1: Chopin's Étude Op. |
-| [FM-106 Beta4](https://joakimeriksson.github.io/fm1-emu/?fw=fm106) | [PatttF](https://github.com/PatttF/fm-106) | The Juno-106 emulation of KR-106 ported to the FM-1: six voices on both cores, the BBD stereo chorus, 128 factory presets and a 1980s Roland look. |
-| [fm1-dock 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=fm1dock) | [joakimeriksson](https://github.com/joakimeriksson/fm1-dock) | One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. |
+| [FIZZ 0.12.0-beta.13](https://joakimeriksson.github.io/fm1-emu/?fw=fizz) | [Quixotic7](https://github.com/Quixotic7/FIZZ) | A groovebox around one engine, ChoralRoot's FM TONE: eight tracks, p-locks and preset sound locks, conditions, ratchets, chords, and MIDI FX for generative patterns and for reworking the ones you have. |
+| [Flyfish 1.0.3-777fa1c](https://joakimeriksson.github.io/fm1-emu/?fw=flyfish) | [delirioux](https://github.com/delirioux/flyfish) | One piece on the FM-1: Chopin's Étude Op. |
+| [FM-106 beta7](https://joakimeriksson.github.io/fm1-emu/?fw=fm106) | [PatttF](https://github.com/PatttF/fm-106) | The Juno-106 emulation of KR-106 ported to the FM-1: six voices on both cores, the BBD stereo chorus, 128 factory presets and a 1980s Roland look. |
+| [fm1-dock 0.7.1](https://joakimeriksson.github.io/fm1-emu/?fw=fm1dock) | [joakimeriksson](https://github.com/joakimeriksson/fm1-dock) | One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. |
 | [FM-1 Doom 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=fm1doom) | [zvenson](https://github.com/zvenson/fm1doom) | Doom on the FM-1: one arena from FreeDM, played on the keys and a knob, on the FM-1's screen, with synthesised sound effects and no music. |
-| [FM1-GM 1.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=fm1gm) | [jartificer](https://github.com/jartificer/fm1-gm) | A General MIDI sequencer with 16 tracks, 128 General MIDI instruments to choose from and a drum kit (on track 10). |
+| [FM1-GM 1.1.1](https://joakimeriksson.github.io/fm1-emu/?fw=fm1gm) | [jartificer](https://github.com/jartificer/fm1-gm) | A General MIDI sequencer with 16 tracks, 128 General MIDI instruments to choose from and a drum kit (on track 10). |
+| [FM1-TRAX 0.9.3](https://joakimeriksson.github.io/fm1-emu/?fw=fm1trax) | [jartificer](https://github.com/jartificer/fm1-trax) | A Mega Drive / Genesis music tracker. |
+| [FMDj 2026.10.22](https://joakimeriksson.github.io/fm1-emu/?fw=fmdj) | [DEADACTIVE](https://github.com/DeadActive/FMDj) | Game Boy music programs on the FM-1: LSDj, the tracker, and DMGo!, the drum machine, in a Game Boy emulator on its screen, keys and knobs. |
 | [FMEL-1 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=fmel) | [Antonio Altea](https://github.com/AntonioAltea/fmel-1) | Mellotron-style tape sounds, coloured with effects and lo-fi tape: flutes, strings and choirs as on the old tape frames, played from the keys. |
-| [FMini-1 1.8.0](https://joakimeriksson.github.io/fm1-emu/?fw=fmini) | [Ruppert](https://github.com/ruppert/fmini-1) | A three-oscillator monosynth in the spirit of the classic Moogs: a 24 dB/octave ladder filter, two contours, 100 factory patches, an arpeggiator, a sequencer and MIDI. |
-| [FOMAJAM 0.1.6](https://joakimeriksson.github.io/fm1-emu/?fw=fomajam) | [konsumer](https://github.com/konsumer/fomajam) | A drum machine in the classic step-grid style: voices after the 909, 808, 707, 606, DMX and more, a machine per voice, accents and patterns. |
+| [FMini-1 2.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=fmini) | [Ruppert](https://github.com/ruppert/fmini-1) | A three-oscillator monosynth in the spirit of the classic Moogs: a 24 dB/octave ladder filter, two contours, 100 factory patches, an arpeggiator, a sequencer and MIDI. |
+| [FOMAJAM 0.1.9](https://joakimeriksson.github.io/fm1-emu/?fw=fomajam) | [konsumer](https://github.com/konsumer/fomajam) | A drum machine in the classic step-grid style: voices after the 909, 808, 707, 606, DMX and more, a machine per voice, accents and patterns. |
 | [FoMni 0.4](https://joakimeriksson.github.io/fm1-emu/?fw=fomni) | [charlesvestal](https://github.com/charlesvestal/fm1-fomni) | A chord harp inspired by the Omnichord: hold a chord, strum the keys. |
-| [FRASIL 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=frasil) | [Styves Goupil](https://github.com/styvesgoupil/frasil) | An ambient drone and texture instrument: tap a key to latch a drone, a note or a chord in your key, press to swell it. |
-| [Frodhes 0.9.4](https://joakimeriksson.github.io/fm1-emu/?fw=frodhes) | [Leonardo Mirabal](https://github.com/leonardoMirabal/frodhes) | A Rhodes electric piano, physically modelled, no samples: four piano types, compressor, drive, tremolo or wah, phaser, chorus, delay and reverb, tap tempo, MIDI clock, scales and presets. |
+| [FRASIL 3.0](https://joakimeriksson.github.io/fm1-emu/?fw=frasil) | [Styves Goupil](https://github.com/styvesgoupil/frasil) | An ambient drone and texture instrument: tap a key to latch a drone, a note or a chord in your key, press to swell it. |
+| [Frodhes 0.9.7](https://joakimeriksson.github.io/fm1-emu/?fw=frodhes) | [Leonardo Mirabal](https://github.com/leonardoMirabal/frodhes) | A Rhodes electric piano, physically modelled, no samples: four piano types, compressor, drive, tremolo or wah, phaser, chorus, delay and reverb, tap tempo, MIDI clock, scales and presets. |
 | [FuMi-1 1.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=fumi) | [cartesive](https://github.com/cartesive/fumi-1) | Inspired by the Suiko ST-50 shigin conductor: koto and shakuhachi-style tones. |
-| [Pocket GammaWave 1.0-GW](https://joakimeriksson.github.io/fm1-emu/?fw=gammawave) | [ShadowTune (GammaWave Audio)](https://github.com/fvalente/GammaWave-FM1) | The companion to the GammaWave desktop synth: four industrial distortions, vowel and scream filters, an FFT spectrogram, a four-track tape deck screen and a song generator with 49 genres, trap and drill too. |
-| [GHOULBOX 2.3.2](https://joakimeriksson.github.io/fm1-emu/?fw=ghoulbox) | [jasonpersinger](https://github.com/jasonpersinger/ghoulbox-fm1-dungeon-synth) | Dungeon synth (a Felucca fork): cathedral reverb and dark drones. |
-| [Golana 1.2](https://joakimeriksson.github.io/fm1-emu/?fw=golana) | [Gadlele](https://github.com/Gadlele/Golana) | One analog-style synth laid out like the classic microKORG, with a screen that draws the sound. |
+| [Pocket GammaWave 1.2.1-GW](https://joakimeriksson.github.io/fm1-emu/?fw=gammawave) | [ShadowTune (GammaWave Audio)](https://github.com/fvalente/GammaWave-FM1) | The companion to the GammaWave desktop synth: four industrial distortions, vowel and scream filters, an FFT spectrogram, a four-track tape deck screen and a song generator with 49 genres, trap and drill too. |
+| [GATOR 0.6](https://joakimeriksson.github.io/fm1-emu/?fw=gator) | [ivanvoid](https://github.com/npi3pak/fm1-gator) | A monophonic macro-oscillator on the open Plaits DSP: all 24 models with harmonics, timbre and morph, an 8-slot mod matrix fed by an envelope, two LFOs, velocity, aftertouch and random, a low-pass gate, and a DRONE mode. |
+| [GHOULBOX 2.4](https://joakimeriksson.github.io/fm1-emu/?fw=ghoulbox) | [jasonpersinger](https://github.com/jasonpersinger/ghoulbox-fm1-dungeon-synth) | Dungeon synth (a Felucca fork): cathedral reverb and dark drones. |
+| [Golana 1.3](https://joakimeriksson.github.io/fm1-emu/?fw=golana) | [Gadlele](https://github.com/Gadlele/Golana) | One analog-style synth laid out like the classic microKORG, with a screen that draws the sound. |
 | [Golana DZ Edition 0.1.0-beta](https://joakimeriksson.github.io/fm1-emu/?fw=golanadz) | [dzwerg](https://github.com/dzwerg/Golana-DZ) | Golana's synth with a sequencer for whole songs: 64 steps a pattern, 32 programs (up to 2,048 steps), a SONGMODE that plays from a first to a last program once or on repeat, and USB MIDI out to sequence other synths. |
-| [GR!MM 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=grimm) | [GRiMMBIENT](https://github.com/GRiMMBIENT/grimm) | Dark ambient, dungeon synth and deathdream: four tracks, seven sound sources from VA and 6-op FM to formant voices and physical models, tape, granular freeze and reverbs up to infinite, a 64-step sequencer and song mode. |
+| [GR!MM 2.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=grimm) | [GRiMMBIENT](https://github.com/GRiMMBIENT/grimm) | Dark ambient, dungeon synth and deathdream: four tracks, seven sound sources from VA and 6-op FM to formant voices and physical models, tape, granular freeze and reverbs up to infinite, a 64-step sequencer and song mode. |
+| [GuitChordi 0.1.0-beta.1](https://joakimeriksson.github.io/fm1-emu/?fw=guitchordi) | [Stoogs](https://github.com/stoogs/guitchordi) | A chord and string instrument: 16 synthesized sounds, 50 chord styles, editable voicings, guitar tunings, and Freeplay, Strum and Arp modes with partial-chord pulses. |
+| [hawk-chua 1.7](https://joakimeriksson.github.io/fm1-emu/?fw=hawkchua) | [plieuwski](https://github.com/Plieuw/hawk-chua) | Noise and modeling synth with GM-style presets (4 banks, 512) and a 4-track tape recorder: each voice a live Chua circuit or noise program, through vactrol gates into resonators and piano, drum, voice, flute, brass, bowed, reed and bird waveguides, with temple, cathedral and mosque reverbs. |
 | [HERA 1.1](https://joakimeriksson.github.io/fm1-emu/?fw=hera) | [Ben Badio](https://github.com/benbadio/hera-fm1) | A chord groovebox after the Roland J-6: 100 chord sets, 9 phrase styles with 12 variations each and a 64-pattern step sequencer, on a four-voice Juno-style synth from Clipper with chorus, delay and reverb. |
-| [Hortator 0.23.3](https://joakimeriksson.github.io/fm1-emu/?fw=hortator) | [DeadActive](https://github.com/DeadActive/hortator) | A drum-focused firmware based on Felucca. |
+| [Hortator 1.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=hortator) | [DeadActive](https://github.com/DeadActive/hortator) | A drum-focused firmware based on Felucca. |
+| [Hortator (Bluetooth) 1.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=hortator-bt) | [DEADACTIVE](https://github.com/deadactive/hortator) | Hortator's Bluetooth build: the same eight-track drum machine, plus Bluetooth MIDI for a BLE keyboard or clock, or the M-VAVE SMC-Mixer as a mixer for the eight tracks. |
 | [HYP-1 1.5.54](https://joakimeriksson.github.io/fm1-emu/?fw=hyp1) | [RedtailWorks](https://github.com/RustyPawz/fm1-HYP1) | Hypnotic techno and acid: a breathing pad, a deep drone, a generative 303 line and grain over drums you sequence. |
+| [J6 1.4.0](https://joakimeriksson.github.io/fm1-emu/?fw=j6) | [JackieAlacrity2373](https://github.com/JackieAlacrity2373/fm1-j6) | A six-voice JUNO-60 style polysynth with chorus, arpeggiator and a 16-step recorder. |
+| [Jam Playground 1.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=jam) | [Bob Perry](https://github.com/BunnyOrchard/jam-playground) | Jam Playground plays a new song the moment you turn the FM-1 on. |
 | [Jangada 1.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=jangada) | [zednaked](https://github.com/zednaked/jangada) | Superwave analog voices and a modulation matrix. |
-| [JIANT FM 0.9.9-beta4a-813869d](https://joakimeriksson.github.io/fm1-emu/?fw=jiant) | [juanjiant-bit](https://github.com/juanjiant-bit/JIANT) | A bio-synthetic groovebox: six tracks drawn as living beings, eight engines (FM6 with Dexed, analog, phase, voice), mutating macros and SLOOP's song mode. |
-| [KAWA 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=kawa) | [Omnipotard (Guizmoh)](https://github.com/Guizmoh/Kawa-Tracker-Fm1) | A pocket tracker for any style: six tracks with an engine each (pulse, 4-bit wave, noise, 6-operator FM, drum kit or sample), patterns chained into a song, 32 live effects and tools that write beats for you. |
+| [JIANT FM V10.6c](https://joakimeriksson.github.io/fm1-emu/?fw=jiant) | [juanjiant-bit](https://github.com/juanjiant-bit/JIANT) | A bio-synthetic groovebox: six tracks drawn as living beings, eight engines (FM6 with Dexed, analog, phase, voice), mutating macros and SLOOP's song mode. |
+| [KARMA 3.0.3](https://joakimeriksson.github.io/fm1-emu/?fw=karma) | [Ariel Muchnik](https://github.com/eatyourgreensstudio-dotcom/karma-fm1) | A four-track groovebox: an acid bass or a Juno-style poly, physical modelling, two dozen synthesis models and a drum synth. |
 | [Ketch 0.1-beta](https://joakimeriksson.github.io/fm1-emu/?fw=ketch) | [risseraka](https://github.com/risseraka/fm1-tracker-ketch) | A tracker in the LSDJ / picoTracker / M8 line: song, chain and phrase screens, instruments, effects and a mixer, on the FM-1's own keys and screen. |
-| [LOOM-8 0.7](https://joakimeriksson.github.io/fm1-emu/?fw=loom) | [Charles Vestal](https://github.com/charlesvestal/fm1-loom) | A groovebox inspired by the OP-XY: eight tracks on nine engines, step tricks and locks, weave, a conductor and throws. |
+| [Kitten Synths 2.8-kitten.8](https://joakimeriksson.github.io/fm1-emu/?fw=kitten) | [Black Kitten Devices](https://github.com/BlackKittenDevices/Kitten-Synths) | NEW: two drum tracks. |
+| [Kitten Rack 1.3.0](https://joakimeriksson.github.io/fm1-emu/?fw=kittenrack) | [Black Kitten Devices](https://github.com/BlackKittenDevices/kitten-rack) | A Eurorack-style modular synth: over 50 modules (VCOs, a Moog-style ladder, a low pass gate, Turing, Marbles, chaos, effects) patched with cables on the FM-1 itself, a 64-step sequencer with live recording, 33 factory patches, visuals, USB audio and MIDI. |
+| [K-WASUB 1.0.52](https://joakimeriksson.github.io/fm1-emu/?fw=kwasub) | [Omnipotard (Guizmoh)](https://github.com/Guizmoh/K-WASUB_Firmware_for_FM1) | K-WA SUB is a powerful bass synthesizer for the M-VAVE FM-1, featuring 9 synthesis engines with 2 engines playable simultaneously and morphing capabilities. |
+| [LOOM-8 0.12.1](https://joakimeriksson.github.io/fm1-emu/?fw=loom) | [Charles Vestal](https://github.com/charlesvestal/fm1-loom) | A groovebox inspired by the OP-XY: eight tracks on nine engines, step tricks and locks, weave, a conductor and throws. |
+| [Loom FM-1 0.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=loomfm1) | [Co-oscillator](https://github.com/Co-oscillator/Loom-FM-1) | Four synth and sampler tracks and a drum track on 14 engines, among them wavetable, 6-op FM, tape scrub, granular and a slicer; a 64-step sequencer, a chord progression generator, macros and sidechain ducking. |
+| [LUXR 2026.10.25](https://joakimeriksson.github.io/fm1-emu/?fw=luxr) | [HOLODECK AUDIOTOOLS](https://github.com/orbitator/LUXR) | An LXR-style drum machine: eight sounds, each a synth and a sample layer, with drive, delay, reverb, filter, compressor and limiter. |
+| [Makohai 1.3](https://joakimeriksson.github.io/fm1-emu/?fw=makohai) | [delirioux](https://github.com/delirioux/makohai) | A generative groovebox in the style of early-90s PC tracker music: six lanes (lead, arp, pad, bass, drums, sfx) composed live in ten S3M-scene styles. |
 | [MAKU 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=maku) | [okumurari](https://github.com/okumurari2/maku) | An ambience machine for DJ interludes: switch it on and a random world in key plays, four parts, buttons that are verbs, and the worlds you like breed new ones. |
+| [Matryoshka 1.9.1](https://joakimeriksson.github.io/fm1-emu/?fw=matryoshka) | [glvno](https://github.com/glvno/matryoshka) | A modular synth you patch in the browser: modules (oscillators, filters, envelopes, delays) nest into assemblies you save and reuse, and the patch plays on the FM-1, polyphonic with a Voicing module. |
 | [MC-1 1.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=mc1) | [dspaudio](https://github.com/dspaudio/mc-1) | An original four-part groovebox with a 1990s workflow: three melodic parts and a 16-lane drum part, 128 melodic presets, eight drum kits, song arrangement, an arpeggiator and recorded knob moves. |
-| [Melodee 1.4.5](https://joakimeriksson.github.io/fm1-emu/?fw=melodee) | [keremimo](https://github.com/keremimo/melodee) | Total playing pleasure, far beyond Felucca: recording without quantize, microtonal scales, a Casio CZ-1, a bit-by-bit Dexed, scale modes made for an MPC Sample as its companion. |
+| [Melodee 1.6.1](https://joakimeriksson.github.io/fm1-emu/?fw=melodee) | [keremimo](https://github.com/keremimo/melodee) | Total playing pleasure, far beyond Felucca: recording without quantize, microtonal scales, a Casio CZ-1, a bit-by-bit Dexed, scale modes made for an MPC Sample as its companion. |
+| [MIDIMON 0.4](https://joakimeriksson.github.io/fm1-emu/?fw=midimon) | [ignis32](https://github.com/ignis32/midimonitor_fm1) | A MIDI monitor for USB, the TRS jack and Bluetooth (as device and host at once): hex or words, filters, stats. |
 | [MIN-1 0.2.1](https://joakimeriksson.github.io/fm1-emu/?fw=min1) | [Reytian](https://github.com/Reytian/fm1-min1) | A tiny minimalist ensemble after Philip Glass: it starts playing when you switch on, you join whenever you like. |
-| [Mini-Tone 1.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=minitone) | [Stéphane Schmitz](https://github.com/eldontyrellcorp/Mini-Tone) | Felucca with six tracks and new engines: SID, Braids' 48 models, a TB-303 and engines after Elektron's Analog Four, SY Chip and Digitone 2, a ping-pong delay and a new reverb. |
+| [Mini-Tone 1.0.5](https://joakimeriksson.github.io/fm1-emu/?fw=minitone) | [Stéphane Schmitz](https://github.com/eldontyrellcorp/Mini-Tone) | Felucca with six tracks and new engines: SID, Braids' 48 models, a TB-303 and engines after Elektron's Analog Four, SY Chip and Digitone 2, a ping-pong delay and a new reverb. |
+| [MNM-1 1.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=mnm1) | [Veff](https://github.com/galfaroth/mnm1) | Six monophonic tracks of synth and FX machines, pages of eight knobs, a filter and a tape delay on every track, three LFOs a track, parameter locks and slides. |
 | [MODELAR 0.3](https://joakimeriksson.github.io/fm1-emu/?fw=modelar) | [Hirakos](https://github.com/hirakos999/MODELAR) | A semi-modular drone synth played like a Kaoss Pad: four oscillators modulating each other through eight routings, and keys that move a cursor on an XY pad instead of playing notes: white keys are points, black keys gestures. |
 | [MONK-1 0.9.1](https://joakimeriksson.github.io/fm1-emu/?fw=monk) | [Charles Vestal](https://github.com/charlesvestal/fm1-monk) | Twelve singers, from Jerry the monk to Snider the punk, each in its own voice: MonkSynth's formant voices, played with velocity and pressure from the FM-1's own keys. |
+| [MONO2K 1.7](https://joakimeriksson.github.io/fm1-emu/?fw=mono2k) | [Iñigo Hernandez](https://github.com/InigoHernandez/mono2k) | Six mono machines in the spirit of Elektron's Monomachine: FM, superwaves, wavetables, a SID, a voice and four drum synths, one per track. |
+| [Monohull 0.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=monohull) | [Mark White](https://github.com/markterm/monohull) | A monosynth: one voice with analogue-modelled oscillators and five filters (ladder, diode ladder, OTA, Sallen-Key, state-variable), unison, chorus, delay and reverb, and 14 presets. |
+| [MOPE-1 0.3.0](https://joakimeriksson.github.io/fm1-emu/?fw=mope1) | [slothpallas](https://github.com/slothpallas/mope-1) | A sad wavetable synth played by a pixel blob in a rainy room: its eyes are the filter, its mouth the envelope, its tears the delay. |
 | [MORPHEUS 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=morpheus) | [Ben Badio](https://github.com/benbadio/morpheus-fm1) | A pattern sequencer after Reason's Matrix: up to four channels of MIDI sequence data out, and a few voices built in to build the patterns with. |
-| [Mutable Dreams 1.0](https://joakimeriksson.github.io/fm1-emu/?fw=mutable) | [Kid Bunka](https://github.com/kidbee85-beep/mutable-dreams) | A generative instrument after a small modular setup: six interchangeable tracks on eight engines (selected Plaits algorithms, Rings' modal resonator, a Choir of its own), 64 Biomes, Euclidean rhythms with probability, four macros and a granular bus. |
+| [Mutable Dreams 1.4](https://joakimeriksson.github.io/fm1-emu/?fw=mutable) | [Kid Bunka](https://github.com/kidbee85-beep/mutable-dreams) | A generative instrument after a small modular setup: six interchangeable tracks on eight engines (selected Plaits algorithms, Rings' modal resonator, a Choir of its own), 64 Biomes, Euclidean rhythms with probability, four macros and a granular bus. |
 | [MYCELIUM 1.0-test](https://joakimeriksson.github.io/fm1-emu/?fw=mycelium) | [Mandalars](https://github.com/megagott/mycelium-fm1) | Forest, Psytrance, Goa and Hitech grooves, built on Felucca and SLOOP: original drums and icons and four factory songs. |
-| [Niagara Drift 0.2](https://joakimeriksson.github.io/fm1-emu/?fw=niagara) | [evanyerburgh](https://github.com/evanyerburgh/niagara-drift) | A drone synth: two drifting virtual-analog drones, each with its own part, swells, LFOs, effects and a sequencer. |
-| [No Man Sky FM 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=nmsfm) | [Hericdk](https://github.com/hericdk/nomanskyFM) | A space adventure while you make music, built on SLOOP 2.7.1: fly between planets with two knobs, land, mine, fight sentinels and warp between stars, every SLOOP screen floating over the game. |
+| [NACHTFAHRT 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=nachtfahrt) | [Cranky Man](https://github.com/FartyPants/fm1-nachtfahrt) | Generative 1970s Berlin School: two sequencers drift against each other over a drone, in eight endless pieces. |
+| [Nauclerus 0.25.0](https://joakimeriksson.github.io/fm1-emu/?fw=nauclerus) | [Mr. Roboto](https://github.com/Mr-Roboto/nauclerus) | Hortator's eight-track groovebox taken further: ORB Remix with 256 pattern mappings, the TB-3PO acid melody generator with 22 scales, more acid waveshaping, four bipolar LFOs and Grids rhythms copied into editable steps. |
+| [Niagara Drift 0.2.1](https://joakimeriksson.github.io/fm1-emu/?fw=niagara) | [evanyerburgh](https://github.com/evanyerburgh/niagara-drift) | A drone synth: two drifting virtual-analog drones, each with its own part, swells, LFOs, effects and a sequencer. |
+| [No Man Sky FM 0.9](https://joakimeriksson.github.io/fm1-emu/?fw=nmsfm) | [Hericdk](https://github.com/hericdk/nomanskyFM) | A space adventure while you make music, built on SLOOP 2.7.1: fly between planets with two knobs, land, mine, fight sentinels and warp between stars, every SLOOP screen floating over the game. |
 | [NOIZ DEMONS 666](https://joakimeriksson.github.io/fm1-emu/?fw=noizdemons) | [SPIKE the Percussionist](https://github.com/SPIKE-the-Percussionist/noiz_demons) | Felucca with randomization as a ritual: every new sound summons one of 30 demons of the Ars Goetia, its sigil takes the screen and its rank decides how wild the sound gets. |
-| [OberVave 3.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=obervave) | [zvenson](https://github.com/zvenson/obervave) | An 8-voice analog-style poly in the spirit of the classic American polys of 1979-84: two oscillators a voice, sync, cross-mod, a 12 / 24 dB filter with a SEM-style morph, an arpeggiator with hold, chorus, ping-pong delay and a plate reverb. |
+| [OberVave 3.3.2](https://joakimeriksson.github.io/fm1-emu/?fw=obervave) | [zvenson](https://github.com/zvenson/obervave) | An 8-voice analog-style poly in the spirit of the classic American polys of 1979-84: two oscillators a voice, sync, cross-mod, a 12 / 24 dB filter with a SEM-style morph, an arpeggiator with hold, chorus, ping-pong delay and a plate reverb. |
 | [OPN-1 2.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=opn1) | [putchdev](https://github.com/putchdev/opn-1) | The Sega Genesis / Mega Drive's Yamaha YM2612: six channels of 4-operator FM. |
-| [ORBIT 0.7.1](https://joakimeriksson.github.io/fm1-emu/?fw=orbit) | [dspaudio](https://github.com/dspaudio/orbit) | A four-track groovebox based on SLOOP: three synth parts and a drum machine, an event tape to rearrange them, OP-1-inspired screens. |
+| [ORBIT 1.0.1B](https://joakimeriksson.github.io/fm1-emu/?fw=orbit) | [dspaudio](https://github.com/dspaudio/orbit) | A four-track groovebox based on SLOOP: three synth parts and a drum machine, an event tape to rearrange them, OP-1-inspired screens. |
+| [Penumbra 1.1](https://joakimeriksson.github.io/fm1-emu/?fw=penumbra) | [Lunar Eclipse Forge](https://github.com/MadMooneyham/Penumbra) | A cinematic space drone you travel through, not one that plays itself. |
+| [PERF-1 0.16.1](https://joakimeriksson.github.io/fm1-emu/?fw=perf1) | [deamonSLINKY](https://github.com/deamonSLINKY/PERF-1) | A generative groovebox you perform on: ten genres of self-playing pieces, an auto-DJ with breakdowns, builds and drops, Euclidean drums, an acid line that answers itself, beat FX and DX7-style FM voices from your own .syx. |
 | [PIGEON 0.5.0-beta.1](https://joakimeriksson.github.io/fm1-emu/?fw=pigeon) | [The Shrimp Blimp](https://github.com/TheShrimpBlimp/pigeon) | An old-school hip-hop and house sampler after the SP-404 and the PO-33: two song samples and a 16-pad kit, up to 32 chops a song, a 64-step sequencer, patterns and a song arrangement. |
-| [Polly 0.5](https://joakimeriksson.github.io/fm1-emu/?fw=polly) | [charlesvestal](https://github.com/charlesvestal/fm1-polly) | A pocket arranger after the Yamaha QY70: pick a style, play a chord and a band of eight follows, with General MIDI sounds. |
+| [Polly 0.6](https://joakimeriksson.github.io/fm1-emu/?fw=polly) | [charlesvestal](https://github.com/charlesvestal/fm1-polly) | A pocket arranger after the Yamaha QY70: pick a style, play a chord and a band of eight follows, with General MIDI sounds. |
+| [PT/FM 0.26](https://joakimeriksson.github.io/fm1-emu/?fw=ptfm) | [hitosu](https://github.com/hitosu/ptfm) | A ProTracker-style pocket studio: DX7 FM, JUNO-106, TB-303, chip, sampler and FUSION instruments side by side, 16 voices on both cores, a loop station, a two-deck DJ mode, punch-in effects and over 500 built-in instruments. |
+| [PULHRA 1.5.1](https://joakimeriksson.github.io/fm1-emu/?fw=pulhra) | [646timur-cell](https://github.com/646timur-cell/pulhra_main) | A minimal Elektron-style groovebox: four tracks, patterns in banks A to E, parameter locks, trig conditions, chains, an arpeggiator per track and per-pattern kits on the MONOFM sound core. |
 | [PurpleMonkey 0.11](https://joakimeriksson.github.io/fm1-emu/?fw=purplemonkey) | [Quixotic7](https://github.com/Quixotic7/PurpleMonkeyFM1) | A firmware for kids. |
-| [FM1 Quest 38](https://joakimeriksson.github.io/fm1-emu/?fw=quest) | [hericdk](https://github.com/hericdk/fm1-quest) | A live RPG adventure inside the synth. |
+| [FM1 Quest 42](https://joakimeriksson.github.io/fm1-emu/?fw=quest) | [hericdk](https://github.com/hericdk/fm1-quest) | A live RPG adventure inside the synth. |
 | [Rainbow Mode 1.1.5-rb](https://joakimeriksson.github.io/fm1-emu/?fw=rainbow) | [joshbartlettband-web](https://github.com/joshbartlettband-web/felucca-rainbow) | A music toy for little hands (a Felucca fork). |
+| [Ravel 1.12.0](https://joakimeriksson.github.io/fm1-emu/?fw=ravel) | [De-Pattern](https://github.com/De-Pattern/Ravel_FM1) | An eight-track groovebox for sound design: thirteen synth engines, struck percussion and 33 drum machines after the Machinedrum, on an influence grid where any track can trigger, excite or modulate any other. |
+| [RUPTURE 1.67](https://joakimeriksson.github.io/fm1-emu/?fw=rupture) | [Joppe Sikken (SikkenWorks)](https://github.com/SikkenWorks/RUPTURE) | A monophonic bass synth on Cycle Exchange Synthesis: two sub-oscillators, a ladder filter, Channel EQ, eight effects from MOSFET drive to octave fuzz, a step sequencer up to 128 steps and an arpeggiator. |
+| [S1Vave 1.12](https://joakimeriksson.github.io/fm1-emu/?fw=s1vave) | [Andrew GG](https://github.com/AndrewGG88/S1Vave) | An 8-voice virtual analog tweak synth: authentic 4-pole resonant filter, dual sub-oscillator, ADSR envelopes, 64-step sequencer, and hands-on live performance controls. |
+| [Scintilla 0.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=scintilla) | [Joakim Eriksson](https://github.com/joakimeriksson/scintilla-fm1) | The 1981 Elka Synthex on the FM-1: all 80 factory sounds, Paul Wiffen's laser harp among them, checked sample by sample against the original. |
 | [Shine On 3.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=shineon) | [zvenson](https://github.com/zvenson/shineon) | A string ensemble in the spirit of the late-70s machines, grown out of OberVave: divide-down keyers with 16', 8' and 4' footages, register filters, a three-tap BBD ensemble and a phaser, on two tracks with the sequencer. |
 | [FM-1 SID 0.3](https://joakimeriksson.github.io/fm1-emu/?fw=sid) | [joakimeriksson](https://github.com/joakimeriksson/fm1-sid) | A SID chip on the FM-1, its own firmware on fm1-dock (fm1-dock's USB, installer and rescue; the sine as the fallback): a C64 tune player (reSID 0.16 and a 6510 running the tune's own code, PSID and RSID) starting with GoatTracker 2's example songs, Dojo first; a GoatTracker editor; and a synth: the keys play 12 instruments, KNOB1-4 are cutoff, resonance, attack, release; FX opens chorus, delay and reverb. |
 | [SID-1 1.0.0](https://joakimeriksson.github.io/fm1-emu/?fw=sid1) | [putchdev](https://github.com/putchdev/sid-1) | The Commodore 64's SID chip, twice for six voices. |
-| [SIDOU 0.3.1](https://joakimeriksson.github.io/fm1-emu/?fw=sidou) | [Denis Sablić](https://github.com/dsablic/sidou) | Turns the FM-1 into a C64 SID machine: two SIDs (6581 and 8580) with the chip's character dialled in, a GoatTracker 2 compatible tracker and step sequencer, and a live instrument to play over a song. |
-| [Skiff 1.4](https://joakimeriksson.github.io/fm1-emu/?fw=skiff) | [illuminus5](https://github.com/illuminus5/skiff) | A six-track groovebox built on Felucca 1.1.5: fourteen synth and drum engines, a 64-step sequencer with chords, ratchets and locks, songs and a performance layer. |
-| [SLOOP 2.8.1](https://joakimeriksson.github.io/fm1-emu/?fw=sloop) | [isod89](https://github.com/isod89/sloop-fm1) | A live groovebox: four looping tracks. |
+| [SiDJ 1.3.0](https://joakimeriksson.github.io/fm1-emu/?fw=sidj) | [thomasj (tubesockor)](https://github.com/thomasj/fm1-sidj) | Plays C64 SID music from HVSC on an emulated 6581 or 8580 and lets you remix every voice live: transpose, mute, solo, swap waveforms, bend envelopes and filter, add LFOs, ride the tempo. |
+| [SIDOU 1.6.0](https://joakimeriksson.github.io/fm1-emu/?fw=sidou) | [Denis Sablić](https://github.com/dsablic/sidou) | Turns the FM-1 into a C64 SID machine: two SIDs (6581 and 8580) with the chip's character dialled in, a GoatTracker 2 compatible tracker and step sequencer, and a live instrument to play over a song. |
+| [Sill 1.0-8b94d39](https://joakimeriksson.github.io/fm1-emu/?fw=sill) | [delirioux](https://github.com/delirioux/sill) | Generative 90s eurodance, pickled in 1995: a song in intro, verse, pre-chorus, chorus and break, with lift, pump, vox and energy on the knobs, the hook, the groove and a key change up for the last chorus. |
+| [Skiff 2.2](https://joakimeriksson.github.io/fm1-emu/?fw=skiff) | [illuminus5](https://github.com/illuminus5/skiff) | A six-track groovebox built on Felucca 1.1.5: fourteen synth and drum engines, a 64-step sequencer with chords, ratchets and locks, songs and a performance layer. |
+| [SLOOP 2.8.5](https://joakimeriksson.github.io/fm1-emu/?fw=sloop) | [isod89](https://github.com/isod89/sloop-fm1) | A live groovebox: four looping tracks. |
 | [SLOOP ALG ALG05-TEST](https://joakimeriksson.github.io/fm1-emu/?fw=sloop-alg) | [shaw-core](https://github.com/shaw-core/Sloop_ALG02) | A SLOOP test build with extra FM algorithms. |
 | [SLOOP DX7 Banks 2.5-b28-test](https://joakimeriksson.github.io/fm1-emu/?fw=sloop-banks) | [majnikool](https://github.com/majnikool/sloop-fm1) | SLOOP with up to twelve DX7 voice banks and presets grouped by kind. |
 | [SLOOP Floyd FM 2.4](https://joakimeriksson.github.io/fm1-emu/?fw=sloop-floyd) | [renebohne](https://github.com/renebohne/sloop-fm1) | SLOOP with a four-operator FM engine after Floyd Steinberg's 4-OP idea: an envelope per operator and a live oscilloscope that draws the envelopes as you play. |
-| [sloopDX 4.0](https://joakimeriksson.github.io/fm1-emu/?fw=sloopdx) | [zvenson](https://github.com/zvenson/dxsloop) | SLOOP's live workflow with a six-operator DX7 engine from Dexed: 32 algorithms, your own .syx banks, every voice edited on the FM-1, and FM drums. |
-| [Tessera 2.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=tessera) | [Theo Dainis (Rastapopolix)](https://github.com/Rastapopolix/tessera) | Generative music on four tracks: each plays its own steps, an arpeggio or one of 13 generators (Turing, Euclid, Markov, Constellation, Chord and more), and the tracks evolve, follow and modulate each other. |
-| [Tonitor 2026.10.23](https://joakimeriksson.github.io/fm1-emu/?fw=tonitor) | [Nuno Zimas](https://github.com/nzimas/tonitor) | Six tracks for live ambient and experimental music: three synth engines, patches generated by algorithm, free-length loops with up to ten overdubs each, a granulator, filters and a lush reverb. |
+| [sloopDX 4.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=sloopdx) | [zvenson](https://github.com/zvenson/dxsloop) | SLOOP's live workflow with a six-operator DX7 engine from Dexed: 32 algorithms, your own .syx banks, every voice edited on the FM-1, and FM drums. |
+| [Smileyface 1.0.6](https://joakimeriksson.github.io/fm1-emu/?fw=smileyface) | [pbarilla](https://github.com/pbarilla/smileyface) | You're making acid, baby! Smash that LFO button until you hear something you like, and then twist those knobs! Now with 100% more FX! A truly trippy experience! Built on Chipbox. |
+| [SPAMPY 949](https://joakimeriksson.github.io/fm1-emu/?fw=spampy) | [Spampy-Droid](https://github.com/Spampy-Droid/SPAMPY-0.0-r949) | SLOOP in synthwave colours: 16 sound engines (OberVave's among them), 170 synth presets, 44 drum kits, scenes, effects, loudness per sound – and two arcade games built in, Neon Pang and Neon Bubbles. |
+| [SPELLBOX 0.3](https://joakimeriksson.github.io/fm1-emu/?fw=spellbox) | [Philippe Jaccoud](https://github.com/pjac1810/spellbox) | SPELLBOX turns the FM-1 into a talking spelling toy after the 1978 Speak & Spell: an 8-character fluorescent display, a 10-pole LPC voice at 8 kHz through an 8-bit DAC, and the SPELL, LETTER, SAY IT, SECRET CODE and MYSTERY WORD games over four levels, with the keys as an A-to-Z keyboard. |
+| [TastyWaves 1.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=tastywaves) | [marksweiss](https://github.com/marksweiss/tastywaves) | A 12-voice wavetable synth: two oscillators a voice, a resonant filter, two envelopes, an LFO, four effects, an arpeggiator and two step sequencers for chords and counterpoint; load your own Serum, WaveEdit, Ableton or Surge tables. |
+| [Tessera 3.2.2](https://joakimeriksson.github.io/fm1-emu/?fw=tessera) | [Theo Dainis (Rastapopolix)](https://github.com/Rastapopolix/tessera) | Generative music on four tracks: each plays its own steps, an arpeggio or one of 13 generators (Turing, Euclid, Markov, Constellation, Chord and more), and the tracks evolve, follow and modulate each other. |
+| [Tonitor 2026.11.03](https://joakimeriksson.github.io/fm1-emu/?fw=tonitor) | [Nuno Zimas](https://github.com/nzimas/tonitor) | Six tracks for live ambient and experimental music: three synth engines, patches generated by algorithm, free-length loops with up to ten overdubs each, a granulator, filters and a lush reverb. |
 | [TRIBE 0.3-beta](https://joakimeriksson.github.io/fm1-emu/?fw=tribe) | [apiel](https://github.com/apiel/fm1-tribe) | A ten-track groovebox built on X0X where any engine plays on any track: kicks, 909 and 808 voices, a 303, sixteen clips a track and scatter effects. |
-| [Tuna 1.0-fbc56d3](https://joakimeriksson.github.io/fm1-emu/?fw=tuna) | [delirioux](https://github.com/delirioux/tuna) | Generative music built on Felucca: composer profiles write the music as it plays, you steer them. |
+| [Tuna 1.0-73bd65f](https://joakimeriksson.github.io/fm1-emu/?fw=tuna) | [delirioux](https://github.com/delirioux/tuna) | Generative music built on Felucca: composer profiles write the music as it plays, you steer them. |
 | [Unholy Union 0.2.3](https://joakimeriksson.github.io/fm1-emu/?fw=unholy) | [actuallysparky](https://github.com/actuallysparky/FM-1-Unholy-Union-generative-drone-firmware) | Generative ambient and drone: Immaculate Permutation rolls an arrangement in one key, a pad, a sequence and a chord arpeggio under a fourth voice for your hands. |
 | [Vector37 0.3.2](https://joakimeriksson.github.io/fm1-emu/?fw=vector37) | [genkigenki](https://github.com/genkigenki/Vector37) | An orbiting overtone synth: four corners of two overtone generators each, a sun on a path and a moon around it decide how much of each you hear; the knobs shape the selected planet. |
+| [VESPER 2.0.1](https://joakimeriksson.github.io/fm1-emu/?fw=vesper) | [Fat Cat Studios](https://github.com/fatcatstudios-hub/vesper-fm1) | An ambient worship synth. |
+| [Wanderer 0.9.0-wip](https://joakimeriksson.github.io/fm1-emu/?fw=wanderer) | [Nicholas James / Low Vision Music](https://github.com/spinnicholas/lvm-wanderer-fm1) | Wanderer 1.4: author-tested synth for low-vision musicians. |
 | [WaveLoop FM-1 1.0.5.2-midi23](https://joakimeriksson.github.io/fm1-emu/?fw=waveloop) | [ELI7VH](https://github.com/ELI7VH/Felucca) | A Felucca mod: standalone Arturia MiniLab 3 control, fine track mixing, a DJ filter, momentary effects and MIDI feedback. |
 | [winampFM Synth 0.12](https://joakimeriksson.github.io/fm1-emu/?fw=winampfm) | [hericdk](https://github.com/hericdk/winampFM) | Winamp 2.x on the FM-1, built on SLOOP: your sounds as a playlist, four tracks recorded as loops, effects on sliders and a visualizer of lines. |
-| [X0X 1.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=x0x) | [charlesvestal](https://github.com/charlesvestal/fm1-x0x) | A groovebox: 909, 808, two 303s and a break player. |
+| [X0X 1.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=x0x) | [charlesvestal](https://github.com/charlesvestal/fm1-x0x) | A groovebox: 909, 808, two 303s and a break player. |
 | [X0X-RMX 1.1.0](https://joakimeriksson.github.io/fm1-emu/?fw=x0xrmx) | [Mr-Roboto (Oliver)](https://github.com/Mr-Roboto/fm1-x0x-rmx) | X0X remixed after The Orb: banks and patterns reordered live per voice, Grids MAP and EUCLID drum generation, an extended TB-3PO with 22 scales and a morphing 303 waveform. |
+| [XMOD 1.2.0](https://joakimeriksson.github.io/fm1-emu/?fw=xmod) | [Kot Morderca](https://github.com/KotMorderca/XMOD) | A MOD / XM tracker, sampler and groovebox: play, write and save FastTracker 2 and ProTracker songs on the FM-1, up to 32 channels, with a ProTracker mode for MODs and a song manager in the browser for moving songs to and from the computer. |
 | [ZEN-1 1.2](https://joakimeriksson.github.io/fm1-emu/?fw=zen) | [aceyprime](https://github.com/aceyprime/zen-1) | Ambient as a living window: cherry petals on a river, koi in a pond, fireflies under a real moon, and every movement a note. |
 | [zp12 2.5](https://joakimeriksson.github.io/fm1-emu/?fw=zp12) | [zvenson](https://github.com/zvenson/zp12) | A 12-bit sampling drum machine after the E-mu SP-1200: 32 pads at 26 kHz with no interpolation, filtered channels on the knobs, loops and songs. |
 <!-- /firmwares -->
@@ -165,8 +232,9 @@ identity says which board it runs on.
 **Play it: [joakimeriksson.github.io/fm1-emu/smk37](https://joakimeriksson.github.io/fm1-emu/smk37/)**.
 The firmwares come from [genkigenki's install page](https://genkigenki.github.io/smk37/)
 (`node tools/smk37_catalog.mjs` refreshes the list). M-VAVE's own SMK-37 firmware runs as the
-MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold), without sound (its
-notes go to USB / Bluetooth MIDI) and slower than real time in the browser so far.
+MIDI controller it is (screen, buttons, pads, keys; it names the chord you hold): with PATCH on, the
+keys play its DX7 synth from this emulator's own bank (the factory patches are not in the package; the
+notes also go to USB / Bluetooth MIDI), slower than real time in the browser so far.
 
 <!-- smk37-firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
@@ -201,8 +269,8 @@ cargo run --release -p fm1-live -- --fw felucca         # a window with the synt
 cargo run --release -p fm1-live -- --fwsc FM-1.fwsc     # M-VAVE's own, from its package
 ```
 
-`fm1-live` compiles the firmware to native code on Apple silicon Macs, on Linux (ARM64 and
-x86-64) and on Windows (x86-64), and runs the real 240 MHz clock with it; elsewhere (Intel Macs) it interprets
+`fm1-live` compiles the firmware to native code on Macs (Apple silicon and Intel), on Linux (ARM64
+and x86-64) and on Windows (x86-64), and runs the real 240 MHz clock with it; elsewhere it interprets
 (`--mhz` lowers the clock if that can't keep up). It plays every MIDI input of the computer (`--midi NAME`, `--midi none`,
 `--midi-ch N`) and loads a DX7 bank into M-VAVE's firmware with `--syx bank.syx`.
 `fm1-emu` is the batch runner for tests and debugging (WAV and screen output, breakpoints,
@@ -221,6 +289,21 @@ firmwares that poll it (Felucca's family) enumerate, M-VAVE's own (interrupt-dri
 `FM1_USB_SEND='MS:HEX;…'` sends MIDI over USB at those times and prints what comes back
 (`FM1_USB_TRACE`: the bus's transactions; `FM1_USB_SIE_NS`: the controller's register access time,
 an estimate, 1 µs by default).
+USB audio: with `FM1_USB_WAV=FILE` (`--bench` or `--shot`) the host also records the firmware's
+USB audio input as a computer's recording program would: it chooses the audio streaming
+interface's setting that has the isochronous endpoint, asks for `FM1_USB_RATE` (44100 by
+default) if the endpoint can be set to it and the format offers it (else the device's own rate),
+takes one packet a millisecond and writes the samples to FILE (16-bit, interleaved as the device's
+channels come, no header), printing how many packets came empty (nothing queued: an underrun).
+Realistic mode: by default the emulator is generous where an FM-1 is not, so firmwares boot and
+play as they always have here. `FM1_STRICT=1` (fm1-live) runs it as an FM-1 is: a misaligned 16- or
+32-bit RAM access faults, each instruction takes its measured cycles (both cores, the flash
+cache's misses, the HW DSP / EQ / SRC units' jobs), and the LCD's transfers take their time at
+the SPI clock (a 240 x 240 frame ~77 ms at 12 MHz), so a firmware whose main loop waits for whole
+frames gets as little done in between as on the device; it interprets, without the JIT, so it
+is slower. `FM1_LCD_TIMED=1` (fm1-live, fm1-emu) times the LCD alone; `FM1_LCD_INSTANT=1` keeps it
+instant under `FM1_STRICT`. A firmware that boots under it boots later (its first frames take
+their time). `fm1-live --shot` then reports the LCD's share of the run.
 
 The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
 target), the whole site with `tools/build_site.sh`.
@@ -258,10 +341,11 @@ other synth:
   how much faster than real time the firmware could run on this computer; most run at 3–6x,
   the heaviest at about 1.5x.
 
-**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest),
-for Macs with Apple silicon (M1 or later). The zip has the three plugins and an `INSTALL.txt` that
-says where each goes. Until a release is signed with an Apple Developer ID, macOS blocks it until
-you allow it, with one Terminal command that `INSTALL.txt` gives.
+**Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest):
+a zip for Macs with Apple silicon (M1 or later; AU, VST3 and CLAP) and one for Windows (x86-64;
+VST3 and CLAP). Each has an `INSTALL.txt` that says where the files go. Until a release is signed
+with an Apple Developer ID, macOS blocks it until you allow it, with one Terminal command that
+`INSTALL.txt` gives; the Windows build is unsigned too, and Windows hosts load it as it is.
 
 **Build and install it yourself (macOS, Apple silicon).** You need Rust, CMake and Ninja
 (`brew install cmake ninja`), then:
@@ -272,6 +356,18 @@ tools/build_plugin.sh
 
 This builds the plugin and installs `FM-1.component`, `FM-1.vst3` and `FM-1.clap` in
 `~/Library/Audio/Plug-Ins`. It then runs Apple's AU validator on them.
+
+**Build and install it yourself (Windows, x86-64).** You need Rust (MSVC), Visual Studio Build
+Tools with the C++ workload, CMake and git, then:
+
+```powershell
+tools\build_plugin.ps1
+```
+
+This builds `FM-1.vst3` and `FM-1.clap` and installs them in `%LOCALAPPDATA%\Programs\Common`
+(`VST3` and `CLAP`). The two go together: the VST3 loads the CLAP from the CLAP folder.
+[crates/fm1-plugin](crates/fm1-plugin/README.md) has the details, and where to put them for a
+DAW that only scans `C:\Program Files\Common Files`.
 
 **In GarageBand:**
 1. *Settings → Audio/MIDI*: tick *Enable Audio Units*, then quit and reopen GarageBand.
@@ -284,6 +380,25 @@ This builds the plugin and installs `FM-1.component`, `FM-1.vst3` and `FM-1.clap
 
 **In VST3 or CLAP hosts:** add *FM-1* (by fm1-emu) as an instrument on a track.
 
+**On Windows, in Waveform Free** (REAPER works the same way; both find the plugin in
+`Common Files` and in the per-user folders, where the release's `INSTALL.txt` and
+`tools\build_plugin.ps1` put it):
+
+[![Three FM-1 tracks in Waveform Free on Windows: a Scintilla pad, a Felucca bass and lead](docs/media/plugin-windows-waveform.gif)](docs/media/plugin-windows-waveform.gif)
+
+1. *Track → Create New Track*, then the **+** at the right end of the track: *Plugins → fm1-emu → FM-1*.
+2. Click the *FM-1* box on the track to open its window, then *Load firmware / save…* and pick a
+   `.fwsc` package.
+3. Play it from a MIDI keyboard, or click the panel's keys. A MIDI clip on the track plays it too.
+
+The clip above is three tracks at 100 BPM, each with its own FM-1: a pad on
+[Scintilla](https://github.com/joakimeriksson/scintilla-fm1) (an Elka Synthex; preset 29,
+*Filtered strings*), then a bass and a lead joining on Felucca (*Analog Acid* and *FM6 Tine
+EP*). Each window's status bar shows the headroom: on a laptop each instance could run at about
+3x real time with all three playing, 4.5x idle. FM-1 Dock, which runs both of the chip's cores, is the
+heaviest: under real time on that laptop even at 120 MHz, so a synth it carries as a module is
+lighter as its own firmware, as Scintilla is here.
+
 **How it's built:** it's one plugin written in Rust as a CLAP with
 [nih-plug](https://github.com/robbert-vdh/nih-plug). [clap-wrapper](https://github.com/free-audio/clap-wrapper)
 makes the AU and VST3 of it, and the plugin stays MIT. All its parts are MIT, ISC or Apache-2.0,
@@ -295,7 +410,8 @@ including Apple's AudioUnitSDK and Steinberg's VST3 SDK, which is MIT since 3.8.
 - GarageBand, as an AU;
 - Steinberg's VST3 test host.
 
-Logic, Ableton and the Windows / Linux builds haven't been tried yet. More in
+On Windows the VST3 passes Steinberg's validator too (47 of 47) and plays in REAPER and
+Waveform Free. Logic, Ableton and the Linux build haven't been tried yet. More in
 [crates/fm1-plugin](crates/fm1-plugin/README.md).
 
 ## How it works
@@ -327,7 +443,11 @@ The emulator is MIT (`LICENSE`). The firmwares are their authors' and are not pa
 repository; the page fetches them from the authors' sites. `fm1-sid/` (its own repository) has
 files under other licences, among them its player firmware, GPL-3.0 since it is built on
 Felucca's code: its LICENSING.md lists them. The plugin (`crates/fm1-plugin`) is MIT too; the libraries and SDKs it
-builds with are MIT, ISC or Apache-2.0.
+builds with are permissive: MIT, ISC, Apache-2.0, BSD, Zlib, BSL-1.0, Unicode-3.0 and Unlicense, egui's built-in
+fonts OFL-1.1 and the Ubuntu font licence, and Steinberg's VST3 SDK (3.8, through clap-wrapper) MIT. nih-plug is built
+without its VST3 bindings, which are GPL. What the emulator emulates it learned from the chips' behaviour, the
+community's reverse engineering and the firmwares' own sources as references; no GPL code is in this repository
+(the test probe `probes/x0x/d909.c` builds X0X's GPL drum against it from a checkout outside it).
 
 ## Credits
 

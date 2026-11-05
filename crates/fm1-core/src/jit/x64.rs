@@ -348,13 +348,14 @@ impl Gen<'_> {
         self.a.bind(go);
     }
     /// Inside an if-else block's then-part, after an op that may have used the bus: leave if
-    /// the next tick is due, with the skip (te, ee) for `Cpu::pred_skips` (`Ctx::pred`).
-    fn check_brk_pred(&mut self, next_pc: u32, count: u32, te: u32, ee: u32) {
+    /// the next tick is due, with the skip (te, ee, ts) for `Cpu::pred_skips` (`Ctx::pred`).
+    fn check_brk_pred(&mut self, next_pc: u32, count: u32, te: u32, ee: u32, ts: u32) {
         let go = self.a.label();
         self.a.cmp_m_i8(m(CTX, OFF_BRK as i32), 0);
         self.a.jcc(Cc::E, go);
         self.a.st_imm(m(CTX, OFF_PRED as i32), te);
         self.a.st_imm(m(CTX, OFF_PRED as i32 + 4), ee);
+        self.a.st_imm(m(CTX, OFF_PRED as i32 + 8), ts);
         self.exit_imm(next_pc, count);
         self.a.bind(go);
     }
@@ -1019,7 +1020,7 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], th
             for (k, t) in then.iter().enumerate() {
                 let tnext = tpc + t.len as u32;
                 if emit_op::<B>(&mut g, t.fast, j, tnext, profile) && k + 1 < then.len() {
-                    g.check_brk_pred(tnext, j + 1, te, ee);
+                    g.check_brk_pred(tnext, j + 1, te, ee, next_pc);
                 }
                 (tpc, j) = (tnext, j + 1);
             }

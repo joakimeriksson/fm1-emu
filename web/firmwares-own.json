@@ -27,12 +27,12 @@
     {
       "id": "fm1dock",
       "name": "fm1-dock",
-      "version": "0.5",
+      "version": "0.7",
       "author": "joakimeriksson",
       "license": "GPL-3.0",
-      "about": "One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. Deploy more modules over USB (FM-1 SID among them) and debug them from its page's console. Formerly harbor.",
+      "about": "One firmware, many synths: CS-1, Scintilla and OberVave as modules in flash, the sine built in; HOME opens the picker. Add FM-106, MONK-1, FiMba-1, GATOR, DUB-1, FM-1 SID, AMB-1 or FoMni from its page with one click; Bluetooth MIDI with both cores, a master EQ, MIDI options. Formerly harbor.",
       "repo": "https://github.com/joakimeriksson/fm1-dock",
-      "package": "https://joakimeriksson.github.io/fm1-dock/fm1-dock-0.5.fwsc"
+      "package": "https://joakimeriksson.github.io/fm1-dock/fm1-dock-0.7.fwsc"
     },
     {
       "id": "fm1doom",
@@ -57,6 +57,7 @@
     },
     {
       "id": "quest",
+      "hub": "fm1quest",
       "name": "FM1 Quest",
       "version": "0.21",
       "author": "hericdk",
@@ -68,6 +69,7 @@
     },
     {
       "id": "sid",
+      "hub": "fm1sid",
       "name": "FM-1 SID",
       "version": "0.3",
       "author": "joakimeriksson",
@@ -86,6 +88,17 @@
       "repo": "https://github.com/shaw-core/Sloop_ALG02",
       "package": "https://shaw-core.github.io/Sloop_ALG02/firmware/sloop-ALG05-TEST.fwsc",
       "installer": "https://shaw-core.github.io/Sloop_ALG02/webapp/installer/"
+    },
+    {
+      "id": "choppah",
+      "name": "CHOPPAH",
+      "version": "0.87",
+      "author": "profikid",
+      "license": "MPL-2.0",
+      "about": "An Amen break chopper: eight classic breaks cut into 16 slices on the white keys, hold a key to loop it, and a generator that rearranges the break live, with a four-slot FX chain and a DJ filter.",
+      "repo": "https://github.com/profikid/fm1-break-choppah",
+      "package": "https://profikid.github.io/fm1-break-choppah/firmware/choppah-latest.fwsc",
+      "installer": "https://profikid.github.io/fm1-break-choppah/install/"
     }
   ]
 }

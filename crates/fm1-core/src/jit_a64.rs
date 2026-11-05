@@ -27,11 +27,15 @@ pub struct Asm {
     pub code: Vec<u32>,
     labels: Vec<Option<usize>>,
     fixups: Vec<(usize, usize, Fix)>,
+    /// 64-bit constants `ldr_lit_x` loads, laid out after the code (`finish`), and the loads
+    /// that refer to them: (code index, pool index)
+    pool: Vec<u64>,
+    pool_refs: Vec<(usize, usize)>,
 }
 
 #[allow(clippy::new_without_default, reason = "assembler construction reserves its expected code capacity")]
 impl Asm {
-    pub fn new() -> Self { Asm { code: Vec::with_capacity(256), labels: Vec::new(), fixups: Vec::new() } }
+    pub fn new() -> Self { Asm { code: Vec::with_capacity(256), labels: Vec::new(), fixups: Vec::new(), pool: Vec::new(), pool_refs: Vec::new() } }
     #[allow(clippy::len_without_is_empty, reason = "the length is exposed as a code offset, not as a collection API")]
     pub fn len(&self) -> usize { self.code.len() }
     pub fn here(&self) -> usize { self.code.len() }
@@ -41,8 +45,19 @@ impl Asm {
     pub fn bind(&mut self, l: Label) { self.labels[l.0] = Some(self.code.len()); }
     pub fn is_bound(&self, l: Label) -> bool { self.labels[l.0].is_some() }
 
-    /// Resolve every branch to its label; every label must be bound.
+    /// Resolve every branch to its label; every label must be bound. The literal pool follows
+    /// the code (8-byte aligned; nothing branches there).
     pub fn finish(mut self) -> Vec<u32> {
+        if !self.pool.is_empty() {
+            if self.code.len() % 2 == 1 { self.e(0xd503_201f); } // nop
+            let base = self.code.len();
+            for (at, i) in std::mem::take(&mut self.pool_refs) {
+                let off = (base + 2 * i) as i64 - at as i64;
+                assert!((-(1 << 18)..(1 << 18)).contains(&off));
+                self.code[at] |= ((off as u32) & 0x7ffff) << 5;
+            }
+            for v in std::mem::take(&mut self.pool) { self.e(v as u32); self.e((v >> 32) as u32); }
+        }
         for (at, l, kind) in std::mem::take(&mut self.fixups) {
             let target = self.labels[l].expect("unbound label");
             let off = target as i64 - at as i64;
@@ -68,6 +83,12 @@ impl Asm {
         else if imm & 0xffff == 0 { self.movz(rd, imm >> 16, 16); }
         else if imm & 0xffff_0000 == 0xffff_0000 { self.movn(rd, !imm & 0xffff, 0); }
         else { self.movz(rd, imm & 0xffff, 0); self.movk(rd, imm >> 16, 16); }
+    }
+    /// `ldr xd, =imm`: a 64-bit constant from the literal pool (one instruction; `mov64` is four).
+    pub fn ldr_lit_x(&mut self, rd: Reg, imm: u64) {
+        let i = self.pool.iter().position(|&v| v == imm).unwrap_or_else(|| { self.pool.push(imm); self.pool.len() - 1 });
+        self.pool_refs.push((self.code.len(), i));
+        self.e(0x5800_0000 | rd);
     }
     /// 64-bit immediate (addresses).
     pub fn mov64(&mut self, rd: Reg, imm: u64) {
@@ -114,6 +135,7 @@ impl Asm {
     pub fn neg(&mut self, rd: Reg, rm: Reg) { self.sub(rd, ZR, rm); }
     pub fn mvn(&mut self, rd: Reg, rm: Reg) { self.e(0x2a20_03e0 | rm << 16 | rd); }
     pub fn rev(&mut self, rd: Reg, rn: Reg) { self.e(0x5ac0_0800 | rn << 5 | rd); }
+    pub fn rev16(&mut self, rd: Reg, rn: Reg) { self.e(0x5ac0_0400 | rn << 5 | rd); }
     pub fn sdiv(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x1ac0_0c00 | rm << 16 | rn << 5 | rd); }
     pub fn udiv(&mut self, rd: Reg, rn: Reg, rm: Reg) { self.e(0x1ac0_0800 | rm << 16 | rn << 5 | rd); }
     /// rd = ra - rn * rm

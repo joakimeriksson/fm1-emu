@@ -291,14 +291,14 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 
 [[package]]
 name = "fm1-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-isa",
 ]
 
 [[package]]
 name = "fm1-emu"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-core",
  "fm1-isa",
@@ -307,18 +307,18 @@ dependencies = [
 
 [[package]]
 name = "fm1-gdbstub"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-core",
 ]
 
 [[package]]
 name = "fm1-isa"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "fm1-live"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cpal",
  "fm1-core",
@@ -329,14 +329,14 @@ dependencies = [
 
 [[package]]
 name = "fm1-soc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-core",
 ]
 
 [[package]]
 name = "fm1-web"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "fm1-core",
  "fm1-soc",

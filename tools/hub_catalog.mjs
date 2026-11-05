@@ -3,12 +3,13 @@
 // packages never change under their name, sent with Access-Control-Allow-Origin: *; an old one is
 // removed when a new version comes, and web/fwsc.js then asks the Hub's catalog), then our
 // own list, web/firmwares-own.json (hand-edited: FM-1 SID, M-VAVE's own, ... the firmwares the Hub
-// does not list). For a firmware the Hub lists, what is ours is kept (the page's description, the
-// licence, the installer link; from our own list, else from the last web/firmwares.json) and the
-// rest comes from the Hub. The Hub's catalog changes every few hours: run this when it has.
+// does not list). For a firmware the Hub lists, what is ours is kept (the page's description and
+// the installer link, from our own list, else from the last web/firmwares.json; a licence from our
+// own list, else the Hub's, else the last file's) and the rest comes from the Hub. The Hub's catalog changes every few hours: run this when it has.
 //   node tools/hub_catalog.mjs [--check] [--catalog=hub.json]
 // (--check: only say whether the file is current; --catalog: the Hub's catalog from a file)
 import { readFileSync, writeFileSync } from "node:fs";
+import { packageVersion } from "../web/fwsc.js";
 
 const HUB = "https://thefirmwarehub.com/";
 const OUT = new URL("../web/firmwares.json", import.meta.url);
@@ -17,7 +18,7 @@ const OWN = new URL("../web/firmwares-own.json", import.meta.url);
 const OURS = { salt: "felucca-salt", floyd: "sloop-floyd", sloopbanks: "sloop-banks" };
 // listed on the Hub, not run here yet
 const SKIP = {
-  bubba: "boots to a black screen, no sound",
+  lsdjburrito: "boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do",
 };
 // first in the list (the page's default first), then by id
 const FIRST = ["mvave", "felucca", "felucca-salt"];
@@ -52,16 +53,39 @@ function ourId(h) {
   return h.id;
 }
 
-// a repository's licence (GitHub's SPDX id), for firmwares new to the list
+// a repository's licence (GitHub's SPDX id), for a firmware new to the list whose Hub entry has
+// none ("lic"); GITHUB_TOKEN when set, as the unauthenticated API allows 60 asks an hour
 async function licence(repo) {
   try {
-    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers: { "User-Agent": "fm1-emu hub_catalog" } });
-    const j = await r.json();
-    const id = j.license?.spdx_id;
+    const headers = { "User-Agent": "fm1-emu hub_catalog" };
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const r = await fetch(`https://api.github.com/repos/${repo}`, { headers });
+    if (!r.ok) {
+      console.log(`  (GitHub did not answer for ${repo}: ${r.status}${r.status === 403 ? "; GITHUB_TOKEN raises the limit" : ""})`);
+      return "see the repository";
+    }
+    const id = (await r.json()).license?.spdx_id;
     return id && id !== "NOASSERTION" ? id : "see the repository";
-  } catch {
+  } catch (e) {
+    console.log(`  (GitHub did not answer for ${repo}: ${e.message})`);
     return "see the repository";
   }
+}
+
+// The package's version (web/fwsc.js's packageVersion: the Hub's "version" is its latest release
+// tag, which runs ahead of the package it hosts for a release whose package it has not taken yet,
+// FM1 Quest 43 with fm1quest-42.fwsc). A package not named <id>-<version>.fwsc is said.
+function pkgVersion(h) {
+  const v = packageVersion(h.id, h.pkg);
+  if (v == null) console.log(`  CHECK: the Hub's ${h.id} has a package not named after it, ${h.pkg}: its version ${h.version} taken as the package's`);
+  return v ?? String(h.version);
+}
+// A firmware's licence: one in our own list (o is that entry for an id of ours: the own list is
+// last into old); else the Hub's; else the one an earlier run asked GitHub for, unless that ask
+// failed; else GitHub's now.
+async function licenceOf(h, o) {
+  const kept = o.license && o.license !== "see the repository" ? o.license : null;
+  return (own.some((f) => f.id === o.id) && o.license) || h.lic || kept || (h.repo ? await licence(h.repo) : "see the repository");
 }
 
 const firmwares = [];
@@ -75,9 +99,9 @@ for (const h of hub.firmwares) {
   firmwares.push({
     id,
     name: h.name,
-    version: String(h.version),
+    version: pkgVersion(h),
     author: o.author || h.author,
-    license: o.license || (h.repo ? await licence(h.repo) : "see the repository"),
+    license: await licenceOf(h, o),
     about: o.about || h.what,
     repo: o.repo || (h.repo ? `https://github.com/${h.repo}` : h.site),
     package: new URL(h.pkg, HUB).href,

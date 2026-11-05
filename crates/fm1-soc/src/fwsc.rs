@@ -8,9 +8,10 @@
 //! the SPI side reads) and the app area unscrambled (what the CPU sees through XIP, where the
 //! SFC decrypts on the fly), with the area's directory.
 //!
-//! The stock firmware keeps its patches in the USR area (flash 0xEA000..0xFC000 on V13),
-//! which updates leave alone: real units carry the factory bank there. `usr_fill_defaults`
-//! puts this emulator's own small bank into a blank one, `usr_load_syx` a DX7 32-voice bank.
+//! The stock firmware keeps its patches in the USR area (flash 0xEA000..0xFC000 on the FM-1's
+//! V13, 0xF4000..0xFE000 on the SMK-37 Pro), which updates leave alone: real units carry the
+//! factory bank there. `usr_fill_defaults` puts this emulator's own small bank into a blank one
+//! (in the board's layout, `UsrLayout`), `usr_load_syx` a DX7 32-voice bank.
 
 pub(crate) fn unmask(buf: &mut [u8], mut key: u16) {
     for b in buf {
@@ -282,13 +283,47 @@ pub fn smk_trim_fill_defaults(flash: &mut [u8]) {
     flash[AT + 0x224..AT + 0x22c].copy_from_slice(b"trimdat\0");
 }
 
-/// The patch bank inside the USR area: 128 voices of 128 bytes (DX7 VMEM, a packed voice
-/// each) at +0x4000, 128 per-slot settings of 59 bytes at +0x10000 (dx7patch_load_or_store;
-/// all-zero settings play polyphonically, erased ones (0xFF) left only one voice sounding).
-const USR_VOICES: usize = 0x4000;
-const USR_SETTINGS: usize = 0x10000;
+/// Where a stock firmware keeps its patch bank inside the USR area: `SLOTS` voices of 128
+/// bytes (DX7 VMEM, a packed voice each) at `voices`, one per-slot settings record of
+/// `settings_len` bytes at `settings` (all-zero settings play polyphonically, erased ones
+/// (0xFF) left only one voice sounding on the FM-1), and `tail` more bytes the firmware reads
+/// after the records, zeroed with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UsrLayout {
+    pub voices: usize,
+    pub settings: usize,
+    pub settings_len: usize,
+    pub tail: usize,
+}
+
+impl UsrLayout {
+    /// The FM-1's (dx7patch_load_or_store): voices at +0x4000, 59-byte settings at +0x10000.
+    pub const FM1: UsrLayout = UsrLayout { voices: 0x4000, settings: 0x10000, settings_len: 59, tail: 0 };
+    /// The SMK-37 Pro's (its patch load at 0x02005660 in V15): 4 banks of 32 voices at +0
+    /// (bank * 0x1000 + patch * 0x80, so slot i at +0x80 i), a 163-byte record per patch at
+    /// +0x4000 (index bank * 32 + patch; they end at +0x9180), then a 128-byte block it reads
+    /// with its 9-byte state at +0x9200, which it writes itself (byte 8 = 8 marks it) and
+    /// which the fill leaves alone. The area is 0xA000.
+    pub const SMK37: UsrLayout = UsrLayout { voices: 0, settings: 0x4000, settings_len: 163, tail: 128 };
+
+    pub fn of(board: crate::Board) -> UsrLayout {
+        match board {
+            crate::Board::Fm1 => UsrLayout::FM1,
+            crate::Board::Smk37 => UsrLayout::SMK37,
+        }
+    }
+
+    fn voices(&self, usr: usize) -> std::ops::Range<usize> {
+        usr + self.voices..usr + self.voices + SLOTS * 128
+    }
+
+    /// The settings records and the tail after them.
+    fn settings(&self, usr: usize) -> std::ops::Range<usize> {
+        usr + self.settings..usr + self.settings + SLOTS * self.settings_len + self.tail
+    }
+}
+
 const SLOTS: usize = 128;
-const SETTINGS_LEN: usize = 59;
 
 /// One DX7 operator, packed (17 bytes): EG rates and levels, keyboard scaling off, detune 7
 /// (none), key-velocity sensitivity, output level, frequency (ratio: coarse 0 = 0.5, fine).
@@ -373,12 +408,12 @@ pub fn full_flash(raw: &[u8], size: usize) -> Vec<u8> {
     f
 }
 
-/// Put the default bank into the USR area if no voice there was ever written. Returns
-/// whether it did.
-pub fn usr_fill_defaults(flash: &mut [u8], usr: usize) -> bool {
-    let voices = usr + USR_VOICES..usr + USR_VOICES + SLOTS * 128;
-    let settings = usr + USR_SETTINGS..usr + USR_SETTINGS + SLOTS * SETTINGS_LEN;
-    if settings.end > flash.len() || flash[voices.clone()].iter().any(|&b| b != 0xff) {
+/// Put the default bank into the USR area (laid out as `layout`) if no voice there was ever
+/// written. Returns whether it did.
+pub fn usr_fill_defaults(flash: &mut [u8], usr: usize, layout: UsrLayout) -> bool {
+    let voices = layout.voices(usr);
+    let settings = layout.settings(usr);
+    if settings.end > flash.len() || voices.end > flash.len() || flash[voices.clone()].iter().any(|&b| b != 0xff) {
         return false;
     }
     for (i, v) in default_voices().iter().enumerate() {
@@ -391,8 +426,9 @@ pub fn usr_fill_defaults(flash: &mut [u8], usr: usize) -> bool {
 }
 
 /// A DX7 32-voice bank (a 4104-byte bulk dump `F0 43 0n 09 20 00 .. F7`, or the bare 4096
-/// bytes) into slots `first..first + 32`. Returns how many voices it wrote.
-pub fn usr_load_syx(flash: &mut [u8], usr: usize, syx: &[u8], first: usize) -> Result<usize, String> {
+/// bytes) into slots `first..first + 32` of the USR area laid out as `layout`. Returns how
+/// many voices it wrote.
+pub fn usr_load_syx(flash: &mut [u8], usr: usize, layout: UsrLayout, syx: &[u8], first: usize) -> Result<usize, String> {
     let data = if syx.len() >= 4104 && syx[0] == 0xf0 && syx[1] == 0x43 && syx[3] == 0x09 {
         &syx[6..6 + 4096]
     } else if syx.len() == 4096 {
@@ -401,13 +437,13 @@ pub fn usr_load_syx(flash: &mut [u8], usr: usize, syx: &[u8], first: usize) -> R
         return Err("not a DX7 32-voice bank (4104-byte sysex or 4096 bytes)".into());
     };
     let n = 32.min(SLOTS.saturating_sub(first));
-    let at = usr + USR_VOICES + first * 128;
-    if at + n * 128 > flash.len() {
+    let at = usr + layout.voices + first * 128;
+    let s = usr + layout.settings + first * layout.settings_len;
+    if at + n * 128 > flash.len() || s + n * layout.settings_len > flash.len() {
         return Err("USR area past the flash".into());
     }
     flash[at..at + n * 128].copy_from_slice(&data[..n * 128]);
-    let s = usr + USR_SETTINGS + first * SETTINGS_LEN;
-    for b in &mut flash[s..s + n * SETTINGS_LEN] {
+    for b in &mut flash[s..s + n * layout.settings_len] {
         if *b == 0xff {
             *b = 0;
         }
@@ -434,5 +470,34 @@ mod tests {
     fn container_counts_blocks_and_reads_the_identity() {
         assert_eq!(container(&header("FM-1_015", 20)), (20, "FM-1_015".to_string()));
         assert_eq!(container(&header("SMK-37 Pro_016", 36)), (36, "SMK-37 Pro_016".to_string()));
+    }
+
+    /// The default bank lands where each board's stock firmware reads it: the FM-1's voices at
+    /// +0x4000 with 59-byte settings at +0x10000; the SMK-37's voices at +0 (bank 1's first at
+    /// +0x1000), 163-byte records at +0x4000 up to +0x9180, the 128 bytes after them zeroed, its
+    /// 9-byte state at +0x9200 and the rest of the area left erased.
+    #[test]
+    fn default_bank_in_each_boards_usr_layout() {
+        let mut fm1 = vec![0xffu8; 1 << 20];
+        let usr = 0xea000;
+        assert!(usr_fill_defaults(&mut fm1, usr, UsrLayout::FM1));
+        assert_eq!(&fm1[usr + 0x4000 + 118..usr + 0x4000 + 128], b"EMU E.PNO ");
+        assert!(fm1[usr + 0x10000..usr + 0x10000 + 128 * 59].iter().all(|&b| b == 0));
+        assert!(!usr_fill_defaults(&mut fm1, usr, UsrLayout::FM1), "a written bank stays");
+
+        let mut smk = vec![0xffu8; 1 << 20];
+        let usr = 0xf4000;
+        assert!(usr_fill_defaults(&mut smk, usr, UsrLayout::SMK37));
+        assert_eq!(&smk[usr + 118..usr + 128], b"EMU E.PNO ");
+        assert_eq!(&smk[usr + 128 + 118..usr + 256], b"EMU BASS  ");
+        assert_eq!(&smk[usr + 0x1000 + 118..usr + 0x1000 + 128], b"INIT VOICE", "bank 1, patch 0");
+        assert!(smk[usr + 0x4000..usr + 0x9200].iter().all(|&b| b == 0), "163-byte records and the block after");
+        assert!(smk[usr + 0x9200..usr + 0xa000].iter().all(|&b| b == 0xff), "the state and the rest: untouched");
+        assert!(smk[..usr].iter().all(|&b| b == 0xff) && smk[usr + 0xa000..].iter().all(|&b| b == 0xff));
+
+        let bank = vec![0x23u8; 4096];
+        assert_eq!(usr_load_syx(&mut smk, usr, UsrLayout::SMK37, &bank, 0), Ok(32));
+        assert!(smk[usr..usr + 4096].iter().all(|&b| b == 0x23));
+        assert_eq!(&smk[usr + 4096 + 118..usr + 4096 + 128], b"INIT VOICE", "slot 32 kept");
     }
 }

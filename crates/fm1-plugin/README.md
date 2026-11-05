@@ -12,8 +12,8 @@ on the page, so an SMK-37 package gets the SMK-37's.
 
 One plugin is written in Rust as a CLAP with [nih-plug](https://github.com/robbert-vdh/nih-plug),
 built without its VST3 bindings (they are GPL). [clap-wrapper](https://github.com/free-audio/clap-wrapper)
-makes the AU and the VST3 of it, each carrying the CLAP in its bundle. Every part is
-permissively licensed:
+makes the AU and the VST3 of it, each carrying the CLAP in its bundle on macOS; on Windows the
+VST3 loads the CLAP from the CLAP folder beside it. Every part is permissively licensed:
 
 | Part | Licence |
 |---|---|
@@ -53,6 +53,48 @@ open vst3sdk-build/bin/Release/editorhost.app --args ~/Library/Audio/Plug-Ins/VS
 An ad hoc signature is enough on the Mac that built the plugin. To give it to others, it has to be
 signed with an Apple Developer ID and notarized.
 
+## Build and install (Windows, x86-64)
+
+```powershell
+tools\build_plugin.ps1
+```
+
+You need Rust (the MSVC toolchain), Visual Studio Build Tools with the C++ workload, CMake and
+git. With winget:
+
+```powershell
+winget install Rustlang.Rustup Kitware.CMake Git.Git
+winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+The script builds the CLAP (the cdylib, `fm1_plugin.dll`, is `FM-1.clap`), then the VST3 around
+it with clap-wrapper (CMake picks the newest Visual Studio it finds, the Build Tools included, so
+no vcvars is needed; the SDKs are downloaded on the first run). It installs both in the per-user plugin folders, no administrator
+needed: `%LOCALAPPDATA%\Programs\Common\VST3\FM-1.vst3` and `…\Common\CLAP\FM-1.clap`. Set
+`$env:NO_INSTALL = 1` to only build them, into `target\plugin\`.
+
+Unlike the macOS bundles, the Windows VST3 doesn't carry the CLAP: when a host loads it, it
+loads `FM-1.clap` from a CLAP folder (`C:\Program Files\Common Files\CLAP`,
+`%LOCALAPPDATA%\Programs\Common\CLAP`, or a folder in `CLAP_PATH`). So the two files go
+together, and a VST3 host needs the CLAP installed even if it doesn't host CLAPs itself. A DAW
+that doesn't scan the per-user VST3 folder gets `FM-1.vst3` in
+`C:\Program Files\Common Files\VST3` instead (and `FM-1.clap` in `…\Common Files\CLAP`), or its
+settings get the per-user folder added to the plugin paths.
+
+**Steinberg's validator** is built from the SDK that clap-wrapper downloaded, and `CLAP_PATH`
+lets it find the CLAP that was built but not installed:
+
+```powershell
+cmake -S target\plugin\build\cpm\vst3sdk -B target\plugin\vst3sdk-build -A x64 `
+  -DSMTG_ENABLE_VST3_PLUGIN_EXAMPLES=OFF -DSMTG_ENABLE_VSTGUI_SUPPORT=OFF -DSMTG_ENABLE_VST3_HOSTING_EXAMPLES=ON
+cmake --build target\plugin\vst3sdk-build --config Release --target validator
+$env:CLAP_PATH = "$PWD\target\plugin"
+target\plugin\vst3sdk-build\bin\Release\validator.exe target\plugin\FM-1.vst3   # 47 tests pass
+```
+
+The build is not code-signed; Windows hosts load unsigned plugins. REAPER and Waveform scan the
+per-user folders by default, so the plugin shows up after their next plugin scan.
+
 ## Releases
 
 The plugin is released with the rest of the emulator (`.github/workflows/release.yml`, on a tag
@@ -64,7 +106,11 @@ workflow:
 3. builds Steinberg's validator and runs it on the VST3;
 4. packages the zip (`tools/package_plugin.sh`: the three plugins and an `INSTALL.txt`).
 
-Without signing secrets the release is unsigned (`INSTALL.txt` gives the command that lets macOS
+On a Windows runner it runs the tests, builds the CLAP and the VST3 (`tools\build_plugin.ps1`),
+runs Steinberg's validator and packages `fm1-plugin-<version>-windows-x86_64.zip`
+(`tools\package_plugin.ps1`: the two plugins and an `INSTALL.txt`), unsigned.
+
+Without signing secrets the macOS release is unsigned (`INSTALL.txt` gives the command that lets macOS
 open it). With these repository secrets it's signed with a Developer ID and notarized:
 - `MACOS_CERTIFICATE`: a "Developer ID Application" certificate as a base64 `.p12`;
 - `MACOS_CERTIFICATE_PASSWORD`: its password;
@@ -81,6 +127,9 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   including when the same firmware is already running. For a browser backup that omits
   bring-your-own firmware, load the matching `.fwsc` first, then import the `.fm1save`.
   Invalid imports leave the current setup intact.
+  On a Mac, keep the files outside Desktop, Documents, Downloads and iCloud Drive: macOS keeps a
+  DAW's plugin host out of those folders without asking, and the load fails with "Operation not
+  permitted". `~/Music` or any other folder in your home works.
 - **Export save…** captures the running firmware and its latest flash changes as a `.fm1save`.
   Send it to someone else, import it in the browser, or open it in another VST3/AU/CLAP instance.
   It waits for flash writes to finish and writes the file in the background. Edits held only in
@@ -140,7 +189,9 @@ audio. It uses `reference/firmwares/felucca.fwsc` (`node tools/fetch_firmwares.m
 | GarageBand | AU: loads a firmware and runs; the window's redraw on reopening is fixed but not yet seen there |
 | Steinberg's editorhost | VST3: the window draws, firmwares boot and react to the panel |
 | Logic, Ableton, REAPER, Bitwig | not yet tried |
-| Windows, Linux | not built yet: nih-plug and clap-wrapper support them, but `tools/build_plugin.sh` is macOS-only |
+| Windows (x86-64) | builds with `tools\build_plugin.ps1`; the crate's 12 tests and Steinberg's validator (47 of 47) pass on Windows 11 |
+| REAPER 7.84, Waveform Free 14 (Windows 11) | VST3: both find it in the per-user folder, load Felucca through the file dialog and play it from the panel and MIDI (3.4x real time on this PC) |
+| Linux | not built yet: nih-plug and clap-wrapper support it, but the build scripts are macOS and Windows only |
 
 ## Testing portable saves locally
 

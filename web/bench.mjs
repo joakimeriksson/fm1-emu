@@ -2,6 +2,7 @@
 // FM1_BENCH_KEYS uses the native timestamped key/encoder/MIDI script syntax.
 // FM1_BENCH_NOKEYS=1 disables the default chord; FM1_WARMUP_MS=1000 separates warm-up.
 // FM1_WASM selects an A/B build. FM1_BENCH_JSON writes machine-readable results.
+// FM1_LCD_TIMED=1: the LCD's transfers take their time, as on an FM-1 (fm1_lcd_timed; default at once).
 // The page's audio schedule (web/worklet.js): FM1_AHEAD=frames run ahead (fm1_ahead; default as
 // the page, 0 off), FM1_CAP=0 keeps the boot budget of 20 ms of emulated time per quantum after
 // audio starts (the page caps it to 1.5 quanta when it runs ahead). "over" counts steady quanta that took longer
@@ -19,6 +20,10 @@ const stats = { regions: 0, failed: 0, compileMs: 0, compileMaxMs: 0, bytes: 0 }
 const { instance } = await WebAssembly.instantiate(wasm, { env: jitImports(() => x, stats) });
 x = instance.exports;
 if (!process.env.FM1_NO_JIT) x.fm1_jit(1, +(process.env.FM1_JIT_PER || 16));
+if (process.env.FM1_LCD_TIMED) {
+  if (!x.fm1_lcd_timed) throw new Error("this build has no fm1_lcd_timed");
+  x.fm1_lcd_timed(1);
+}
 const ahead = +(process.env.FM1_AHEAD ?? 1024);
 if (x.fm1_ahead) x.fm1_ahead(ahead);
 else if (ahead) console.error("this build has no fm1_ahead: quanta run only for their own frames");
