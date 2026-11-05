@@ -85,6 +85,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     requestAnimationFrame() {}, addEventListener() {}, AudioContext, AudioWorkletNode,
     matchMedia: () => ({ matches: false }), confirm: () => true,
     fetchPackage: async f => ({ bytes: new Uint8Array(960).fill(f.id === 'a' ? 1 : 2), url: f.package }),
+    hubNewcomers: async () => [], hubCardUrl: id => `https://thefirmwarehub.com/#fw-${id}`,
     ...persistence, ...tryout, SaveStore: class { constructor() { return disk; } }, ...extra };
   const source = readFileSync(new URL('./main.js', import.meta.url), 'utf8').replace(/^import .*;$/gm, '');
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
@@ -277,4 +278,17 @@ test('a try-out from another site is refused: nothing fetched, nothing started',
     assert.match(p.elements.get('status').textContent, /^try-out: only files from http:\/\/localhost/, q);
   }
   assert.ok(fetched.every(u => !/evil|data:/.test(u)));
+});
+
+test("the Hub's newcomers come last, marked as not yet run here, and ?fw= picks one", async () => {
+  const c = { id: 'c', name: 'Newcomer', version: '2', package: 'https://thefirmwarehub.com/fw/c-2.fwsc', hub: 'c',
+    author: 't', license: 'GPL-3.0', about: 'new', untested: true };
+  const p = await page(storage(), '?fw=c', '', false, { hubNewcomers: async () => [c] });
+  assert.equal(p.api.fw.id, 'c');
+  assert.equal(p.api.fw.untested, true);
+  // the selector's plain options are the catalog's; the newcomer is in its group, not among them
+  assert.deepEqual(p.elements.get('fw').options.map(o => o.value), ['a', 'b']);
+  // a Hub that did not answer: the page as before
+  const q = await page(storage(), '?fw=c', '', false, { hubNewcomers: async () => [] });
+  assert.equal(q.api.fw.id, 'a', 'the default');
 });

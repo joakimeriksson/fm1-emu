@@ -152,6 +152,7 @@ select:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 .cards .by { color: var(--dim); font-size: 13px; }
 .cards .what { margin: 4px 0; font-size: 13.5px; color: var(--text); overflow-wrap: anywhere; }
 .cards .midi { font-size: 12.5px; color: var(--amber); }
+.cards .untested, #about .untested { font-size: 12.5px; color: var(--dim); font-style: italic; }
 .cards .links { margin-top: auto; padding-top: 8px; border-top: 1px solid var(--rule); font-size: 13px;
                 display: flex; flex-wrap: wrap; gap: 2px 14px; }
 .cards .links a { color: var(--dim); text-decoration: none; }

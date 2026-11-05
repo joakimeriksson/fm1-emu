@@ -66,7 +66,8 @@ struct Opts {
     shot: Option<u64>,
     /// What runs, for the window title.
     name: String,
-    /// M-VAVE's stock firmware from its update package (fm1_soc::stock_from_package)
+    /// A firmware from its update package (fm1_soc::stock_from_package): a community firmware's,
+    /// M-VAVE's own; `--fw <id>` fills it with the catalog's
     fwsc: Option<String>,
     /// a DX7 32-voice bank for the stock firmware's slots 1-32
     syx: Option<String>,
@@ -86,9 +87,9 @@ struct Opts {
     usb: bool,
 }
 
-/// The firmware catalog web/firmwares.json as (id, name, version, image path): each image is
-/// reference/firmwares/<id>.xip.bin (tools/fetch_firmwares.mjs). A small scan for the string
-/// fields, enough for this file; no JSON dependency.
+/// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
+/// reference/firmwares/<id>.fwsc (tools/fetch_firmwares.mjs), booted as the page boots it. A small
+/// scan for the string fields, enough for this file; no JSON dependency.
 fn catalog() -> Vec<(String, String, String, String)> {
     let Ok(text) = std::fs::read_to_string("web/firmwares.json") else { return Vec::new() };
     let field = |obj: &str, key: &str| -> Option<String> {
@@ -101,7 +102,7 @@ fn catalog() -> Vec<(String, String, String, String)> {
             return None; // M-VAVE's own, brought by the user: --fwsc FM-1.fwsc
         }
         let id = field(&obj, "id")?;
-        let path = format!("reference/firmwares/{id}.xip.bin");
+        let path = format!("reference/firmwares/{id}.fwsc");
         Some((id, field(&obj, "name")?, field(&obj, "version")?, path))
     }).collect()
 }
@@ -135,7 +136,7 @@ fn parse() -> Option<Opts> {
                     std::process::exit(0);
                 }
                 let (_, name, ver, path) = cat.into_iter().find(|f| &f.0 == want)?;
-                o.bin = path;
+                o.fwsc = Some(path);
                 o.name = format!("{name} {ver}");
             }
             "--fwsc" => {

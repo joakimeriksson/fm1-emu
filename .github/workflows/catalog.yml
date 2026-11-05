@@ -64,9 +64,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: firmwares
-          path: |
-            reference/firmwares/*.fwsc
-            reference/firmwares/*.xip.bin
+          path: reference/firmwares/*.fwsc
           retention-days: 1
 
   catalog:
