@@ -128,23 +128,63 @@ export function packageVersion(id, pkg) {
   const base = String(pkg).split("/").pop().replace(/\.fwsc$/, "");
   return base.startsWith(id + "-") ? base.slice(id.length + 1).replace(/\+[0-9a-f]+$/, "") : null;
 }
+function hubCatalog(fetchFn) {
+  if (!hubCatalogs.has(fetchFn)) {
+    hubCatalogs.set(fetchFn, fetchFn(HUB + "catalog.json").then((r) => {
+      if (!r.ok) throw new Error(`catalog.json: ${r.status}`);
+      return r.json();
+    }).catch((e) => { hubCatalogs.delete(fetchFn); throw e; }));
+  }
+  return hubCatalogs.get(fetchFn);
+}
 async function hubPackage(id, fetchFn) {
   try {
-    if (!hubCatalogs.has(fetchFn)) {
-      hubCatalogs.set(fetchFn, fetchFn(HUB + "catalog.json").then((r) => {
-        if (!r.ok) throw new Error(`catalog.json: ${r.status}`);
-        return r.json();
-      }));
-    }
-    const h = (await hubCatalogs.get(fetchFn))?.firmwares?.find((h) => h.id === id);
+    const h = (await hubCatalog(fetchFn))?.firmwares?.find((h) => h.id === id);
     if (!h?.pkg) return null;
     const version = packageVersion(h.id, h.pkg) ?? (h.version == null ? null : String(h.version));
     return { url: new URL(h.pkg, HUB).href, version };
   } catch {
-    hubCatalogs.delete(fetchFn);
     return null;
   }
 }
+
+// The firmwares the Hub lists with a package that web/firmwares.json neither lists (by our id or
+// the Hub's) nor skips: entries like the catalog's, with `untested: true`, since nobody has run
+// them in the emulator yet. The page lists them after the checked ones, so a firmware reaches it
+// the day the Hub has its package, and tools/hub_catalog.mjs moves it into the file (or onto the
+// skip list) at the next refresh. [] when the Hub cannot be read.
+export async function hubNewcomers(catalog, fetchFn = fetch) {
+  const known = new Set();
+  for (const f of catalog.firmwares) {
+    known.add(f.id);
+    if (f.hub) known.add(f.hub);
+  }
+  const skipped = catalog.skipped || {};
+  let hub;
+  try {
+    hub = await hubCatalog(fetchFn);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const h of hub?.firmwares || []) {
+    if (!h.pkg || known.has(h.id) || skipped[h.id]) continue;
+    out.push({
+      id: h.id,
+      name: h.name,
+      version: packageVersion(h.id, h.pkg) ?? (h.version == null ? "" : String(h.version)),
+      author: h.author || "",
+      license: h.lic || "see the repository",
+      about: h.what || "",
+      repo: h.repo ? `https://github.com/${h.repo}` : h.site || hubCardUrl(h.id),
+      package: new URL(h.pkg, HUB).href,
+      hub: h.id,
+      untested: true,
+    });
+  }
+  return out;
+}
+export const hubCardUrl = (hubId) => `${HUB}#fw-${hubId}`;
 
 // Fetch a catalog entry's package (web/firmwares.json): its `package` URL, or when that has
 // gone (a newer version replaced it) the package the Hub lists now (an entry with `hub`), or
