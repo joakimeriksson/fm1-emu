@@ -418,6 +418,17 @@ impl Periph {
         ms * self.hz / 1000
     }
 
+    /// I2S frames the DAC clock has counted since boot: 24 MHz / 544 a second whatever the CPU
+    /// clock, the pace the DMA keeps (half_period). `audio` holds the ones the firmware made;
+    /// the difference is its silence from boot until it started the DMA.
+    pub fn audio_frames_so_far(&self) -> u64 {
+        Self::audio_frames_at(self.cycles, self.hz)
+    }
+
+    pub fn audio_frames_at(cycles: u64, hz: u64) -> u64 {
+        (cycles as u128 * T4_HZ as u128 / (hz as u128 * FRAME_T4 as u128)) as u64
+    }
+
     fn t5_period(&self) -> u64 {
         (self.t5_prd.max(1) as u64 * self.hz / T5_HZ).max(1)
     }
@@ -1439,5 +1450,15 @@ mod tests {
         p.apply(&Action::Midi { b: 0xf8 });
         run_to(&mut p, 7 * byte + ms, &mut got);
         assert_eq!((got.len(), p.midi_dropped()), (5, 1));
+    }
+
+    #[test]
+    fn audio_frames_follow_the_dac_clock() {
+        // 24 MHz / 544 = 44117.6 frames per second, however fast the CPU runs
+        assert_eq!(Periph::audio_frames_at(0, CPU_HZ), 0);
+        assert_eq!(Periph::audio_frames_at(5440, CPU_HZ), 1);
+        assert_eq!(Periph::audio_frames_at(CPU_HZ, CPU_HZ), 44_117);
+        assert_eq!(Periph::audio_frames_at(160_000_000, 160_000_000), 44_117);
+        assert_eq!(Periph::audio_frames_at(60 * 60 * CPU_HZ, CPU_HZ), 60 * 60 * 44_117 + 2329);
     }
 }
