@@ -24,7 +24,9 @@ use fm1_core::{Bus, Cpu, PlainState};
 /// cpu0 runs in slices of this many instructions once cpu1 is running, cpu1 after each.
 pub const SLICE: u32 = 1024;
 
-/// cpu1's view of the SoC: no clock, a budget of ticks instead.
+/// cpu1's view of the SoC: no clock, a budget of ticks instead. `spent`: the ticks its
+/// instructions took, all of them (FM1_STRICT: one that costs more than is left of the budget, or a
+/// flash cache miss, still costs all of it; the budget only stops the run)
 pub struct Core1Bus<'a> {
     pub soc: &'a mut Soc,
     pub budget: u64,
@@ -33,6 +35,7 @@ pub struct Core1Bus<'a> {
     /// lock's release is a RAM store, which compiled code makes without the bus: that run ends
     /// at its call's end, `SPIN_CALL` instructions at most past the store, compiled or not.)
     pub until: Option<Wait>,
+    pub spent: u64,
 }
 
 impl Core1Bus<'_> {
@@ -73,6 +76,7 @@ impl Bus for Core1Bus<'_> {
     }
     fn tick(&mut self) -> bool {
         let stall = std::mem::take(&mut self.soc.core1_ticks);
+        self.spent += 1 + stall;
         self.budget = self.budget.saturating_sub(1 + stall);
         self.budget == 0
     }
@@ -100,6 +104,7 @@ impl Bus for Core1Bus<'_> {
     }
     fn add_ticks(&mut self, n: u64) {
         let stall = std::mem::take(&mut self.soc.core1_ticks);
+        self.spent += n + stall;
         self.budget = self.budget.saturating_sub(n + stall);
     }
     fn hw_lock(&mut self, core: u32, set: bool) -> bool {
@@ -733,7 +738,7 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
         // never run out)
         let span = if stretch { probing.min(left) + fm1_core::STRETCH_ROOM as u64 } else { busy };
         let budget0 = span.max(64) + 1;
-        let mut bus = Core1Bus { soc: &mut *soc, budget: budget0, until };
+        let mut bus = Core1Bus { soc: &mut *soc, budget: budget0, until, spent: 0 };
         // (probing: the block at pc, to its last instruction or to where the probe began if that
         // lies inside it, whether it runs compiled or not)
         let chunk = if stretch || probing == 0 { span } else { c1.block_len_to(&mut bus, probe.0).max(1) as u64 };
@@ -753,10 +758,11 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
             Ok((k, _)) => k as u64,
             Err(e) => return Err(format!("cpu1: {e:?} at pc {:#010x}", c1.pc)),
         };
-        // (with FM1_STRICT's costs, core 1's time is the ticks it spent, not its instructions)
+        // (with FM1_STRICT's costs, core 1's time is the ticks it spent, not its instructions: all
+        // of them, not what they took of the budget, which stops at 0)
         let k = if c1.cost_model {
             let stall = std::mem::take(&mut bus.soc.core1_ticks);
-            (budget0 - bus.budget + stall).max(1)
+            (bus.spent + stall).max(1)
         } else {
             k
         };
@@ -1705,6 +1711,46 @@ mod tests {
         c
     }
 
+    /// FM1_STRICT: `n` instructions of `r0 += 1` from XIP (cold: a flash cache miss every 32 of
+    /// them), then `goto -2`; the clock's ticks until the core running them is at the `goto`, on
+    /// core 0 alone, or on core 1 with core 0 spinning
+    fn strict_straight_line(n: usize, on_core1: bool) -> u64 {
+        let line: Vec<u8> = std::iter::repeat_n([0xc0, 0x21], n).flatten().chain([0xf7, 0x9f]).collect();
+        let code = if on_core1 { [&[0xf7, 0x9f][..], &line].concat() } else { line };
+        let end = XIP_BASE + code.len() as u32 - 2;
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        cpu.cost_model = true;
+        soc.periph.cycle_ticks = 8;
+        soc.xip_cache = Some(crate::XipCache::default());
+        let mut t = false;
+        if !on_core1 {
+            let c0 = soc.periph.cycles;
+            while cpu.pc != end {
+                run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap();
+            }
+            return soc.periph.cycles - c0;
+        }
+        soc.take_boot(&cpu);
+        soc.write32(0x01c7_fff8, XIP_BASE + 2);
+        soc.write32(0x10008, 8);
+        let mut c1 = None;
+        run_dual(&mut c1, &mut soc, 1, 1 << 20, false, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+        let c0 = soc.periph.cycles;
+        while c1.as_ref().is_none_or(|c| c.pc != end) {
+            run_dual(&mut c1, &mut soc, 1, 1 << 20, false, |s, k| run_blocks(&mut cpu, s, k, &mut t)).unwrap();
+        }
+        soc.periph.cycles - c0
+    }
+
+    #[test]
+    fn strict_costs_core_1_as_core_0() {
+        // the same code costs core 1 what it costs core 0, its cache misses included (core 1's
+        // budget ran out mid-instruction and dropped the rest: a miss counted as what was left)
+        let (c0, c1) = (strict_straight_line(15_000, false), strict_straight_line(15_000, true));
+        let d = c1.abs_diff(c0) as f64 / c0 as f64;
+        assert!(d < 0.02, "core 0 {c0} ticks, core 1 {c1} ({:+.1} %)", 100.0 * (c1 as f64 / c0 as f64 - 1.0));
+    }
+
     #[test]
     fn release_forfeits_the_rest_of_its_4096() {
         // cpu0 releases cpu1 (0x10008 |= 8) with its `at`th instruction, then spins; cpu1 spins
@@ -1738,7 +1784,7 @@ mod tests {
         // core 1 in blocks (fm1-live, the browser), the JIT asked for: the same
         let mut c1 = core_at_ram(1);
         c1.jit_on = true;
-        let mut bus = Core1Bus { soc: &mut soc, budget: 1 << 20, until: None };
+        let mut bus = Core1Bus { soc: &mut soc, budget: 1 << 20, until: None, spent: 0 };
         assert!(bus.jit_mem().is_none(), "a flaky core 1 runs interpreted");
         let mut n = 0;
         while c1.pc != RAM_BASE + 16 && n < 100 {
@@ -1780,7 +1826,7 @@ mod tests {
         soc.write32(RAM_BASE + 0x100, 0xdead_beef);
         c1.step(&mut Core1Loads(&mut soc)).unwrap();
         assert_eq!(c1.regs[3], 0xdead_beef);
-        assert!(Core1Bus { soc: &mut soc, budget: 1, until: None }.jit_mem().is_some());
+        assert!(Core1Bus { soc: &mut soc, budget: 1, until: None, spent: 0 }.jit_mem().is_some());
     }
 
     /// `run_both` with the JIT on or off and a setup for both, in uneven chunks; after every chunk
