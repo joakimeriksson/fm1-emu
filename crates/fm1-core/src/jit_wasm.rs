@@ -363,6 +363,7 @@ const IF: u8 = 0x04;
 const ELSE: u8 = 0x05;
 const END: u8 = 0x0b;
 const BR: u8 = 0x0c;
+const BR_IF: u8 = 0x0d;
 const BR_TABLE: u8 = 0x0e;
 const RETURN: u8 = 0x0f;
 const CALL: u8 = 0x10;
@@ -462,6 +463,8 @@ const L_CUR: u32 = 10;
 const L_OPRES: u32 = 11;
 const L_FA: u32 = 12;
 const L_FB: u32 = 13;
+/// a block's probe points: the stop pc when it lies inside the block (`block`), else 0
+const L_STOPI: u32 = 14;
 
 fn off_reg(r: u8) -> u32 {
     (offset_of!(Cpu, regs) + 4 * (r & 15) as usize) as u32
@@ -703,6 +706,62 @@ impl Gen<'_> {
     fn call(&mut self, f: u32) {
         self.op(CALL);
         uleb(&mut self.c, f as u64);
+    }
+    /// Before instruction `ins` of a block with probe points, at pc: if that is the stop (`L_STOPI`),
+    /// the runner's checks between its calls, as at a block's entry: the registers and sp as when
+    /// its probe began leave (polling with nothing to do); a helper that reached the bus
+    /// (`stop_io`) or less than `STRETCH_ROOM` of the limit left leaves too; else on. (A stop
+    /// inside a block left before it, and the lap went on from a block of its own: DUELL's core
+    /// 1, two-instruction blocks, came back to Rust 4 times a lap.)
+    fn probe_point(&mut self, pc: u32, ins: u32) {
+        self.get(L_STOPI);
+        self.i32c(pc);
+        self.op(I32_EQ);
+        self.if_();
+        // the registers against the probe's, a word at a time (a loop: unrolled, 17 tests at
+        // each point made Bubba Machine's regions a third bigger), then sp; all equal: leave
+        self.op(BLOCK);
+        self.op(VOID);
+        self.i32c(0);
+        self.set(L_A);
+        self.op(LOOP);
+        self.op(VOID);
+        for off in [off_reg(0), off_probe(0)] {
+            self.get(L_CPU);
+            self.get(L_A);
+            self.op(I32_ADD);
+            self.mem_op(I32_LOAD, 2, off);
+        }
+        self.op(I32_NE);
+        self.op(BR_IF);
+        uleb(&mut self.c, 1); // (out of the block: they differ)
+        self.get(L_A);
+        self.i32c(4);
+        self.op(I32_ADD);
+        self.tee(L_A);
+        self.i32c(64);
+        self.op(I32_LT_U);
+        self.op(BR_IF);
+        uleb(&mut self.c, 0); // (round the loop)
+        self.op(END);
+        self.ld_field(off_sp());
+        self.ld_field(off_probe(16));
+        self.op(I32_NE);
+        self.op(BR_IF);
+        uleb(&mut self.c, 0);
+        self.reason(2);
+        self.exit_imm(pc, ins);
+        self.op(END);
+        self.ld_field(off_stop_io());
+        self.done_plus(ins + crate::STRETCH_ROOM);
+        self.get(L_LIMIT);
+        self.op(I32_GE_U);
+        self.op(I32_OR);
+        self.if_();
+        self.reason(3);
+        self.exit_imm(pc, ins);
+        self.end();
+        self.end();
     }
     /// After an op that may have called the bus: leave if the next tick is due (and, between a
     /// glued pair's two instructions, keep interrupts back until the second has run).
@@ -1003,6 +1062,14 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
     g.reason(1);
     g.exit_imm(pc0, 0);
     g.end();
+    // a block whose instructions after the first can each be where a runner's call ends: plain
+    // ops (no glued pair, pair head or if-else block), outside a then-part
+    let probe_ok = g.stops && (2..=PROBE_OPS).contains(&ops.len()) && g.pred.is_none()
+        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::IfBlk { has_else: true, .. }));
+    if probe_ok {
+        g.i32c(0);
+        g.set(L_STOPI);
+    }
     // a runner's stretch (`Cpu::stop_pc`), as jit.rs compiles it: past the call's first block,
     // leave before a block that holds the stop pc, once a helper reached the bus (`stop_io`),
     // or with less than `STRETCH_ROOM` of the limit left (the runner's checks come at the
@@ -1039,15 +1106,21 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
         g.exit_imm(pc0, 0);
         g.end();
         g.op(ELSE);
-        // the stop pc inside the block, past its start: leave before it
+        // the stop pc inside the block, past its start: leave before it, or, where the block has
+        // probe points, run to it and make the runner's checks there (`probe_point`)
         g.get(L_VAL);
         g.i32c(pc0);
         g.op(I32_SUB);
         g.i32c(bytes);
         g.op(I32_LT_U);
         g.if_();
-        g.reason(2);
-        g.exit_imm(pc0, 0);
+        if probe_ok {
+            g.get(L_VAL);
+            g.set(L_STOPI);
+        } else {
+            g.reason(2);
+            g.exit_imm(pc0, 0);
+        }
         g.end();
         g.end();
         // a helper reached the bus, or less than `STRETCH_ROOM` of the limit left
@@ -1066,10 +1139,33 @@ fn block<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp]) {
         g.end();
     }
 
+    if probe_ok {
+        // the copy for a stop pc inside the block (`L_STOPI` set above): with the runner's
+        // checks before each instruction after the first; the block as ever otherwise
+        g.get(L_STOPI);
+        g.if_();
+        block_ops::<B>(g, pc0, ops, true);
+        g.end();
+    }
+    block_ops::<B>(g, pc0, ops, false);
+}
+
+/// The longest block with probe points (`block`): each point is a test of every register, and
+/// the copy doubles the block, which made Bubba Machine's regions 60-80% bigger, and slower in a
+/// wasm engine, with no copy for its longer blocks. Short blocks are where a stop inside one
+/// costs most: a lap of them is a few instructions (DUELL's core 1: two-instruction blocks).
+const PROBE_OPS: usize = 4;
+
+/// The ops of a block from pc0 and its way out; `probe`: with the runner's checks at the stop
+/// pc (`Gen::probe_point`) before each instruction after the first.
+fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool) {
     let mut pc = pc0;
     let mut ended = false;
     for (i, op) in ops.iter().enumerate() {
         let idx = i as u32;
+        if probe && idx > 0 {
+            g.probe_point(pc, idx);
+        }
         let next_pc = pc + op.len as u32;
         let count = idx + 1;
         let mut bus_used = false;
@@ -2168,9 +2264,10 @@ fn module(body: &[u8]) -> Vec<u8> {
     name(&mut ex, "run");
     ex.extend_from_slice(&[0x00, F_RUN as u8]);
     section(&mut m, 7, &ex);
-    // code: locals a, b, addr, val, off, done, cur (i32), the op result (i64), fa, fb (f32)
+    // code: locals a, b, addr, val, off, done, cur (i32), the op result (i64), fa, fb (f32),
+    // the probe points' stop (i32)
     let mut f = Vec::new();
-    f.extend_from_slice(&[3, 7, T_I32, 1, T_I64, 2, T_F32]);
+    f.extend_from_slice(&[4, 7, T_I32, 1, T_I64, 2, T_F32, 1, T_I32]);
     f.extend_from_slice(body);
     let mut code = Vec::new();
     uleb(&mut code, 1);
