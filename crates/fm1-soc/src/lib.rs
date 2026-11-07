@@ -40,6 +40,10 @@ mod ram;
 pub mod smk;
 mod spiflash;
 pub mod usb;
+pub mod nat;
+pub mod net;
+pub mod netutil;
+pub mod wifi;
 
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
@@ -105,6 +109,9 @@ enum Region {
     /// JL_SRC, the sample-rate converter (hwsrc.rs).
     HwSrc,
     Sram2,
+    /// Vendor WiFi mailbox (wifi.rs): opt-in via --wifi, the register-mapped mailbox at
+    /// 0x30000..=0x3011f (narrow; unhandled offsets go to unknown_log).
+    Wifi,
     Unknown,
 }
 
@@ -379,6 +386,9 @@ pub struct Soc {
     pub hwsrc: hwsrc::HwSrc,
     /// USB0 and, with a cable (`usb_plug`), a host on the other end (usb.rs).
     pub usb: usb::Usb,
+    /// Vendor WiFi mailbox (wifi.rs): the register-mapped mock of fm1-base's plat_wifi_*
+    /// at 0x30000..=0x3011f. `enable_vendor_wifi` turns it on; None = no WiFi.
+    pub wifi: Option<wifi::WifiController>,
     /// Exact skipping of cpu0's polling loops (`machine::run_blocks`).
     pub loop_skip: machine::LoopSkip,
     /// Chip resets so far (the watchdog's, PR_PWR's: p33.rs), and the cause of one to come
@@ -552,6 +562,7 @@ impl Soc {
             hweq: hweq::HwEq::new(),
             hwsrc: Default::default(),
             usb: Default::default(),
+            wifi: None,
             // (FM1_TRACE: a trace shows every instruction as it runs, not a probe's)
             loop_skip: machine::LoopSkip::new(std::env::var_os("FM1_NO_LOOPSKIP").is_none() && std::env::var_os("FM1_TRACE").is_none()),
             resets: 0,
@@ -689,6 +700,7 @@ impl Soc {
             Region::Gpio | Region::Adc => fm1,
             Region::Spi1 => fm1 && !self.lcd_timed,
             // (the FFT / vector unit's done bit comes with the clock)
+            Region::Wifi => self.wifi.is_some(),
             Region::Spi0 | Region::Rand | Region::HwDsp | Region::HwEq | Region::HwSrc | Region::Unknown => false,
         }
     }
@@ -728,6 +740,22 @@ impl Soc {
         }
     }
 
+    /// Vendor WiFi mailbox (--wifi): the register-mapped mock of fm1-base's plat_wifi_*,
+    /// with a virtual subnet (ARP, DHCP, DNS, SNTP, ICMP) behind the virtual AP.
+    pub fn enable_vendor_wifi(&mut self) {
+        self.wifi = Some(wifi::WifiController::new());
+        self.periph.arm_wifi_tick();
+    }
+
+    /// The real network behind the vendor WiFi's virtual subnet (--internet; after
+    /// `enable_vendor_wifi`). Off by default: a firmware reaches nothing outside the
+    /// emulator. `allow_lan`: this computer's own addresses and its LAN too.
+    pub fn enable_internet(&mut self, allow_lan: bool) {
+        if let Some(w) = self.wifi.as_mut() {
+            w.vnet.enable_nat(allow_lan);
+        }
+    }
+
     /// Wire the chip into `board`'s panel (and its flash chip's id).
     pub fn set_board(&mut self, board: Board) {
         self.board = board;
@@ -745,6 +773,12 @@ impl Soc {
         let due = self.periph.advance(n);
         if due.wdt {
             self.reset_req.get_or_insert(p33::P33::RST_WDT);
+        }
+        if due.wifi_tick {
+            let ms = self.periph.ms();
+            if let Some(w) = self.wifi.as_mut() {
+                w.poll_nat(ms);
+            }
         }
         if let Some((at, b)) = due.uart_rx {
             self.write8(at, b);
@@ -848,6 +882,7 @@ impl Soc {
                 // FM-1's stock firmware touches the block too, as before: unknown.
                 0x16800..=0x16a1f if self.board == Board::Smk37 => Region::Usb,
                 0x20000..=0x2ffff => Region::Bt,
+                0x30000..=0x3011f => Region::Wifi,
                 hweq::BASE..=hweq::END | hweq::RAM..=hweq::RAM_END => Region::HwEq,
                 hwsrc::BASE..=hwsrc::END => Region::HwSrc,
                 _ => Region::Unknown,
@@ -1373,6 +1408,17 @@ impl Soc {
             Region::HwDsp => self.hwdsp.read(addr, self.unit_clock()),
             Region::HwEq => self.hweq.read(addr, self.unit_clock()),
             Region::HwSrc => self.hwsrc.read(addr, self.unit_clock()),
+            Region::Wifi => {
+                if let Some(w) = self.wifi.as_ref() {
+                    match w.read(addr - 0x30000) {
+                        Some(v) => v,
+                        None => { self.log_unknown(addr, 4, false, 0); 0 }
+                    }
+                } else {
+                    self.log_unknown(addr, 4, false, 0);
+                    0
+                }
+            }
             Region::Unknown => {
                 if addr < NULL_PAGE {
                     self.bus_invalid(4); // a read of the NULL page (DBG_MSG bit 4, AXI read)
@@ -1568,6 +1614,15 @@ impl Soc {
                 u.write(self, addr, value, cycles);
                 self.hwsrc = u;
             }
+            Region::Wifi => {
+                if let Some(w) = self.wifi.as_mut() {
+                    if !w.write(addr - 0x30000, value) {
+                        self.log_unknown(addr, 4, true, value);
+                    }
+                } else {
+                    self.log_unknown(addr, 4, true, value);
+                }
+            }
             Region::Unknown => {
                 if addr < NULL_PAGE {
                     self.bus_invalid(5); // a write to the NULL page (DBG_MSG bit 5, AXI write)
@@ -1692,6 +1747,7 @@ mod tests {
             0x11900..=0x119ff => Region::Ana,
             0x13e08..=0x13e0f => Region::P33,
             0x20000..=0x2ffff => Region::Bt,
+            0x30000..=0x3011f => Region::Wifi,
             0x1e000..=0x1e01f | 0x1e800..=0x1eb3f => Region::HwEq,
             0x14300..=0x14323 => Region::HwSrc,
             0x1eee240..=0x1eee24f => Region::Dbg,

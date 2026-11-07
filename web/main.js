@@ -81,7 +81,8 @@ const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}
 
 const wasm = await (await fetch("fm1_web.wasm")).arrayBuffer();   // the worklet gets its own copy
 // (the panel's instance runs no machine: its JIT import is never called)
-const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } })).instance.exports;
+// (the panel's instance never runs a machine: its imports are stubs)
+const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0, fm1_net_fetch: () => {} } })).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
 const fitPanel = () => document.documentElement.style.setProperty("--above",
@@ -919,6 +920,9 @@ function boot(options = {}) {
         sectors: packSectors(sectors).buffer, syx: importedBank ? importedBank.slice().buffer : null,
         script: trying?.script ? new TextEncoder().encode(trying.script).buffer : null,
         mhz: clock, jit: params.get("jit") !== "0",
+        // ?wifi=1: the vendor WiFi mailbox for fm1-base firmware; &internet=1: this
+        // page's fetch() behind its virtual AP (off by default: a firmware reaches nothing)
+        wifi: params.get("wifi") === "1", internet: params.get("internet") === "1",
         // (?ahead=0: each quantum emulates only for its own frames, as before the even pace)
         ahead: params.has("ahead") ? Number(params.get("ahead")) : undefined });
       status.textContent = `booting ${f.name}…`;
@@ -967,6 +971,17 @@ async function startAudio(auto = false) {
 // what the audio thread sends: the screen and LEDs with its timing, boot and error news
 function onWorklet(e) {
   const m = e.data;
+  if (m.type === "fetch") {
+    // the emulated WiFi's NAT (?wifi=1&internet=1): the page fetches the firmware's URL.
+    // From an https page an http URL is mixed content and cannot be fetched: https then, for
+    // the hosts that have it (api.open-meteo.com does; ip-api.com's free API does not).
+    const url = location.protocol === "https:" ? m.url.replace(/^http:/, "https:") : m.url;
+    fetch(url)
+      .then(async (r) => ({ status: r.status, contentType: r.headers.get("content-type") || "", body: await r.arrayBuffer() }))
+      .catch(() => ({ status: 0, contentType: "", body: new ArrayBuffer(0) }))
+      .then((res) => node?.port.postMessage({ type: "fetch-result", id: m.id, ...res }, [res.body]));
+    return;
+  }
   if (m.type === "error") {
     if (m.fatal && running?.seq === m.seq) {
       running = null;

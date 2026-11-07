@@ -238,6 +238,8 @@ pub struct Periph {
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
+    /// --wifi: the vendor WiFi's next tick, every 10 ms (`arm_wifi_tick`); MAX = no chip.
+    pub(crate) wifi_next: u64,
     /// The cycle the watchdog runs out at (p33.rs; MAX: stopped).
     pub(crate) wdt_at: u64,
     tmr: [Tmr; 4],
@@ -388,6 +390,7 @@ impl Default for Periph {
             spi2_next: u64::MAX,
             usb_next: u64::MAX,
             usb_period: 0,
+            wifi_next: u64::MAX,
             wdt_at: u64::MAX,
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
             uart: Uart { next: u64::MAX, ot_next: u64::MAX, ..Default::default() },
@@ -433,6 +436,8 @@ pub struct Due {
     pub usb_frame: bool,
     /// The watchdog ran out (the SoC resets the chip).
     pub wdt: bool,
+    /// The vendor WiFi's tick (--wifi): the NAT's sockets polled.
+    pub wifi_tick: bool,
     pub actions: Vec<Action>,
 }
 
@@ -443,6 +448,12 @@ impl Periph {
 
     pub fn cycle_of_ms(&self, ms: u64) -> u64 {
         ms * self.hz / 1000
+    }
+
+    /// --wifi: the vendor WiFi ticks every 10 ms from now on, the first time at once.
+    pub(crate) fn arm_wifi_tick(&mut self) {
+        self.wifi_next = self.cycles;
+        self.next_due = 0;
     }
 
     fn t5_period(&self) -> u64 {
@@ -483,7 +494,7 @@ impl Periph {
     /// The next cycle at which something timed happens.
     fn next_event(&self) -> u64 {
         let mut n = self.t5_next.min(self.alnk_next).min(self.tick_next).min(self.spi2_next).min(self.adc_next).min(self.spi1_irq_at);
-        n = n.min(self.uart.next).min(self.uart.ot_next).min(self.usb_next).min(self.wdt_at);
+        n = n.min(self.uart.next).min(self.uart.ot_next).min(self.usb_next).min(self.wdt_at).min(self.wifi_next);
         for t in &self.tmr {
             n = n.min(t.next);
         }
@@ -572,6 +583,10 @@ impl Periph {
                 self.usb_next = self.cycles + self.usb_period;
             }
         }
+        if self.cycles >= self.wifi_next {
+            due.wifi_tick = true;
+            self.wifi_next = self.cycles + (self.hz / 100).max(1);
+        }
         if self.cycles >= self.wdt_at {
             self.wdt_at = u64::MAX;
             due.wdt = true;
@@ -626,6 +641,7 @@ impl Periph {
             adc_value: old.adc_value,
             usb_next: old.usb_next,
             usb_period: old.usb_period,
+            wifi_next: old.wifi_next,
             uart,
             sr_shift: old.sr_shift,
             sr_latched: old.sr_latched,
