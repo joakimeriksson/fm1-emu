@@ -748,6 +748,40 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.store(w, idx);
             bus_used = true;
         }
+        // a block move (as the AArch64 code): each word a plain load or store, RAM inline, in the
+        // interpreter's order, the base written last; the start kept across the bus's calls
+        Fast::BlockMove { base, mask, store, post, down } => {
+            let n = mask.count_ones();
+            g.ld_reg(RAX, base & 15);
+            if down {
+                g.add_imm(RAX, (4 * n).wrapping_neg());
+            }
+            g.a.st(m(RSP, KEEP), RAX);
+            let mut k = 0;
+            for i in 0..16u8 {
+                if mask >> i & 1 == 0 {
+                    continue;
+                }
+                g.a.ld(RAX, m(RSP, KEEP));
+                g.add_imm(RAX, 4 * k);
+                if store {
+                    g.ld_reg(RCX, i);
+                    g.store(4, idx);
+                } else {
+                    g.load(4, false, idx);
+                    g.st_reg(RAX, i);
+                }
+                k += 1;
+            }
+            if post {
+                g.a.ld(RAX, m(RSP, KEEP));
+                if !down {
+                    g.add_imm(RAX, 4 * n);
+                }
+                g.st_reg(RAX, base & 15);
+            }
+            bus_used = true;
+        }
         Fast::MemA4 { b, off, op: aop, rk, rv } => {
             g.rhs(rk, rv);
             g.a.st(m(RSP, KEEP2), RCX);
