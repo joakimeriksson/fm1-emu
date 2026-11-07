@@ -133,13 +133,18 @@ impl Panel {
         }
     }
 
+    /// Each button LED's lit fraction (of its group's time) since the last `led_take`, which
+    /// goes on counting.
+    pub fn led_peek(&self) -> [f32; NLED] {
+        std::array::from_fn(|k| {
+            let on = self.group_on[LEDS[k].0 as usize];
+            if on == 0 { 0.0 } else { self.led_lit[k] as f32 / on as f32 }
+        })
+    }
+
     /// Each button LED's lit fraction (of its group's time) since the last call.
     pub fn led_take(&mut self) -> [f32; NLED] {
-        let mut out = [0f32; NLED];
-        for (k, &(g, _)) in LEDS.iter().enumerate() {
-            let on = self.group_on[g as usize];
-            out[k] = if on == 0 { 0.0 } else { self.led_lit[k] as f32 / on as f32 };
-        }
+        let out = self.led_peek();
         self.led_lit = [0; NLED];
         self.group_on = [0; 2];
         out
@@ -324,5 +329,18 @@ mod tests {
         assert_eq!(key_id("seq play"), Some(BTN0 + 16));
         assert_eq!(key_id("k36"), Some(36));
         assert_eq!(key_id("k37"), None);
+    }
+
+    #[test]
+    fn led_peek_reads_the_fractions_without_taking_them() {
+        let mut p = Panel::default();
+        let (g, bit) = LEDS[0];
+        p.commons = u32::MAX & !(1 << (17 + g as u32)); // its group's common on
+        word(&mut p, !(1u32 << bit)); // lit (active low)
+        word(&mut p, !0u32); // dark
+        assert_eq!(p.led_peek()[0], 0.5);
+        assert_eq!(p.led_peek()[0], 0.5, "a peek leaves the counts alone");
+        assert_eq!(p.led_take()[0], 0.5, "the take still covers all of them");
+        assert_eq!(p.led_take()[0], 0.0, "the take did reset them");
     }
 }
