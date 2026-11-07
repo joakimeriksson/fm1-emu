@@ -204,6 +204,10 @@ pub struct AddrHasher(u64);
 
 /// SFR words at aligned addresses below this live in `Soc::sfr_lo`.
 const SFR_LO_END: u32 = 0x6_0000;
+/// PLL0's two control words (JL_ANA), and what they read once a bootloader started it.
+const PLL0_CON0: u32 = 0x119a0;
+const PLL0_CON1: u32 = 0x119a4;
+const PLL0_BOOT: (u32, u32) = (0x4540_0203, 0x3f50_3026);
 
 impl std::hash::Hasher for AddrHasher {
     fn finish(&self) -> u64 {
@@ -499,7 +503,7 @@ impl Soc {
 
     /// `ram_size` in bytes; `xip` = the app binary mapped at XIP_BASE.
     pub fn new(ram_size: usize, xip: Vec<u8>) -> Self {
-        Self {
+        let mut soc = Self {
             board: Board::Fm1,
             bt_window: BT_WINDOW_BASE,
             xip,
@@ -553,7 +557,14 @@ impl Soc {
             resets: 0,
             reset_req: None,
             boot: None,
-        }
+        };
+        // PLL0 as the bootloader leaves it, M-VAVE's and m-bootloader's alike (read off FM-1s:
+        // felucca-bsp chip/fm1_clock.h). The BSP's audio driver (AMB-1 1.3.2, CTL-1 1.0.3,
+        // CHOPPAH 0.99, Polly 0.6.2) checks these before it starts ALNK0 and leaves the audio
+        // off under any other clock. `take_boot` keeps them for a reset.
+        soc.sfr_set(PLL0_CON0, PLL0_BOOT.0);
+        soc.sfr_set(PLL0_CON1, PLL0_BOOT.1);
+        soc
     }
 
     /// cpu0 starts (the runners call this before its first instruction): the chip as it is now
@@ -1800,6 +1811,17 @@ mod tests {
         assert_eq!(soc.read32(0x0207_1000), 0xaaaa_aaaa, "the erase after the cut never happened");
         assert_eq!(soc.flash.ops, 3);
         assert!(soc.flash.cut());
+    }
+
+    #[test]
+    fn pll0_reads_as_the_bootloader_left_it() {
+        // felucca-bsp's audio driver: ALNK0 starts only under this clock (fm1_clock.h)
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        assert_eq!(soc.read32(0x119a0), 0x4540_0203);
+        assert_eq!(soc.read32(0x119a4) & 0x07ff_ffff, 0x0750_3026);
+        // still a plain register: what the firmware writes reads back
+        soc.write32(0x119a0, 0x4540_0200);
+        assert_eq!(soc.read32(0x119a0), 0x4540_0200);
     }
 
     /// A chip with IRQ 16 enabled in cpu0's bank and SPI1 at the LCD's BAUD.
