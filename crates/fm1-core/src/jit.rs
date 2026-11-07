@@ -753,6 +753,9 @@ fn stop_io(ctx: &mut Ctx) {
 fn off_ie() -> u32 {
     std::mem::offset_of!(Cpu, ie) as u32
 }
+fn off_probe(i: u32) -> u32 {
+    std::mem::offset_of!(Cpu, probe) as u32 + 4 * i
+}
 fn off_stop_pc() -> u32 {
     std::mem::offset_of!(Cpu, stop_pc) as u32
 }
@@ -1743,10 +1746,32 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         g.a.cbz(9, go);
         if whole {
             let bytes: u32 = ops.iter().map(|o| o.len as u32).sum();
+            let (inside, on) = (g.a.label(), g.a.label());
             g.a.mov32(10, pc0);
+            // back at the stop pc, this block's start: the runner's own test, made here, as
+            // jit_wasm.rs does. The registers and sp as when its probe began is polling with
+            // nothing to do: leave (the runner stops the core). Else the lap goes on: the
+            // runner would only call again with the same stretch (DUELL's core 1 came back
+            // every 7 instructions). The registers are all in memory at a block's entry.
+            g.a.cmp(9, 10);
+            g.a.b_cond(AC::Ne, inside);
+            for r in 0..16u8 {
+                g.a.ldr(10, CPU, off_reg(r));
+                g.a.ldr(11, CPU, off_probe(r as u32));
+                g.a.cmp(10, 11);
+                g.a.b_cond(AC::Ne, on);
+            }
+            g.a.ldr(10, CPU, off_sp());
+            g.a.ldr(11, CPU, off_probe(16));
+            g.a.cmp(10, 11);
+            g.a.b_cond(AC::Ne, on);
+            g.a.b(stop);
+            // the stop pc inside the block, past its start: leave before it
+            g.a.bind(inside);
             g.a.sub(9, 9, 10);
             g.a.cmp_imm(9, bytes);
             g.a.b_cond(AC::Lo, stop);
+            g.a.bind(on);
             g.a.ldr(9, CPU, off_stop_io());
             g.a.cbnz(9, stop);
             g.a.add_imm(9, DONE, crate::STRETCH_ROOM);
