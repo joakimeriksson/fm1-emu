@@ -1670,6 +1670,34 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.store(4, idx);
             bus_used = true;
         }
+        // a block move (memcpy's inner loop): each word as a plain load or store, RAM inline,
+        // in the interpreter's order (ascending registers from the lowest address), the base
+        // written last. KEEP holds the start across the bus's calls
+        Fast::BlockMove { base, mask, store, post, down } => {
+            let n = mask.count_ones();
+            g.ld_reg(0, base & 15);
+            g.add_imm(KEEP, 0, if down { (4 * n).wrapping_neg() } else { 0 });
+            let mut k = 0;
+            for i in 0..16u8 {
+                if mask >> i & 1 == 0 {
+                    continue;
+                }
+                g.add_imm(0, KEEP, 4 * k);
+                if store {
+                    g.ld_reg(1, i);
+                    g.store(4, idx);
+                } else {
+                    g.load(4, false, idx);
+                    g.st_reg(0, i);
+                }
+                k += 1;
+            }
+            if post {
+                g.add_imm(0, KEEP, if down { 0 } else { 4 * n });
+                g.st_reg(0, base & 15);
+            }
+            bus_used = true;
+        }
         // ---- everything else: the interpreter's executor for this one op
         other => {
             let p: &'static Fast = Box::leak(Box::new(other));
@@ -2439,6 +2467,12 @@ mod tests {
         }
         for n in [0, 3, 4, 7, 15] { cases.push(Fast::PushRets { n }); cases.push(Fast::PopPc { n }); }
         for half in [false, true] { cases.push(Fast::Tb { r: 8, half }); }
+        // block moves off r8 (a word in RAM): one word, a run, gaps, and the base in its own list
+        for mask in [0x0001u16, 0x0003, 0x00f0, 0x8421, 0x0103, 0x0100] { for store in [false, true] {
+            for post in [false, true] { for down in [false, true] {
+                cases.push(Fast::BlockMove { base: 8, mask, store, post, down });
+            } }
+        } }
         for v in [5, 0x8000_0000] { cases.push(Fast::Mov2I { dh: 0, dl: 1, v }); cases.push(Fast::MovI { d: 2, v }); }
         cases.extend([Fast::Nop, Fast::Mov { d: 0, s: 1 }, Fast::AddRI { d: 0, s: 1, v: 0xffff_fffc },
             Fast::Mov2 { dh: 0, dl: 1, sh: 1, sl: 2 }, Fast::SpAdd { v: 0xffff_fff0 }, Fast::RFromSp { d: 0, v: 8 },
