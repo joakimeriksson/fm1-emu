@@ -693,6 +693,9 @@ const FLAGS: Reg = 25;
 const DONE: Reg = 26;
 #[cfg(target_arch = "aarch64")]
 const LIMIT: Reg = 27;
+/// a probe copy's stop: the index of the instruction at the stop pc (`emit_ops`)
+#[cfg(target_arch = "aarch64")]
+const STOPI: Reg = 28;
 #[cfg(target_arch = "aarch64")]
 const FRAME: i32 = 96;
 
@@ -709,6 +712,8 @@ struct Gen<'a> {
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
     rc: RegCache,
+    /// emitting a probe copy (`emit_ops`): the block's instructions
+    probe_copy: Option<u32>,
 }
 
 /// Guest registers kept in host registers within a block. `ld_reg` loads one into its host
@@ -1086,10 +1091,60 @@ impl Gen<'_> {
     /// Leaving `rest` instructions before the block's end: a runner's stretch learns where the
     /// block's call ends (`Cpu::stop_rest`).
     fn rest(&mut self, rest: u32) {
-        if self.stops && rest > 0 {
+        if let (true, Some(total)) = (self.stops, self.probe_copy) {
+            // a probe copy: the call in progress ends at the stop pc while it lies ahead
+            let (at_end, out) = (self.a.label(), self.a.label());
+            self.a.mov32(10, total - rest); // (the instructions done so far)
+            self.a.subs(9, STOPI, 10);
+            self.a.b_cond(AC::Lo, at_end);
+            self.a.str(9, CPU, off_stop_rest());
+            self.a.b(out);
+            self.a.bind(at_end);
+            if rest > 0 {
+                self.a.mov32(9, rest);
+                self.a.str(9, CPU, off_stop_rest());
+            }
+            self.a.bind(out);
+        } else if self.stops && rest > 0 {
             self.a.mov32(9, rest);
             self.a.str(9, CPU, off_stop_rest());
         }
+    }
+    /// w = guest register r as it is now, without changing which the cache holds
+    fn peek_reg(&mut self, w: Reg, r: u8) {
+        match self.rc.guest.iter().position(|&g| g == Some(r)) {
+            Some(i) => self.a.mov(w, POOL[i]),
+            None => self.a.ldr(w, CPU, off_reg(r)),
+        }
+    }
+    /// A probe copy, before its instruction `ins` at pc: if that is the stop (`STOPI`), the
+    /// runner's checks between its calls, as at a block's entry: the registers and sp as when
+    /// the probe began leave (polling with nothing to do); a helper that may have reached a
+    /// peripheral (`stop_io`) or less than `STRETCH_ROOM` of the limit left leaves too; else on.
+    fn probe_point(&mut self, pc: u32, ins: u32) {
+        let (skip, on, out) = (self.a.label(), self.a.label(), self.a.label());
+        self.a.cmp_imm(STOPI, ins);
+        self.a.b_cond(AC::Ne, skip);
+        for r in 0..16u8 {
+            self.peek_reg(10, r);
+            self.a.ldr(11, CPU, off_probe(r as u32));
+            self.a.cmp(10, 11);
+            self.a.b_cond(AC::Ne, on);
+        }
+        self.a.ldr(10, CPU, off_sp());
+        self.a.ldr(11, CPU, off_probe(16));
+        self.a.cmp(10, 11);
+        self.a.b_cond(AC::Ne, on);
+        self.a.b(out);
+        self.a.bind(on);
+        self.a.ldr(9, CPU, off_stop_io());
+        self.a.cbnz(9, out);
+        self.add_imm(9, DONE, ins + crate::STRETCH_ROOM);
+        self.a.cmp(9, LIMIT);
+        self.a.b_cond(AC::Lo, skip);
+        self.a.bind(out);
+        self.exit_imm(pc, ins);
+        self.a.bind(skip);
     }
     /// Inside an if-else block's then-part, after an op that may have used the bus: leave if
     /// the next tick is due, with the skip (te, ee, ts) for `Cpu::pred_skips` (`Ctx::pred`).
@@ -1725,6 +1780,83 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
     bus_used
 }
 
+/// The ops of a block from pc0 (and an if-else block's then-part), and the chain off its end.
+/// `probe`: the copy a runner's stretch runs when its stop pc lies inside the block
+/// (`compile`): before each instruction after the first, at the stop pc (`STOPI` holds its
+/// index), the runner's own checks, made here.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, profile: bool, probe: bool) {
+    let mut pc = pc0;
+    // instructions so far (a swapped pair is two)
+    let mut ins = 0u32;
+    for op in ops {
+        if probe && ins > 0 {
+            g.probe_point(pc, ins);
+        }
+        let next_pc = pc + op.len as u32;
+        if let Fast::Swap { idx: s } = op.fast {
+            // a dual-issue pair run second instruction first (the pair rule's result, as
+            // `exec_careful_op` runs it whole): the second with both ticks taken, then the head
+            // (registers only); then leave if the next tick is due or an interrupt is pending,
+            // as the careful path stops after a pair
+            let (head, tail, hlen) = swaps[s as usize];
+            let mid = pc + hlen as u32;
+            emit_op::<B>(g, tail, ins + 1, next_pc, profile);
+            emit_op::<B>(g, head, ins, mid, profile);
+            g.check_pair(next_pc, ins + 2, insns(ops) - (ins + 2));
+            ins += 2;
+            pc = next_pc;
+            continue;
+        }
+        if let Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } = op.fast {
+            // an if-else block with its then-part (`Jit::entry`: the block's last op): not taken,
+            // on at the else part; taken, the then-part, then past the else part. Interrupts wait
+            // through the then-part (an exit inside it leaves the skip in `Ctx::pred`, for
+            // pred_skips) and after it the careful path stops if one is pending (`check_pair`).
+            let te = next_pc.wrapping_add(then_d as u32);
+            let ee = te.wrapping_add(else_d as u32);
+            let taken = g.a.label();
+            g.if_jump(a, rk, fam, alt, rv, taken);
+            g.chain(te, ins + 1);
+            g.a.bind(taken);
+            let (mut tpc, mut j) = (next_pc, ins + 1);
+            for (k, t) in then.iter().enumerate() {
+                let tnext = tpc + t.len as u32;
+                if emit_op::<B>(g, t.fast, j, tnext, profile) && k + 1 < then.len() {
+                    g.check_brk_pred(tnext, j + 1, te, ee, next_pc);
+                }
+                (tpc, j) = (tnext, j + 1);
+            }
+            if !then.is_empty() {
+                g.check_pair(ee, j, 0);
+            }
+            g.chain(ee, j);
+            ins = j;
+            break;
+        }
+        let bus_used = emit_op::<B>(g, op.fast, ins, next_pc, profile);
+        if bus_used && !op.fast.may_jump() {
+            let rest = insns(ops) - (ins + 1);
+            if op.glue {
+                // leaving between a glued pair's two instructions: interrupts wait for the second
+                g.check_brk_hold(next_pc, ins + 1, rest);
+            } else {
+                g.check_brk(next_pc, ins + 1, rest);
+            }
+        }
+        ins += 1;
+        pc = next_pc;
+        if op.fast.may_jump() {
+            break; // (the block's last op)
+        }
+    }
+    // fell off the end of the prefix
+    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
+        g.chain(pc, ins);
+    }
+}
+
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
@@ -1746,7 +1878,13 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         itab,
         stops: stops.is_some(),
         rc: RegCache::default(),
+        probe_copy: None,
     };
+    // a block a probe copy can serve: plain ops one instruction each (no pair, glue or
+    // if-else), so every instruction after the first has a point to stop at
+    let probe_ok = stops == Some(true) && ops.len() > 1 && then.is_empty()
+        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }));
+    let probe_l = probe_ok.then(|| g.a.label());
     // prologue (entry from Rust); chained blocks enter at the body
     g.a.stp_pre(29, 30, SP, -FRAME);
     g.a.stp(CPU, CTX, SP, 16);
@@ -1762,6 +1900,9 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
     g.a.mov_x(FLAGS, 5);
     g.a.movz(DONE, 0, 0);
     let body = g.a.here();
+    if probe_ok {
+        g.a.movz(STOPI, 0, 0);
+    }
     // a runner's stretch (`Cpu::stop_pc`): entered after the call's first block, from the end
     // of a block compiled whole, this is where one of the runner's calls ends. Back to Rust
     // here when the runner could decide otherwise from here on: the stop lies in this block,
@@ -1794,11 +1935,17 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
             g.a.cmp(10, 11);
             g.a.b_cond(AC::Ne, on);
             g.a.b(stop);
-            // the stop pc inside the block, past its start: leave before it
+            // the stop pc inside the block, past its start: leave before it, or, where the
+            // probe copy serves the block, run it (below), past the runner's checks here
             g.a.bind(inside);
             g.a.sub(9, 9, 10);
             g.a.cmp_imm(9, bytes);
-            g.a.b_cond(AC::Lo, stop);
+            if probe_ok {
+                g.a.b_cond(AC::Hs, on);
+                g.a.movz(STOPI, 1, 0);
+            } else {
+                g.a.b_cond(AC::Lo, stop);
+            }
             g.a.bind(on);
             g.a.ldr(9, CPU, off_stop_io());
             g.a.cbnz(9, stop);
@@ -1841,71 +1988,35 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         g.exit_imm(pc0, 0);
         g.a.bind(valid);
     }
-
-    let mut pc = pc0;
-    // instructions so far (a swapped pair is two)
-    let mut ins = 0u32;
-    for op in ops {
-        let next_pc = pc + op.len as u32;
-        if let Fast::Swap { idx: s } = op.fast {
-            // a dual-issue pair run second instruction first (the pair rule's result, as
-            // `exec_careful_op` runs it whole): the second with both ticks taken, then the head
-            // (registers only); then leave if the next tick is due or an interrupt is pending,
-            // as the careful path stops after a pair
-            let (head, tail, hlen) = swaps[s as usize];
-            let mid = pc + hlen as u32;
-            emit_op::<B>(&mut g, tail, ins + 1, next_pc, profile);
-            emit_op::<B>(&mut g, head, ins, mid, profile);
-            g.check_pair(next_pc, ins + 2, insns(ops) - (ins + 2));
-            ins += 2;
-            pc = next_pc;
-            continue;
-        }
-        if let Fast::IfBlk { a, rk, fam, alt, has_else: true, rv, then_d, else_d } = op.fast {
-            // an if-else block with its then-part (`Jit::entry`: the block's last op): not taken,
-            // on at the else part; taken, the then-part, then past the else part. Interrupts wait
-            // through the then-part (an exit inside it leaves the skip in `Ctx::pred`, for
-            // pred_skips) and after it the careful path stops if one is pending (`check_pair`).
-            let te = next_pc.wrapping_add(then_d as u32);
-            let ee = te.wrapping_add(else_d as u32);
-            let taken = g.a.label();
-            g.if_jump(a, rk, fam, alt, rv, taken);
-            g.chain(te, ins + 1);
-            g.a.bind(taken);
-            let (mut tpc, mut j) = (next_pc, ins + 1);
-            for (k, t) in then.iter().enumerate() {
-                let tnext = tpc + t.len as u32;
-                if emit_op::<B>(&mut g, t.fast, j, tnext, profile) && k + 1 < then.len() {
-                    g.check_brk_pred(tnext, j + 1, te, ee, next_pc);
-                }
-                (tpc, j) = (tnext, j + 1);
-            }
-            if !then.is_empty() {
-                g.check_pair(ee, j, 0);
-            }
-            g.chain(ee, j);
-            ins = j;
-            break;
-        }
-        let bus_used = emit_op::<B>(&mut g, op.fast, ins, next_pc, profile);
-        if bus_used && !op.fast.may_jump() {
-            let rest = insns(ops) - (ins + 1);
-            if op.glue {
-                // leaving between a glued pair's two instructions: interrupts wait for the second
-                g.check_brk_hold(next_pc, ins + 1, rest);
-            } else {
-                g.check_brk(next_pc, ins + 1, rest);
-            }
-        }
-        ins += 1;
-        pc = next_pc;
-        if op.fast.may_jump() {
-            break; // (the block's last op)
-        }
+    if let Some(l) = probe_l {
+        g.a.cbnz(STOPI, l);
     }
-    // fell off the end of the prefix
-    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
-        g.chain(pc, ins);
+
+    emit_ops::<B>(&mut g, ops, swaps, then, pc0, profile, false);
+    if let Some(l) = probe_l {
+        // the copy for a stop pc inside the block: which instruction it is (`STOPI`), else
+        // leave as before (a stop the copy has no check before)
+        g.a.bind(l);
+        g.rc = RegCache::default();
+        g.probe_copy = Some(insns(ops));
+        let start = g.a.label();
+        g.a.ldr(9, CPU, off_stop_pc());
+        let mut q = pc0;
+        for (i, op) in ops.iter().enumerate() {
+            if i > 0 {
+                let next = g.a.label();
+                g.a.mov32(10, q);
+                g.a.cmp(9, 10);
+                g.a.b_cond(AC::Ne, next);
+                g.a.movz(STOPI, i as u32, 0);
+                g.a.b(start);
+                g.a.bind(next);
+            }
+            q += op.len as u32;
+        }
+        g.exit_imm(pc0, 0);
+        g.a.bind(start);
+        emit_ops::<B>(&mut g, ops, swaps, then, pc0, profile, true);
     }
     g.a.bind(exit);
     g.a.ldp(LIMIT, 28, SP, 80);
@@ -2345,29 +2456,59 @@ mod tests {
             let (_, slot, _) = unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 100, false) };
             unsafe { link(slot, j.body(id).unwrap()); }
         }
-        let mut go = |code, stop_pc, stop_io, cap| {
+        // (`probe`: r0 when the runner's probe began, the other registers and sp 0)
+        let mut go = |code, stop_pc, stop_io, cap, probe: u32| {
             cpu.regs = [0; 16]; cpu.stop_pc = stop_pc; cpu.stop_io = stop_io;
+            cpu.probe = [0; 17]; cpu.probe[0] = probe;
             let k = unsafe { run(code, &mut cpu, &mut bus, &mem, 0, cap, false) }.0;
             (k, cpu.pc, cpu.regs[0])
         };
         // no stretch, or nothing to stop for: on into the next block
-        assert_eq!(go(from, 0, 0, 100), (3, 36, 42));
-        assert_eq!(go(from, 0x40, 0, 100), (3, 36, 42));
+        assert_eq!(go(from, 0, 0, 100, 0), (3, 36, 42));
+        assert_eq!(go(from, 0x40, 0, 100, 0), (3, 36, 42));
         // back before it: the stop starts it or lies in it, a peripheral was reached, or the
         // stretch is spent (`STRETCH_ROOM` short of the limit)
-        assert_eq!(go(from, 32, 0, 100), (1, 32, 0));
-        assert_eq!(go(from, 34, 0, 100), (1, 32, 0));
-        assert_eq!(go(from, 36, 0, 100), (3, 36, 42));
-        assert_eq!(go(from, 0x40, 1, 100), (1, 32, 0));
+        assert_eq!(go(from, 32, 0, 100, 0), (1, 32, 0));
+        // (at the stop with registers other than the probe's: on, as the runner would call again)
+        assert_eq!(go(from, 32, 0, 100, 1), (3, 36, 42));
+        // the stop inside it (its second op): the probe copy runs to it and makes the runner's
+        // test there: the registers as the probe began leave at it, else on; a peripheral
+        // reached leaves at the block's entry; the stretch spent at the stop leaves at it
+        assert_eq!(go(from, 34, 0, 100, 0), (3, 36, 42));
+        assert_eq!(go(from, 34, 0, 100, 42), (2, 34, 42));
+        assert_eq!(go(from, 34, 1, 100, 0), (1, 32, 0));
+        assert_eq!(go(from, 34, 0, 2 + crate::STRETCH_ROOM, 0), (2, 34, 42));
+        assert_eq!(go(from, 34, 0, 3 + crate::STRETCH_ROOM, 0), (3, 36, 42));
+        assert_eq!(go(from, 36, 0, 100, 0), (3, 36, 42));
+        assert_eq!(go(from, 0x40, 1, 100, 0), (1, 32, 0));
         let room = crate::STRETCH_ROOM;
-        assert_eq!(go(from, 0x40, 0, 1 + room), (1, 32, 0));
-        assert_eq!(go(from, 0x40, 0, 2 + room), (3, 36, 42));
+        assert_eq!(go(from, 0x40, 0, 1 + room, 0), (1, 32, 0));
+        assert_eq!(go(from, 0x40, 0, 2 + room, 0), (3, 36, 42));
         // a block not compiled whole: only outside a stretch
-        assert_eq!(go(from2, 0, 0, 100).0, 2);
-        assert_eq!(go(from2, 0x1000, 0, 100), (1, 64, 0));
+        assert_eq!(go(from2, 0, 0, 100, 0).0, 2);
+        assert_eq!(go(from2, 0x1000, 0, 100, 0), (1, 64, 0));
         // never at the call's first block
-        assert_eq!(go(to, 32, 1, 100), (2, 36, 42));
+        assert_eq!(go(to, 32, 1, 100, 0), (2, 36, 42));
         cpu.stop_pc = 0; cpu.stop_io = 0;
+    }
+    #[test]
+    fn a_probe_copy_ends_the_runners_call_at_the_stop() {
+        // 0: goto 32; 32: a load that reaches a peripheral (the next tick then due), then two
+        // ops; the stop at the third (36). Leaving after the load, the call in progress ends at
+        // the stop, 1 instruction on (`Cpu::stop_rest`), not at the block's end (2)
+        let mut bus = Memory::new(); let mem = bus.jit_mem().unwrap();
+        let mut cpu = Cpu::new(0); let mut j = Jit::new(false).unwrap();
+        j.stops = true;
+        let from = hot(&mut j, 0, 0, &[op(Fast::Goto { target: 32 })], &mem);
+        hot(&mut j, 1, 32, &[op(Fast::LdW { d: 0, b: 1, off: 0 }), op(Fast::MovI { d: 2, v: 5 }), op(Fast::MovI { d: 3, v: 6 })], &mem);
+        let (_, slot, _) = unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 100, false) };
+        unsafe { link(slot, j.body(1).unwrap()); }
+        bus.due_on_mmio = true; bus.mmio = 77;
+        cpu.regs = [0; 16]; cpu.regs[1] = MMIO; cpu.probe = [0; 17];
+        cpu.stop_pc = 36; cpu.stop_io = 0; cpu.stop_rest = 0;
+        let k = unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 100, false) }.0;
+        assert_eq!((k, cpu.pc, cpu.regs[0], cpu.stop_rest), (2, 34, 77, 1));
+        cpu.stop_pc = 0;
     }
     #[test]
     fn code_store_exits_before_following_instruction() {
