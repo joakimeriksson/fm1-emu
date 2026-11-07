@@ -14,7 +14,7 @@
 //! host (the interpreter); conversions to integers saturate as Rust's `as` does (cvttss2si alone
 //! gives 0x8000_0000 for NaN and out of range); min / max through the interpreter's executor.
 
-use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
+use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_probe, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
 use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Mem, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
 use crate::{Base, Bus, Cond, Fast, Op, RmwOp};
 
@@ -975,9 +975,26 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], th
         g.a.jcc(Cc::E, go);
         if whole {
             let bytes: u32 = ops.iter().map(|o| o.len as u32).sum();
+            let (inside, on) = (g.a.label(), g.a.label());
+            // back at the stop pc, this block's start: the runner's polling test made here (as
+            // the AArch64 code): the registers and sp as when the probe began leave, else on
+            g.a.alu_ri(Alu::Cmp, R11, pc0);
+            g.a.jcc(Cc::Ne, inside);
+            for r in 0..16u8 {
+                g.a.ld(R10, m(CPU, off_reg(r) as i32));
+                g.a.cmp_rm(R10, m(CPU, off_probe(r as u32) as i32));
+                g.a.jcc(Cc::Ne, on);
+            }
+            g.a.ld(R10, m(CPU, off_sp() as i32));
+            g.a.cmp_rm(R10, m(CPU, off_probe(16) as i32));
+            g.a.jcc(Cc::Ne, on);
+            g.a.jmp(stop);
+            // the stop pc inside the block, past its start: leave before it
+            g.a.bind(inside);
             g.a.alu_ri(Alu::Sub, R11, pc0);
             g.a.alu_ri(Alu::Cmp, R11, bytes);
             g.a.jcc(Cc::B, stop);
+            g.a.bind(on);
             g.a.cmp_m_i8(m(CPU, off_stop_io() as i32), 0);
             g.a.jcc(Cc::Ne, stop);
             g.a.lea(R11, m(DONE, crate::STRETCH_ROOM as i32));
