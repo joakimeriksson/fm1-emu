@@ -7,3 +7,7 @@ license.workspace = true
 
 [dependencies]
 fm1-core = { path = "../fm1-core" }
+
+[features]
+# the NAT's scripted host side (nat/mock.rs) for integration tests
+nat-mock = []

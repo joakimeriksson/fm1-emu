@@ -85,6 +85,12 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --wifi: the vendor WiFi mailbox (fm1-base's plat_wifi_* mock)
+    wifi: bool,
+    /// --internet: the real network behind the virtual subnet (off by default)
+    internet: bool,
+    /// --allow-lan: with --internet, this computer's own addresses and its LAN too
+    allow_lan: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -111,11 +117,27 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false,
+                       wifi: false, internet: false, allow_lan: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
             o.usb = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--wifi" {
+            o.wifi = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--internet" {
+            o.internet = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--allow-lan" {
+            o.allow_lan = true;
             i += 1;
             continue;
         }
@@ -240,6 +262,14 @@ impl Machine {
         }
         if o.usb {
             soc.usb_plug();
+        }
+        if o.wifi {
+            soc.enable_vendor_wifi();
+            if o.internet {
+                soc.enable_internet(o.allow_lan);
+            }
+        } else if o.internet {
+            eprintln!("--internet: nothing to reach it through without --wifi");
         }
         let skip_log = std::env::var("FM1_SKIP_LOG").ok().map(|_| Default::default());
         let blocks = std::env::var("FM1_NO_BLOCKS").is_err();
@@ -986,6 +1016,8 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+         [--wifi [--internet [--allow-lan]]]  vendor WiFi mailbox; the real network behind
+                      its virtual subnet (off by default); this computer and its LAN too
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
 env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;

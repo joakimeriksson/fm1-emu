@@ -285,6 +285,18 @@ some units, to test a firmware's fallback to one core ([docs/stock-firmware.md](
 `fm1-live --flash FILE` keeps the flash chip (saved presets, samples) in FILE between runs: read
 at the start if it is there, written back at the end. `FM1_FLASH_CUT=N` cuts the power half way
 through the Nth erase or page program, to see what a firmware makes of a half-written save.
+`fm1-live --wifi` enables the vendor WiFi mailbox for fm1-base's recompiled firmware: the
+plat_wifi_* mock registers at 0x30000, two virtual APs ("Home" WPA2 password "fm1pass", "Cafe"
+open), and a subnet behind them (DHCP, DNS, SNTP). Without it the window stays unknown. The firmware
+is an fm1-base app built with its `tools/build.py APP --wifi-emu` (`wifi_stack = "emu"`: the SDK's
+lwIP on the mailbox's frames, nothing of JieLi's linked, a package for the emulator alone), and
+`tools/check_wifi.sh` runs one headless against the real network, the panel as a PNG.
+`--internet` puts the real network behind the AP: a user-mode NAT over this computer's sockets,
+names resolved for real, each host connection on its own thread so a far host never stalls the
+audio. It reaches public addresses only; `--allow-lan` adds this computer's own and its LAN.
+`FM1_NET_TRACE=1` says what the subnet and the NAT do. The page does the same with
+`?wifi=1&internet=1`, the network being the page's `fetch()`: HTTP only, and from an https page
+only the hosts that have https.
 `fm1-live --usb` plugs in a USB cable: the FM-1's USB controller answers (without it, it stays
 silent, as on a unit with no cable), a host enumerates it, and a USB-MIDI firmware shows up on the
 computer (macOS and Linux; on Windows the bus runs, but no MIDI device appears) as a MIDI device
