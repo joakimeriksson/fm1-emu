@@ -1065,8 +1065,12 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], th
         probe_copy: None,
     };
     // a block a probe copy can serve (as the AArch64 code): plain ops, one instruction each
+    // and that ends where the runner's block from the stop would: at a jump, or short of the
+    // 32 ops a block holds (`Cpu::build_block`), else the block from the stop runs on past
+    // this one's end, and its checks come at another instruction
     let probe_ok = stops == Some(true) && ops.len() > 1 && then.is_empty()
-        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }));
+        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }))
+        && (ops.len() < 32 || ops.last().is_some_and(|o| o.fast.may_jump()));
     let probe_l = probe_ok.then(|| g.a.label());
     // prologue (entry from Rust: rdi cpu, rsi ctx, rdx ram, rcx xip, r8d limit, r9 code flags);
     // chained blocks enter at the body. Six pushes and the frame keep rsp 16-byte aligned for

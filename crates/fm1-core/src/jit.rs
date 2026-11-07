@@ -1882,8 +1882,12 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
     };
     // a block a probe copy can serve: plain ops one instruction each (no pair, glue or
     // if-else), so every instruction after the first has a point to stop at
+    // and that ends where the runner's block from the stop would: at a jump, or short of the
+    // 32 ops a block holds (`Cpu::build_block`), else the block from the stop runs on past
+    // this one's end, and its checks come at another instruction
     let probe_ok = stops == Some(true) && ops.len() > 1 && then.is_empty()
-        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }));
+        && ops.iter().all(|o| !o.glue && !o.pair_head && !matches!(o.fast, Fast::Swap { .. } | Fast::IfBlk { has_else: true, .. }))
+        && (ops.len() < 32 || ops.last().is_some_and(|o| o.fast.may_jump()));
     let probe_l = probe_ok.then(|| g.a.label());
     // prologue (entry from Rust); chained blocks enter at the body
     g.a.stp_pre(29, 30, SP, -FRAME);
@@ -2490,6 +2494,25 @@ mod tests {
         // never at the call's first block
         assert_eq!(go(to, 32, 1, 100, 0), (2, 36, 42));
         cpu.stop_pc = 0; cpu.stop_io = 0;
+    }
+    #[test]
+    fn a_block_cut_at_32_ops_has_no_probe_copy() {
+        // 32 plain ops from 32 (the most a block holds, not ended by a jump): the runner's
+        // block from a stop inside it runs on past its end, so a stretch with the stop there
+        // still leaves before it, as before the probe copies (the copy would end the call
+        // at this block's end)
+        let mut bus = Memory::new(); let mem = bus.jit_mem().unwrap();
+        let mut cpu = Cpu::new(0); let mut j = Jit::new(false).unwrap();
+        j.stops = true;
+        let from = hot(&mut j, 0, 0, &[op(Fast::Goto { target: 32 })], &mem);
+        let long: Vec<BOp> = (0..32).map(|i| op(Fast::MovI { d: (i % 8) as u8, v: i })).collect();
+        hot(&mut j, 1, 32, &long, &mem);
+        let (_, slot, _) = unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 200, false) };
+        unsafe { link(slot, j.body(1).unwrap()); }
+        cpu.regs = [0; 16]; cpu.probe = [0; 17]; cpu.stop_pc = 34; cpu.stop_io = 0;
+        let k = unsafe { run(from, &mut cpu, &mut bus, &mem, 0, 200, false) }.0;
+        assert_eq!((k, cpu.pc), (1, 32));
+        cpu.stop_pc = 0;
     }
     #[test]
     fn a_probe_copy_ends_the_runners_call_at_the_stop() {
