@@ -49,6 +49,23 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// `--record -` streams the frames on stdout: the run's reports go to stderr then.
+static REPORTS_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// println!, except that with `--record -` it prints to stderr (the frames own stdout).
+macro_rules! println {
+    ($($arg:tt)*) => { say(format_args!($($arg)*)) };
+}
+
+fn say(args: std::fmt::Arguments) {
+    use std::io::Write;
+    let _ = if REPORTS_TO_STDERR.load(Ordering::Relaxed) {
+        writeln!(std::io::stderr(), "{args}")
+    } else {
+        writeln!(std::io::stdout(), "{args}")
+    };
+}
+
 const RAM_BASE: u32 = 0x01c0_0000;
 const RAM_SIZE: usize = 1 << 20;
 /// How far emulated time runs ahead of the wall clock before audio starts.
@@ -64,6 +81,8 @@ struct Opts {
     bench: Option<u64>,
     /// Headless: run this many ms with a chord held, save the panel image.
     shot: Option<u64>,
+    /// --record DIR|-: a PPM frame every 16 ms and the audio while running --shot (Recorder).
+    record: Option<String>,
     /// What runs, for the window title.
     name: String,
     /// A firmware from its update package (fm1_soc::stock_from_package): a community firmware's,
@@ -80,6 +99,8 @@ struct Opts {
     cpu1_survives: bool,
     /// its generator's seed (default 1)
     seed: Option<u64>,
+    /// --lcd-only: --shot and --record take the 240x240 LCD alone, not the panel.
+    lcd_only: bool,
     /// --flash FILE: the flash chip's contents from FILE at the start (if it exists; after the
     /// package is installed), written back to it at the end (bench, shot, or the window closed)
     flash: Option<String>,
@@ -108,14 +129,33 @@ fn catalog() -> Vec<(String, String, String, String)> {
 }
 
 fn parse() -> Option<Opts> {
-    let a: Vec<String> = std::env::args().collect();
+    parse_args(std::env::args().collect())
+}
+
+/// The options that only do something together: refused rather than ignored.
+fn check_opts(o: &Opts) -> Result<(), String> {
+    if o.seed.is_some() && o.flaky_core1.is_none() {
+        return Err("--seed needs --flaky-core1 (it seeds its misreads)".into());
+    }
+    if o.record.is_some() && o.shot.is_none() {
+        return Err("--record needs --shot (it records that run)".into());
+    }
+    Ok(())
+}
+
+fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
             o.usb = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--lcd-only" {
+            o.lcd_only = true;
             i += 1;
             continue;
         }
@@ -156,6 +196,7 @@ fn parse() -> Option<Opts> {
             "--seed" => o.seed = Some(a.get(i + 1)?.parse().ok()?),
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
+            "--record" => o.record = Some(a.get(i + 1)?.clone()),
             _ => return None,
         }
         i += 2;
@@ -578,10 +619,127 @@ fn script_keys(m: &mut Machine) -> bool {
     true
 }
 
+/// A frame every 16 ms: 62.5 fps, what tools/bench_video.sh muxes at.
+const FRAME_MS: u64 = 16;
+
+/// `--record`: the panel (or the LCD) every 16 ms and the audio of a --shot run, as numbered
+/// PPMs plus audio.raw in a directory, or (`-`) the PPMs as one stream on stdout with
+/// audio.raw in work/. The panel art is rasterized once; one buffer serves every frame.
+struct Recorder {
+    sink: RecSink,
+    audio: std::io::BufWriter<std::fs::File>,
+    audio_path: String,
+    lcd_only: bool,
+    frame: u64,
+    /// when the next frame is due (ms of firmware time)
+    next_ms: u64,
+    base: Vec<u32>,
+    w: usize,
+    h: usize,
+    buf: Vec<u32>,
+}
+
+enum RecSink {
+    Dir(String),
+    Stream(Box<dyn std::io::Write>),
+}
+
+impl Recorder {
+    fn new(target: &str, lcd_only: bool, board: fm1_soc::Board) -> std::io::Result<Self> {
+        let (sink, audio_path) = if target == "-" {
+            std::fs::create_dir_all("work")?;
+            (RecSink::Stream(Box::new(std::io::BufWriter::new(std::io::stdout()))), "work/audio.raw".to_string())
+        } else {
+            std::fs::create_dir_all(target)?;
+            (RecSink::Dir(target.to_string()), format!("{target}/audio.raw"))
+        };
+        let audio = std::io::BufWriter::new(std::fs::File::create(&audio_path)?);
+        let (base, w, h) = panel_base(board);
+        Ok(Self { sink, audio, audio_path, lcd_only, frame: 0, next_ms: 0, buf: vec![0; w * h], base, w, h })
+    }
+
+    /// The audio: silence from boot until the firmware started its DMA, then all it played.
+    fn finish(mut self, soc: &Soc) -> std::io::Result<String> {
+        use std::io::Write;
+        let pad = leading_silence(soc.periph.audio_frames_so_far(), soc.periph.audio.len());
+        self.audio.write_all(&vec![0u8; pad * 4])?;
+        for s in &soc.periph.audio {
+            self.audio.write_all(&s.to_le_bytes())?;
+        }
+        self.audio.flush()?;
+        if let RecSink::Stream(w) = &mut self.sink {
+            w.flush()?;
+        }
+        let frames = match &self.sink {
+            RecSink::Dir(dir) => format!("{} frames -> {dir}/", self.frame),
+            RecSink::Stream(_) => format!("{} frames on stdout", self.frame),
+        };
+        Ok(format!("recorded {frames} + {}", self.audio_path))
+    }
+}
+
+/// Stereo frames of silence before the firmware's first audio: the DAC clock has counted
+/// `frames` I2S frames since boot, the firmware has made `samples` / 2 of them.
+fn leading_silence(frames: u64, samples: usize) -> usize {
+    (frames as usize).saturating_sub(samples / 2)
+}
+
+/// One frame: the panel with the keys the script holds (the SMK-37: its own keys and LEDs),
+/// or the LCD alone. The audio stays in the machine until the end (Recorder::finish).
+fn record_frame(m: &mut Machine, rec: &mut Recorder) {
+    let leds = m.soc.periph.led_take();
+    let smk_leds = m.soc.periph.smk.led_take();
+    record_frame_leds(m, rec, &leds, &smk_leds);
+}
+
+/// `record_frame` with the LEDs' on-fractions given: the tail's frames peek at them, leaving
+/// the window to the final panel.
+fn record_frame_leds(m: &Machine, rec: &mut Recorder, leds: &[f32; 41], smk_leds: &[f32; fm1_soc::smk::NLED]) {
+    use std::io::Write;
+    let ppm = if rec.lcd_only {
+        lcd_ppm(&m.soc.lcd.fb)
+    } else {
+        let down = m.soc.periph.keys_down;
+        render_panel(m, &rec.base, &down, leds, smk_leds, &[0; 7], &mut rec.buf);
+        panel_ppm(&rec.buf, rec.w, rec.h)
+    };
+    match &mut rec.sink {
+        RecSink::Dir(dir) => std::fs::write(format!("{dir}/{:06}.ppm", rec.frame), ppm).expect("write frame PPM"),
+        RecSink::Stream(w) => w.write_all(&ppm).expect("write the frame to stdout"),
+    }
+    rec.frame += 1;
+    rec.next_ms = rec.frame * FRAME_MS;
+}
+
+/// The last 40 ms of a shot, an instruction at a time: how many ran, and how many of them in
+/// ISRs. The frames due in them are recorded too; they peek at the LEDs' on-fractions, so the
+/// window the final panel reports stays the whole 40 ms.
+fn run_tail(m: &mut Machine, ms: u64, mut rec: Option<&mut Recorder>) -> Result<(u64, u64), String> {
+    let (mut in_isr, mut total) = (0u64, 0u64);
+    while m.soc.periph.ms() < ms {
+        if let Some(r) = rec.as_deref_mut() {
+            if m.soc.periph.ms() >= r.next_ms {
+                let leds = m.soc.periph.led_peek();
+                let smk_leds = m.soc.periph.smk.led_peek();
+                record_frame_leds(m, r, &leds, &smk_leds);
+            }
+        }
+        m.run(1)?;
+        total += 1;
+        if !m.cpu.irq_levels.is_empty() {
+            in_isr += 1;
+        }
+    }
+    Ok((in_isr, total))
+}
+
 fn shot(o: &Opts, ms: u64) {
+    if o.record.as_deref() == Some("-") {
+        REPORTS_TO_STDERR.store(true, Ordering::Relaxed);
+    }
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => return eprintln!("cannot read {}: {e}", o.bin),
+        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_NO_SKIP").is_ok() {
@@ -610,6 +768,13 @@ fn shot(o: &Opts, ms: u64) {
     let want_skip = m.soc.periph.skip_idle;
     m.soc.periph.skip_idle = want_skip && skip_from == 0;
     let mut usb_sends = usb_script();
+    let mut rec = o.record.as_deref().map(|target| {
+        Recorder::new(target, o.lcd_only, m.soc.board).unwrap_or_else(|e| {
+            eprintln!("--record {target}: {e}");
+            std::process::exit(1);
+        })
+    });
+
     // FM1_TPROF=PATH,FROM_MS,TO_MS: time-weighted PC samples of both cores (every 8 cycles,
     // one instruction at a time) and the flash cache's misses by line, into PATH
     let tprof: Option<(String, u64, u64)> = std::env::var("FM1_TPROF").ok().and_then(|v| {
@@ -655,9 +820,15 @@ fn shot(o: &Opts, ms: u64) {
         }
         if let Err(e) = m.run(100_000) {
             usb_audio_save(&m);
-            return halted(&e);
+            halted(&e);
+            std::process::exit(1);
         }
         usb_headless(&mut m, &mut usb_sends);
+        if let Some(r) = &mut rec {
+            if m.soc.periph.ms() >= r.next_ms {
+                record_frame(&mut m, r);
+            }
+        }
     }
     if o.usb {
         let u = &m.soc.usb;
@@ -667,18 +838,17 @@ fn shot(o: &Opts, ms: u64) {
         usb_audio_save(&m);
     }
     println!("irq levels at the end: {:?}, ie {}, skipped {} cycles", m.cpu.irq_levels, m.cpu.ie, m.soc.periph.skipped);
+    // (the LEDs' on-fractions from here: the last 40 ms, on either board, recorded or not)
     let _ = m.soc.periph.led_take();
-    let (mut in_isr, mut total) = (0u64, 0u64);
-    while m.soc.periph.ms() < ms {
-        if let Err(e) = m.run(1) {
+    let _ = m.soc.periph.smk.led_take();
+    let (in_isr, total) = match run_tail(&mut m, ms, rec.as_mut()) {
+        Ok(v) => v,
+        Err(e) => {
             usb_audio_save(&m);
-            return halted(&e);
+            halted(&e);
+            std::process::exit(1);
         }
-        total += 1;
-        if !m.cpu.irq_levels.is_empty() {
-            in_isr += 1;
-        }
-    }
+    };
     println!(
         "last 40 ms: {:.0}% of instructions in ISRs = {:.1} M ISR instructions per second (clock {} MHz)",
         100.0 * in_isr as f64 / total.max(1) as f64,
@@ -731,14 +901,26 @@ fn shot(o: &Opts, ms: u64) {
         println!("SMK-37 pads ({} frames): {}", p.pad_frames, pads.join(" "));
     }
     let lit: Vec<usize> = (0..41).filter(|&i| leds[i] > 0.01).collect();
-    match write_panel(&mut m, &down, &leds, "work/panel.ppm") {
+    let panel_path = if o.lcd_only { "work/lcd.ppm" } else { "work/panel.ppm" };
+    let panel_res = if o.lcd_only {
+        write_lcd(&m.soc.lcd.fb, panel_path)
+    } else {
+        write_panel(&mut m, &down, &leds, panel_path)
+    };
+    match panel_res {
         Ok(()) => {
             let a = &m.soc.periph.audio;
             let tail = &a[a.len().saturating_sub(44_100)..];
             let peak = tail.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-            println!("work/panel.ppm at {} ms; LEDs lit: {lit:?}; audio peak over the last 0.5 s: {peak}", m.soc.periph.ms())
+            println!("{panel_path} at {} ms; LEDs lit: {lit:?}; audio peak over the last 0.5 s: {peak}", m.soc.periph.ms())
         }
-        Err(e) => eprintln!("work/panel.ppm: {e}"),
+        Err(e) => eprintln!("{panel_path}: {e}"),
+    }
+    if let Some(rec) = rec {
+        match rec.finish(&m.soc) {
+            Ok(what) => println!("{what}"),
+            Err(e) => { eprintln!("audio.raw: {e}"); std::process::exit(1); },
+        }
     }
     save_flash(&m, o.flash.as_ref());
 }
@@ -872,21 +1054,48 @@ fn dump_ram(m: &mut Machine) {
     }
 }
 
-/// The panel as the machine shows it now, keys `down` held and `leds` lit, as a PPM file.
-fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str) -> std::io::Result<()> {
-    let st = panel::State {
-        lcd: &m.soc.lcd.fb,
-        enc_clicks: &[0, 0, 0, 3, -2, 0, 5],
-        pot: m.soc.periph.adc_value[4],
-        down,
-        leds,
-        turning: &[0, 0, 0, 0, 0, 0, 0, 0],
-    };
-    let (pw, ph) = if m.soc.board == fm1_soc::Board::Smk37 { (panel_smk::W, panel_smk::H) } else { (W, H) };
-    let mut buf = vec![0u32; pw * ph];
+/// RGB565 (the LCD's pixels) to 8 bits per channel, the low bits filled from the high ones.
+fn rgb565_to_rgb888(px: u16) -> [u8; 3] {
+    let r = ((px >> 11) & 0x1f) as u8;
+    let g = ((px >> 5) & 0x3f) as u8;
+    let b = (px & 0x1f) as u8;
+    [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]
+}
+
+/// A binary PPM: the P6 header, then `rgb` (3 bytes per pixel, rows top down).
+fn ppm(w: usize, h: usize, rgb: &[u8]) -> Vec<u8> {
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.extend_from_slice(rgb);
+    out
+}
+
+/// The 240x240 LCD as a PPM.
+fn lcd_ppm(fb: &[u16]) -> Vec<u8> {
+    let rgb: Vec<u8> = fb.iter().flat_map(|&px| rgb565_to_rgb888(px)).collect();
+    ppm(240, 240, &rgb)
+}
+
+/// A panel image (0xRRGGBB a pixel, `w` by `h`) as a PPM.
+fn panel_ppm(buf: &[u32], w: usize, h: usize) -> Vec<u8> {
+    let rgb: Vec<u8> = buf.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    ppm(w, h, &rgb)
+}
+
+/// The board's panel art, rasterized, and its size.
+fn panel_base(board: fm1_soc::Board) -> (Vec<u32>, usize, usize) {
+    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { (panel::base(), W, H) }
+}
+
+/// The LCD as the machine shows it now, as a PPM file.
+fn write_lcd(fb: &[u16], path: &str) -> std::io::Result<()> {
+    std::fs::write(path, lcd_ppm(fb))
+}
+
+/// The panel as the machine shows it now over its art `base` into `buf`: keys `down` held,
+/// `leds` lit (the SMK-37: its own keys, and `smk_leds`), the encoders at `enc_clicks`.
+fn render_panel(m: &Machine, base: &[u32], down: &[bool; 41], leds: &[f32; 41], smk_leds: &[f32; fm1_soc::smk::NLED], enc_clicks: &[i32; 7], buf: &mut [u32]) {
     if m.soc.board == fm1_soc::Board::Smk37 {
-        let p = &mut m.soc.periph.smk;
-        let leds = p.led_take();
+        let p = &m.soc.periph.smk;
         let (pads, force, faders) = (p.pads, std::array::from_fn(|i| p.analog(i as u8)), std::array::from_fn(|i| p.analog(16 + i as u8)));
         let mut sdown = [false; 64];
         sdown[..55].copy_from_slice(&p.down);
@@ -895,23 +1104,30 @@ fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str)
             enc_clicks: &[0; 8],
             turning: &[0; 8],
             down: &sdown,
-            leds: &leds,
+            leds: smk_leds,
             pads: &pads,
             pad_force: &force,
             faders: &faders,
             pitch: p.analog(fm1_soc::smk::ANALOG_PITCH),
             modw: p.analog(fm1_soc::smk::ANALOG_MOD),
         };
-        println!("SMK-37 button LEDs: {}", leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
-        panel_smk::draw(&mut buf, &panel_smk::base(), &st);
+        panel_smk::draw(buf, base, &st);
     } else {
-        panel::draw(&mut buf, &panel::base(), &st);
+        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
+        panel::draw(buf, base, &st);
     }
-    let mut ppm = format!("P6\n{pw} {ph}\n255\n").into_bytes();
-    for p in &buf {
-        ppm.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+}
+
+/// The panel as the machine shows it now, keys `down` held and `leds` lit, as a PPM file.
+fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str) -> std::io::Result<()> {
+    let (base, w, h) = panel_base(m.soc.board);
+    let smk_leds = m.soc.periph.smk.led_take();
+    if m.soc.board == fm1_soc::Board::Smk37 {
+        println!("SMK-37 button LEDs: {}", smk_leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
     }
-    std::fs::write(path, ppm)
+    let mut buf = vec![0u32; w * h];
+    render_panel(m, &base, down, leds, &smk_leds, &[0, 0, 0, 3, -2, 0, 5], &mut buf);
+    std::fs::write(path, panel_ppm(&buf, w, h))
 }
 
 // ---------------------------------------------------------------- input --
@@ -988,6 +1204,11 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
+          --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
+                       from boot as DIR/audio.raw (44118 Hz stereo s16le; silence until the DMA starts)
+          --record -   the frames as one PPM stream on stdout (tools/bench_video.sh pipes it into ffmpeg),
+                       audio.raw in work/; the run's reports go to stderr then
+          --lcd-only   --shot, --record: the 240x240 LCD alone (work/lcd.ppm), not the panel
 env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;
                          times in ms; ^ releases, @VEL the velocity, eN an encoder's clicks, mHEX: MIDI
                          bytes into the DIN jack; @FILE: the script from a file)
@@ -1034,8 +1255,8 @@ fn main() {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
-    if o.seed.is_some() && o.flaky_core1.is_none() {
-        eprintln!("error: --seed needs --flaky-core1 (it seeds its misreads)");
+    if let Err(e) = check_opts(&o) {
+        eprintln!("error: {e}");
         std::process::exit(2);
     }
     if let Some(ms) = o.shot {
@@ -1498,5 +1719,130 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             win.set_title(&format!("SMK-37 · {} — {}", o.name, status.lock().unwrap()));
             last_title = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rgb565_expands_to_the_full_range() {
+        assert_eq!(rgb565_to_rgb888(0x0000), [0, 0, 0]);
+        assert_eq!(rgb565_to_rgb888(0xffff), [255, 255, 255]);
+        assert_eq!(rgb565_to_rgb888(0xf800), [255, 0, 0]);
+        assert_eq!(rgb565_to_rgb888(0x07e0), [0, 255, 0]);
+        assert_eq!(rgb565_to_rgb888(0x001f), [0, 0, 255]);
+        assert_eq!(rgb565_to_rgb888(0x8410), [132, 130, 132]);
+    }
+
+    #[test]
+    fn ppm_is_a_p6_header_then_the_bytes() {
+        let p = ppm(2, 1, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(&p[..11], b"P6\n2 1\n255\n");
+        assert_eq!(&p[11..], &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn lcd_ppm_is_240_by_240_rgb() {
+        let mut fb = vec![0u16; 240 * 240];
+        fb[0] = 0xf800;
+        let p = lcd_ppm(&fb);
+        assert_eq!(p.len(), "P6\n240 240\n255\n".len() + 240 * 240 * 3);
+        assert_eq!(&p[15..18], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn panel_ppm_unpacks_0xrrggbb() {
+        let p = panel_ppm(&[0x112233, 0xaabbcc], 2, 1);
+        assert_eq!(&p[11..], &[0x11, 0x22, 0x33, 0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn leading_silence_is_the_frames_before_the_dma_started() {
+        assert_eq!(leading_silence(7628, 7000 * 2), 628);
+        assert_eq!(leading_silence(1000, 0), 1000);
+        assert_eq!(leading_silence(1000, 1000 * 2), 0);
+    }
+
+    #[test]
+    fn leading_silence_never_underflows() {
+        assert_eq!(leading_silence(1000, 1200 * 2), 0);
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        std::iter::once("fm1-live").chain(a.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn record_needs_shot() {
+        let o = parse_args(args(&["--record", "frames"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--record", "frames", "--bench", "100"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn seed_needs_flaky_core1() {
+        let o = parse_args(args(&["--seed", "3", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--seed", "3", "--flaky-core1", "0.1", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_ok());
+    }
+
+    /// Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs); skipped without it.
+    #[test]
+    fn a_shot_records_the_key_it_plays_and_the_audio_starts_after_boot() {
+        let fwsc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        if !std::path::Path::new(fwsc).exists() {
+            return eprintln!("no {fwsc}: skipped");
+        }
+        let o = parse_args(args(&["--fwsc", fwsc, "--shot", "2000"])).unwrap();
+        let mut m = Machine::new(&o).unwrap();
+        let at = m.soc.periph.cycle_of_ms(1500);
+        m.soc.periph.script.push_back((at, Action::Key { id: 21, down: true }));
+        let dir = std::env::temp_dir().join(format!("fm1-live-test-{}", std::process::id()));
+        let mut rec = Recorder::new(&dir.to_string_lossy(), false, m.soc.board).unwrap();
+        while m.soc.periph.ms() < 1600 {
+            if m.soc.periph.ms() >= rec.next_ms {
+                record_frame(&mut m, &mut rec);
+            }
+            m.run(100_000).unwrap();
+        }
+        assert!(m.soc.periph.keys_down[21], "the scripted key is down");
+        assert!(!m.soc.periph.audio.is_empty(), "the firmware streams audio");
+        let pad = leading_silence(m.soc.periph.audio_frames_so_far(), m.soc.periph.audio.len());
+        let pad_ms = pad * 1000 / 44_100;
+        assert!((50..500).contains(&pad_ms), "the DMA started {pad_ms} ms after boot");
+        assert_eq!(rec.frame, 100, "a frame every 16 ms over 1600 ms");
+        assert!(dir.join("000099.ppm").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Needs reference/firmwares/felucca.fwsc; skipped without it.
+    #[test]
+    fn the_last_40_ms_of_a_shot_have_frames_too() {
+        let fwsc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        if !std::path::Path::new(fwsc).exists() {
+            return eprintln!("no {fwsc}: skipped");
+        }
+        let o = parse_args(args(&["--fwsc", fwsc, "--shot", "2000"])).unwrap();
+        let mut m = Machine::new(&o).unwrap();
+        let dir = std::env::temp_dir().join(format!("fm1-live-tail-{}", std::process::id()));
+        let mut rec = Recorder::new(&dir.to_string_lossy(), false, m.soc.board).unwrap();
+        // shot()'s main loop stops 40 ms short; its tail runs the rest an instruction at a time
+        while m.soc.periph.ms() + 40 < 2000 {
+            if m.soc.periph.ms() >= rec.next_ms {
+                record_frame(&mut m, &mut rec);
+            }
+            m.run(100_000).unwrap();
+        }
+        let before = rec.frame;
+        run_tail(&mut m, 2000, Some(&mut rec)).unwrap();
+        assert_eq!(rec.frame, 125, "frames every 16 ms up to 1984 ms ({before} before the tail)");
+        assert!(dir.join("000124.ppm").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
