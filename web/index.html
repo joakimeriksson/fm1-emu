@@ -291,6 +291,7 @@
             <li>The front panel is drawn by the same Rust code as the native version, <code>fm1-live</code>, which
               plays the firmwares in a window with audio and MIDI in.</li>
             <li>Links keep a setup: <code>?fw=x0x&amp;mhz=120</code> picks the firmware and the clock;
+              <code>?package=URL&amp;name=Name</code> plays a package from another site (https, with CORS on);
               <code>?jit=0</code> turns the JIT off; <code>?ahead=0</code> stops the emulator running ahead of the
               audio (by up to one of the firmware's audio buffers, for an even load). The page also remembers your last
               choices.</li>

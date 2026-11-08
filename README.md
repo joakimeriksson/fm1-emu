@@ -47,7 +47,9 @@ are our own list, `web/firmwares-own.json`: add a firmware there, and the tool a
 also lists, last and marked as not yet run here, whatever else the Hub has a package for, so a new
 firmware is playable the day it is published. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
-too; `&embed=1` shows only the device and its controls, for a window on another site.)
+too; `&embed=1` shows only the device and its controls, for a window on another site;
+`?package=URL` plays a package from another site (https, with CORS on) that the list doesn't have,
+`&name=` naming it: other hubs' "Try", older versions.)
 A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash
 sectors over the package's fresh flash (records of a 4-byte little-endian offset and the 4096-byte
 sector, as the saves keep them), `&script=PATH` plays an input script from the boot (fm1-live's
