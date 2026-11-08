@@ -136,9 +136,9 @@ mhzSel.value = mhz;
 // theme picker: the Rust side exposes the list and switches the panel art
 {
   const n = ui.panel_theme_count();
-  const mem = new Uint8Array(ui.memory.buffer);
   for (let i = 0; i < n; i++) {
     const ptr = ui.panel_theme_name(i);
+    const mem = new Uint8Array(ui.memory.buffer);
     let end = ptr;
     while (mem[end]) end++;
     const label = new TextDecoder().decode(mem.subarray(ptr, end));
