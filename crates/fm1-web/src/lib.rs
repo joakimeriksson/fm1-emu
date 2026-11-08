@@ -577,6 +577,7 @@ pub extern "C" fn fm1_cpu1_fault() -> u32 {
 
 // ---------------------------------------------------------------- the front panel (page side)
 
+static mut PANEL_THEME_ID: u32 = 0;
 static mut PANEL_BASE: Vec<u32> = Vec::new();
 static mut PANEL_BUF: Vec<u32> = Vec::new();
 static mut PANEL_LCD: Vec<u16> = Vec::new();
@@ -606,6 +607,39 @@ pub extern "C" fn panel_board(b: u32) {
                 PANEL_ANALOG[fm1_soc::smk::ANALOG_MOD as usize] = fm1_soc::smk::MOD_REST;
             }
         }
+    }
+}
+
+/// Switch to theme `id` (0..THEMES.len()). Forces a base rebuild.
+#[no_mangle]
+pub extern "C" fn panel_theme(id: u32) {
+    unsafe {
+        let id = id.min(panel::THEMES.len() as u32 - 1);
+        if PANEL_THEME_ID != id {
+            PANEL_THEME_ID = id;
+            PANEL_BASE = Vec::new();
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn panel_theme_count() -> u32 {
+    panel::THEMES.len() as u32
+}
+
+static mut THEME_NAME_BUF: Vec<u8> = Vec::new();
+
+/// The theme's display label as a NUL-terminated UTF-8 string in linear memory.
+#[no_mangle]
+#[allow(static_mut_refs)]
+pub extern "C" fn panel_theme_name(id: u32) -> *const u8 {
+    unsafe {
+        let id = id.min(panel::THEMES.len() as u32 - 1) as usize;
+        let label = panel::THEMES[id].1;
+        THEME_NAME_BUF.clear();
+        THEME_NAME_BUF.extend_from_slice(label.as_bytes());
+        THEME_NAME_BUF.push(0);
+        THEME_NAME_BUF.as_ptr()
     }
 }
 
@@ -661,8 +695,9 @@ pub extern "C" fn panel_set(kind: u32, i: u32, v: i32) {
 pub extern "C" fn panel_draw() -> *const u8 {
     unsafe {
         let smk = PANEL_BOARD == 1;
+        let theme = &panel::THEMES[PANEL_THEME_ID.min(panel::THEMES.len() as u32 - 1) as usize].2;
         if PANEL_BASE.is_empty() {
-            PANEL_BASE = if smk { panel_smk::base() } else { panel::base() };
+            PANEL_BASE = if smk { panel_smk::base() } else { panel::base(theme) };
             PANEL_BUF = vec![0; PANEL_BASE.len()];
         }
         if PANEL_LCD.is_empty() {
@@ -692,7 +727,7 @@ pub extern "C" fn panel_draw() -> *const u8 {
                 leds: &PANEL_LEDS,
                 turning: &std::array::from_fn(|i| PANEL_TURN[i]),
             };
-            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st);
+            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st, theme);
         }
         // 0RGB -> RGBA bytes in place (little endian: R G B A)
         for p in PANEL_BUF.iter_mut() {
