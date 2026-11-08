@@ -1,0 +1,102 @@
+{
+  "themes": [
+    {
+      "name": "default",
+      "label": "Grey (Emulator Classic)",
+      "bodyColor": "#5E6166",
+      "bodyColorBottom": "#4A4D52",
+      "keyboardColor": "#6A5557",
+      "keyboardColorBottom": "#4F3F42",
+      "buttonColor": "#4B4E54",
+      "buttonColorBottom": "#3B3D42",
+      "trayColor": "#2B2C2F",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#C9C6BD",
+      "buttonInkColor": "#9C9A94"
+    },
+    {
+      "name": "cool-gray",
+      "label": "Cool Gray",
+      "bodyColor": "#DAD1CC",
+      "bodyColorBottom": "#CCC3BC",
+      "keyboardColor": "#393D40",
+      "keyboardColorBottom": "#2C3033",
+      "buttonColor": "#44484B",
+      "buttonColorBottom": "#363A3D",
+      "trayColor": "#424649",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#6A6560",
+      "buttonInkColor": "#A8A49E"
+    },
+    {
+      "name": "black",
+      "label": "Black",
+      "bodyColor": "#3A3C3B",
+      "bodyColorBottom": "#303131",
+      "keyboardColor": "#1C1C1C",
+      "keyboardColorBottom": "#141414",
+      "buttonColor": "#2E2E2E",
+      "buttonColorBottom": "#222222",
+      "trayColor": "#181818",
+      "knobColor": "#141414",
+      "silkColor": "#8A8A8A",
+      "buttonInkColor": "#787878"
+    },
+    {
+      "name": "orange",
+      "label": "Orange",
+      "bodyColor": "#AE6246",
+      "bodyColorBottom": "#9A5538",
+      "keyboardColor": "#8C5347",
+      "keyboardColorBottom": "#76443A",
+      "buttonColor": "#B06045",
+      "buttonColorBottom": "#985238",
+      "trayColor": "#945B4C",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#E8CFC0",
+      "buttonInkColor": "#E0C8B8"
+    },
+    {
+      "name": "black-green",
+      "label": "Black & Green",
+      "bodyColor": "#3A3A3D",
+      "bodyColorBottom": "#2E2E30",
+      "keyboardColor": "#65C6B8",
+      "keyboardColorBottom": "#52B0A0",
+      "buttonColor": "#65C6B8",
+      "buttonColorBottom": "#52B0A0",
+      "trayColor": "#75C0B7",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#A0D8D0",
+      "buttonInkColor": "#1E3830"
+    },
+    {
+      "name": "purple",
+      "label": "Purple",
+      "bodyColor": "#B58BC9",
+      "bodyColorBottom": "#A078B5",
+      "keyboardColor": "#746AB1",
+      "keyboardColorBottom": "#5E5498",
+      "buttonColor": "#9070AE",
+      "buttonColorBottom": "#7C5E9A",
+      "trayColor": "#7C72B3",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#E4D6F0",
+      "buttonInkColor": "#E0D0EC"
+    },
+    {
+      "name": "white-blue",
+      "label": "White & Blue",
+      "bodyColor": "#EAE7E0",
+      "bodyColorBottom": "#DCD8D0",
+      "keyboardColor": "#516F8F",
+      "keyboardColorBottom": "#3E5C7A",
+      "buttonColor": "#516F8F",
+      "buttonColorBottom": "#3E5C7A",
+      "trayColor": "#5A7795",
+      "knobColor": "#1A1A1A",
+      "silkColor": "#5A6878",
+      "buttonInkColor": "#D0D8E0"
+    }
+  ]
+}

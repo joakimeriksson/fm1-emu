@@ -85,6 +85,8 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --theme NAME: the panel color theme (default, cool-gray, black, orange, black-green, purple, white-blue)
+    theme: String,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -111,7 +113,7 @@ fn parse() -> Option<Opts> {
     let a: Vec<String> = std::env::args().collect();
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into() };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -156,6 +158,7 @@ fn parse() -> Option<Opts> {
             "--seed" => o.seed = Some(a.get(i + 1)?.parse().ok()?),
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
+            "--theme" => o.theme = a.get(i + 1)?.clone(),
             _ => return None,
         }
         i += 2;
@@ -303,7 +306,7 @@ fn high_priority() {
     }
 }
 
-fn bench(o: &Opts, ms: u64) {
+fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let mut m = match Machine::new(o) {
         Ok(m) => m,
         Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
@@ -347,7 +350,7 @@ fn bench(o: &Opts, ms: u64) {
             while m.soc.periph.ms() >= next_frame {
                 let leds = m.soc.periph.led_take();
                 let down = m.soc.periph.keys_down;
-                if let Err(e) = write_panel(&mut m, &down, &leds, &format!("{dir}/{nframes:06}.ppm")) {
+                if let Err(e) = write_panel(&mut m, &down, &leds, &format!("{dir}/{nframes:06}.ppm"), theme) {
                     eprintln!("{dir}: {e}");
                     std::process::exit(1);
                 }
@@ -440,7 +443,7 @@ fn bench(o: &Opts, ms: u64) {
     dump_ram(&mut m);
     if let Ok(path) = std::env::var("FM1_BENCH_PANEL") {
         let leds = m.soc.periph.led_take();
-        match write_panel(&mut m, &[false; 41], &leds, &path) {
+        match write_panel(&mut m, &[false; 41], &leds, &path, theme) {
             Ok(()) => println!("panel at {} ms -> {path}", m.soc.periph.ms()),
             Err(e) => eprintln!("{path}: {e}"),
         }
@@ -578,7 +581,7 @@ fn script_keys(m: &mut Machine) -> bool {
     true
 }
 
-fn shot(o: &Opts, ms: u64) {
+fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let mut m = match Machine::new(o) {
         Ok(m) => m,
         Err(e) => return eprintln!("cannot read {}: {e}", o.bin),
@@ -731,7 +734,7 @@ fn shot(o: &Opts, ms: u64) {
         println!("SMK-37 pads ({} frames): {}", p.pad_frames, pads.join(" "));
     }
     let lit: Vec<usize> = (0..41).filter(|&i| leds[i] > 0.01).collect();
-    match write_panel(&mut m, &down, &leds, "work/panel.ppm") {
+    match write_panel(&mut m, &down, &leds, "work/panel.ppm", theme) {
         Ok(()) => {
             let a = &m.soc.periph.audio;
             let tail = &a[a.len().saturating_sub(44_100)..];
@@ -873,7 +876,7 @@ fn dump_ram(m: &mut Machine) {
 }
 
 /// The panel as the machine shows it now, keys `down` held and `leds` lit, as a PPM file.
-fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str) -> std::io::Result<()> {
+fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str, theme: &panel::Theme) -> std::io::Result<()> {
     let st = panel::State {
         lcd: &m.soc.lcd.fb,
         enc_clicks: &[0, 0, 0, 3, -2, 0, 5],
@@ -905,7 +908,7 @@ fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str)
         println!("SMK-37 button LEDs: {}", leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
         panel_smk::draw(&mut buf, &panel_smk::base(), &st);
     } else {
-        panel::draw(&mut buf, &panel::base(), &st);
+        panel::draw(&mut buf, &panel::base(theme), &st, theme);
     }
     let mut ppm = format!("P6\n{pw} {ph}\n255\n").into_bytes();
     for p in &buf {
@@ -985,7 +988,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+         [--theme NAME] [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
 env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;
@@ -1038,15 +1041,16 @@ fn main() {
         eprintln!("error: --seed needs --flaky-core1 (it seeds its misreads)");
         std::process::exit(2);
     }
+    let theme = panel::Theme::by_name(&o.theme);
     if let Some(ms) = o.shot {
-        return shot(&o, ms);
+        return shot(&o, ms, theme);
     }
     if let Some(ms) = o.bench {
         if std::env::var("FM1_BENCH_THREAD").is_ok() {
             let o2 = Opts { bin: o.bin.clone(), ..o };
-            return std::thread::spawn(move || { high_priority(); bench(&o2, ms) }).join().unwrap();
+            return std::thread::spawn(move || { high_priority(); bench(&o2, ms, theme) }).join().unwrap();
         }
-        return bench(&o, ms);
+        return bench(&o, ms, theme);
     }
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
@@ -1176,7 +1180,7 @@ fn main() {
         }
     };
     win.set_target_fps(60);
-    let base = panel::base();
+    let base = panel::base(theme);
     let mut buf = vec![0u32; W * H];
     let mut down = [false; 41];
     let mut enc_clicks = [0i32; 7];
@@ -1321,7 +1325,7 @@ fn main() {
         {
             let fb = lcd.lock().unwrap();
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
-            panel::draw(&mut buf, &base, &st);
+            panel::draw(&mut buf, &base, &st, theme);
         }
         if win.update_with_buffer(&buf, W, H).is_err() {
             break;

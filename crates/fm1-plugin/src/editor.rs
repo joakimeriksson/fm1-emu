@@ -79,7 +79,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
         };
         if board != ui.board || ui.base.is_empty() {
             ui.board = board;
-            ui.base = if board == Board::Smk37 { panel_smk::base() } else { panel::base() };
+            ui.base = if board == Board::Smk37 { panel_smk::base() } else { panel::base(panel::Theme::by_name("default")) };
             ui.buf = vec![0; ui.base.len()];
         }
         let smk = board == Board::Smk37;
@@ -272,7 +272,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     leds: &leds,
                     turning: &std::array::from_fn(|i| ui.turning[i]),
                 };
-                panel::draw(&mut ui.buf, &ui.base, &st);
+                panel::draw(&mut ui.buf, &ui.base, &st, panel::Theme::by_name("default"));
             }
             for t in ui.turning.iter_mut() {
                 *t = t.saturating_sub(1);

@@ -73,6 +73,7 @@ const title = document.getElementById("title");
 const openInput = document.getElementById("open");
 const bankInput = document.getElementById("bank");
 const bankName = document.getElementById("bankname");
+const themeSel = document.getElementById("theme");
 const saveStatus = document.getElementById("save-status");
 const saveStore = new SaveStore();
 const memoryRecords = new Map();
@@ -131,6 +132,28 @@ if (newcomers.length) {
 for (const c of new Set([...CLOCKS, mhz].sort((a, b) => a - b))) mhzSel.add(new Option(`${c} MHz`, c));
 fwSel.value = fw.id;
 mhzSel.value = mhz;
+
+// theme picker: the Rust side exposes the list and switches the panel art
+{
+  const n = ui.panel_theme_count();
+  const mem = new Uint8Array(ui.memory.buffer);
+  for (let i = 0; i < n; i++) {
+    const ptr = ui.panel_theme_name(i);
+    let end = ptr;
+    while (mem[end]) end++;
+    const label = new TextDecoder().decode(mem.subarray(ptr, end));
+    themeSel.add(new Option(label, i));
+  }
+  const saved = stored(DEV.key + "theme");
+  if (saved !== null && +saved < n) {
+    themeSel.value = saved;
+    ui.panel_theme(+saved);
+  }
+  themeSel.addEventListener("change", () => {
+    ui.panel_theme(+themeSel.value);
+    store(DEV.key + "theme", themeSel.value);
+  });
+}
 
 // the guide's firmware list, one card per catalog entry; "Play" picks it like the select does
 const NO_NOTE = "MIDI: no sound from a plain note-on";
