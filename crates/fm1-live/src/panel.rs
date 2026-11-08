@@ -304,7 +304,7 @@ pub fn base(theme: &Theme) -> Vec<u32> {
     // PLAY / REC outlined, as on the panel
     rrect(&mut b, 1134.0, 302.0, 112.0, 72.0, 10.0, 0x3c6b43, 0x3c6b43);
     rrect(&mut b, 1136.0, 304.0, 108.0, 68.0, 9.0, theme.tray, theme.tray);
-    text(&mut b, 640.0, 552.0 - 2.0, "FM-1  FELUCCA", 1, 0x8c8a85);
+    text(&mut b, 640.0, 552.0 - 2.0, "FM-1  FELUCCA", 1, theme.silk);
     b
 }
 
