@@ -48,6 +48,7 @@ mod fit;
 mod exclusive;
 mod ctl;
 mod labels;
+mod cdp;
 mod panel;
 mod wav;
 mod panel_smk;
@@ -174,6 +175,8 @@ struct Opts {
     map: String,
     /// --midi-log: each MIDI message from the inputs and what the controller profile made of it
     midi_log: bool,
+    /// --cdp PORT: serve a thin HTML page + WebSocket for remote LCD + control
+    cdp: Option<u16>,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -228,7 +231,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
                        flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false,
-                       map: "auto".into(), midi_log: false };
+                       map: "auto".into(), midi_log: false, cdp: None };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -297,6 +300,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
             "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
             "--map" => o.map = a.get(i + 1)?.clone(),
+            "--cdp" => o.cdp = Some(a.get(i + 1)?.parse().ok()?),
             _ => return None,
         }
         i += 2;
@@ -1529,6 +1533,7 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 window: right-click a control, then move or press one of your controller's: MIDI learn (right-click
         again: cancel, Delete: unbind); F1 labels, F2 keys: panel / MIDI / auto; F3 records a WAV
+remote:   --cdp PORT   serve a thin HTML page + WebSocket on PORT for remote LCD + control (JSON-RPC)
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
           --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
@@ -1727,6 +1732,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(port) = o.cdp {
+        return cdp::serve(&mut m, port);
+    }
     let mut pot = m.soc.periph.adc_value[4];
 
     let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });

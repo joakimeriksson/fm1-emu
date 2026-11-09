@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>FM-1 (native)</title>
+<style>
+  body { margin: 0; background: #18191b; display: flex; flex-direction: column; align-items: center; }
+  canvas { image-rendering: pixelated; }
+  #status { color: #aaa; font: 13px monospace; margin: 4px; }
+</style></head><body>
+<canvas id="panel" width="1280" height="820"></canvas>
+<div id="status">booting</div>
+<script>
+const W = 1280, H = 820, LCD_X = 370, LCD_Y = 42, LCD_W = 240, LCD_H = 240, SCALE = 2;
+const canvas = document.getElementById('panel');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+ctx.fillStyle = '#18191b';
+ctx.fillRect(0, 0, W, H);
+
+const wsUrl = 'ws://' + location.host;
+let ws;
+function connect() {
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = function(ev) {
+    if (ev.data instanceof ArrayBuffer) {
+      const rgba = new Uint8ClampedArray(ev.data);
+      if (rgba.length === LCD_W * LCD_H * 4) {
+        const img = new ImageData(rgba, LCD_W, LCD_H);
+        const tmp = new OffscreenCanvas(LCD_W, LCD_H);
+        const tc = tmp.getContext('2d');
+        tc.putImageData(img, 0, 0);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tmp, LCD_X, LCD_Y, LCD_W * SCALE, LCD_H * SCALE);
+      }
+    } else {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'status') status.textContent = msg.text;
+      } catch(e) {}
+    }
+  };
+  ws.onclose = function() { setTimeout(connect, 1000); };
+}
+connect();
+
+let rpcId = 1;
+function rpc(method, params) {
+  return new Promise(function(resolve) {
+    const id = rpcId++;
+    const handler = function(ev) {
+      if (typeof ev.data === 'string') {
+        try {
+          const r = JSON.parse(ev.data);
+          if (r.id === id) { ws.removeEventListener('message', handler); resolve(r.result); }
+        } catch(e) {}
+      }
+    };
+    ws.addEventListener('message', handler);
+    ws.send(JSON.stringify({jsonrpc: '2.0', id: id, method: method, params: params || {}}));
+  });
+}
+
+const Button = {OCT_DOWN:0, OCT_UP:1, FX:2, SCL:3, ENV:4, LFO:5, EDIT:6, GLO:7,
+                HOME:8, SAVE:9, ARP:10, SEQ:11, PLAY:12, REC:13};
+const Encoder = {SELECT:0, ALGORITHM:1, KNOB1:2, KNOB2:3, KNOB3:4, KNOB4:5, PRESETS:6};
+
+window.pressButton = function(id) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'key', id: id, down: true}));
+  setTimeout(function() {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'key', id: id, down: false}));
+  }, 100);
+};
+window.turnEncoder = function(enc, clicks) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'enc', enc: enc, clicks: clicks}));
+};
+window.sendMidi = function(bytes) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'midi', data: bytes}));
+};
+
+const btn = {};
+for (const [name, id] of Object.entries(Button))
+  btn[name] = function() { pressButton(id); };
+const enc = {};
+for (const [name, id] of Object.entries(Encoder))
+  enc[name] = function(clicks) { turnEncoder(id, clicks || 1); };
+
+window.Button = Button;
+window.Encoder = Encoder;
+window.btn = btn;
+window.enc = enc;
+window.cdpRpc = rpc;
+window.getLcdRevision = function() { return rpc('FM1.lcdRevision'); };
+window.getLcdHash = function(x, y, w, h) { return rpc('FM1.lcdHash', {x:x||0, y:y||0, w:w||240, h:h||240}); };
+window.getInfo = function() { return rpc('FM1.getInfo'); };
+window.getLeds = function() { return rpc('FM1.getLeds'); };
+window.cdpApi = function() {
+  return {buttons: Button, encoders: Encoder,
+          pages: ['HOME','FX','SCL','ENV','LFO','EDIT','GLO','ARP','SEQ'],
+          knobs: ['KNOB1','KNOB2','KNOB3','KNOB4'],
+          nav: ['SELECT','PRESETS','ALGORITHM'],
+          rpc: ['FM1.getInfo','FM1.getLcd','FM1.lcdHash','FM1.lcdRevision',
+                'FM1.getLeds','FM1.getAudioMetrics','FM1.getEngineState',
+                'FM1.pressButton','FM1.turnEncoder','FM1.sendMidi']};
+};
+</script></body></html>
