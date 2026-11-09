@@ -42,6 +42,7 @@ use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
+mod cdp;
 mod panel;
 mod panel_smk;
 use std::collections::VecDeque;
@@ -106,6 +107,8 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --cdp PORT: serve a thin HTML page + WebSocket for remote LCD + control
+    cdp: Option<u16>,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -146,7 +149,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, cdp: None };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -197,6 +200,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
+            "--cdp" => o.cdp = Some(a.get(i + 1)?.parse().ok()?),
             _ => return None,
         }
         i += 2;
@@ -1202,6 +1206,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+remote:   --cdp PORT   serve a thin HTML page + WebSocket on PORT for remote LCD + control (JSON-RPC)
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
           --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
@@ -1279,6 +1284,9 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if let Some(port) = o.cdp {
+        return cdp::serve(&mut m, port);
+    }
     let mut pot = m.soc.periph.adc_value[4];
 
     let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0) });

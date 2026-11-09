@@ -310,6 +310,56 @@ is slower. `FM1_LCD_TIMED=1` (fm1-live, fm1-emu) times the LCD alone; `FM1_LCD_I
 instant under `FM1_STRICT`. A firmware that boots under it boots later (its first frames take
 their time). `fm1-live --shot` then reports the LCD's share of the run.
 
+### Remote control (`--cdp`)
+
+`fm1-live --cdp PORT` serves a thin HTML page on `http://localhost:PORT` and a WebSocket on
+the same port. The page shows the LCD; the WebSocket pushes RGBA frames and accepts JSON-RPC
+commands, so Playwright, a Python script or any WebSocket client can drive the emulator
+without a display.
+
+```python
+import json, websocket
+
+ws = websocket.create_connection("ws://127.0.0.1:9222")
+
+# wait for the first LCD frame (binary, 240×240×4 RGBA bytes)
+while True:
+    frame = ws.recv()
+    if isinstance(frame, bytes):
+        print(f"LCD frame: {len(frame)} bytes")
+        break
+
+# press a button (id 12) and read the LCD revision
+ws.send(json.dumps({"jsonrpc": "2.0", "id": 1,
+                     "method": "FM1.pressButton", "params": {"id": 12}}))
+ws.recv()  # ack
+
+ws.send(json.dumps({"jsonrpc": "2.0", "id": 2,
+                     "method": "FM1.lcdRevision", "params": {}}))
+print(json.loads(ws.recv()))  # {"jsonrpc":"2.0","id":2,"result":{"revision":…}}
+
+ws.close()
+```
+
+**JSON-RPC methods** (all return `{"jsonrpc":"2.0","id":…,"result":…}`):
+
+| Method | Params | Returns |
+|---|---|---|
+| `FM1.pressButton` | `{"id": N}` | `{}` — press and release after 100 ms |
+| `FM1.turnEncoder` | `{"encoder": N, "clicks": ±N}` | `{}` |
+| `FM1.sendMidi` | `{"data": [0x90, 60, 100]}` | `{}` |
+| `FM1.getLcd` | `{"x","y","w","h"}` (defaults: full 240×240) | `{"data": "<base64 RGBA>"}` |
+| `FM1.lcdRevision` | `{}` | `{"revision": N}` |
+| `FM1.lcdHash` | `{"x","y","w","h"}` | `{"hash": N}` |
+| `FM1.getInfo` | `{}` | `{"firmware","status","uptime_ms","halted"}` |
+| `FM1.getLeds` | `{}` | `{"leds": [41 floats, 0.0–1.0]}` |
+| `FM1.getAudioMetrics` | `{}` | `{"audio_frames","audio_halves"}` |
+| `FM1.getEngineState` | `{}` | `{"halted","ms"}` |
+
+Raw input events are also accepted as plain JSON (not wrapped in JSON-RPC):
+`{"type":"key","id":12,"down":true}`, `{"type":"enc","enc":3,"clicks":5}`,
+`{"type":"midi","data":[0x90,60,100]}`.
+
 The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
 target), the whole site with `tools/build_site.sh`.
 
