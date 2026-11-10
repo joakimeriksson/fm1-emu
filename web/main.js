@@ -58,7 +58,10 @@ function linkedFirmware(q) {
   let url;
   try { url = new URL(q.get("package")); } catch { return null; }
   if (url.protocol !== "https:") return null;
-  const file = decodeURIComponent(url.pathname.split("/").pop() || url.host).replace(/\.fwsc$/i, "");
+  const raw = url.pathname.split("/").pop() || url.host;
+  let file = raw;
+  try { file = decodeURIComponent(raw); } catch { /* a malformed escape: the name as written */ }
+  file = file.replace(/\.fwsc$/i, "");
   return { id: "link", name: q.get("name") || file, version: "", author: "", license: "", about: "",
     repo: url.href, package: url.href, link: true };
 }
@@ -333,7 +336,7 @@ fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
   endTryOut();
   loadedUrl = null;
-  if (!EMBED) store(DEV.key + "fw", fw.id);
+  if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
   showFirmware();
   fwSel.blur();                 // back to playing from the keyboard
   if (node) boot();
