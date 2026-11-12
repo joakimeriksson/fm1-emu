@@ -753,6 +753,7 @@ impl Soc {
             let pullup = self.sfr_get(usb::USB_IO_CON0) & 0x40 != 0;
             let mut u = std::mem::take(&mut self.usb);
             u.frame(self, pullup);
+            self.periph.set_usb_irqs(u.irq_lines());
             self.usb = u;
         }
         if let Some((adr, words)) = due.audio_half {
@@ -1481,7 +1482,10 @@ impl Soc {
                 }
                 self.sfr_set(addr, value)
             }
-            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => self.usb.write(addr, value, self.periph.cycles),
+            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => {
+                self.usb.write(addr, value, self.periph.cycles);
+                self.periph.set_usb_irqs(self.usb.irq_lines());
+            }
             Region::Usb => {
                 if addr == 0x16a0c && self.board == Board::Smk37 {
                     self.periph.smk.commons = value;
@@ -1865,6 +1869,45 @@ mod tests {
         soc.write32(0x11d00, 0xc021);
         soc.advance(1_000_000);
         assert_eq!(soc.periph.pending_irq(), None);
+    }
+
+    #[test]
+    fn usb_frame_and_bus_reset_interrupts_are_acknowledged_independently() {
+        const CON0: u32 = usb::USB_LO;
+        const CON1: u32 = CON0 + 4;
+        const ON: u32 = 0x0005;
+        const SOFIE: u32 = 1 << 10;
+        const SIEIE: u32 = 1 << 11;
+        const CLR_SOF_PND: u32 = 1 << 12;
+        const SOF_PND: u32 = 1 << 13;
+        const SIE_PND: u32 = 1 << 14;
+
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for irq in [periph::IRQ_USB_SOF, periph::IRQ_USB_CTRL] {
+            soc.periph.icfg[(irq >> 3) as usize] |= 1 << ((irq & 7) * 4);
+        }
+        soc.usb_plug();
+        let frame = soc.periph.usb_period;
+        soc.write32(usb::USB_IO_CON0, 0x40);
+        soc.write32(CON0, ON | SOFIE);
+        soc.advance(frame);
+        assert_eq!(soc.pending_irq(), Some((periph::IRQ_USB_SOF, 0)));
+        soc.write32(CON0, ON | CLR_SOF_PND);
+        assert_eq!(soc.read32(CON0) & SOF_PND, 0);
+        assert_eq!(soc.pending_irq(), None);
+
+        for _ in 0..100 {
+            soc.advance(frame);
+        }
+        soc.write32(CON0, ON | SIEIE);
+        assert_eq!(soc.pending_irq(), None, "reset is masked in the SIE");
+        soc.write32(CON1, 0x0b04); // INTRUSBE: enable reset
+        assert_ne!(soc.read32(CON0) & SIE_PND, 0);
+        assert_eq!(soc.pending_irq(), Some((periph::IRQ_USB_CTRL, 0)));
+        soc.write32(CON1, 0x4600); // INTRUSB: read and acknowledge reset
+        assert_eq!(soc.pending_irq(), None);
+        assert_eq!(soc.read32(CON0) & SIE_PND, 0);
+        assert_ne!(soc.read32(CON0) & SOF_PND, 0);
     }
 
     #[test]
