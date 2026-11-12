@@ -42,6 +42,7 @@ use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
+mod fit;
 mod panel;
 mod panel_smk;
 use std::collections::VecDeque;
@@ -1240,6 +1241,7 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
 fn main() {
+    fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", buildinfo::version("fm1-live"));
         if let Some(w) = buildinfo::stale() {
@@ -1387,7 +1389,15 @@ fn main() {
         let _ = emu.join();
         return;
     }
-    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), W, H, WindowOptions::default()) {
+    // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
+    let ((ww, wh), at) = fit::start(W, H, None);
+    // (elsewhere the window stays as it was: minifb scales it for the display itself)
+    let opts = if cfg!(windows) {
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
+    } else {
+        WindowOptions::default()
+    };
+    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1397,6 +1407,10 @@ fn main() {
         }
     };
     win.set_target_fps(60);
+    if let Some((x, y)) = at {
+        win.set_position(x, y);
+    }
+    let mut fit = fit::Fit::new(W, H);
     let base = panel::base();
     let mut buf = vec![0u32; W * H];
     let mut down = [false; 41];
@@ -1420,7 +1434,7 @@ fn main() {
         };
 
         // ---- mouse
-        let pos = win.get_mouse_pos(MouseMode::Clamp);
+        let pos = win.get_mouse_pos(MouseMode::Clamp).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
@@ -1544,7 +1558,9 @@ fn main() {
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st);
         }
-        if win.update_with_buffer(&buf, W, H).is_err() {
+        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (W, H) };
+        let (frame, fw, fh) = fit.frame(&buf, ww, wh);
+        if win.update_with_buffer(frame, fw, fh).is_err() {
             break;
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
