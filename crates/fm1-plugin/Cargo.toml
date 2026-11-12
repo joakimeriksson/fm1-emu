@@ -11,6 +11,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
+fm1-map = { path = "../fm1-map" }
 # no default features: they bring nih-plug's VST3 bindings (GPL); VST3 comes from clap-wrapper
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683", default-features = false }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "de421011f41a6d10fc8c7a6084e4f4dee0143683" }

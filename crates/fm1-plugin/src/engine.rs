@@ -8,6 +8,7 @@
 //! is a constant the plugin reports to the host as its latency.
 
 use fm1_core::{Bus, Cpu};
+use fm1_map::{KeysMode, Mapper, Out, Profile, Target};
 use fm1_soc::{machine, Action, Board, Soc};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,9 +45,183 @@ pub enum Cmd {
     Vel(u32),
     /// The host's block in the machine's frames: the ring's lead is that plus the Lead parameter.
     Block(usize),
+    /// A controller profile for the host's MIDI (none: to the MIDI IN jack as it comes).
+    Map(Option<Profile>),
+    /// The next note or CC binds to this target (none: stop learning).
+    Learn(Option<Target>),
+    /// Remove what is bound to a target.
+    Unbind(Target),
+    KeysMode(KeysMode),
     /// Start a WAV of the output, or finish the one being written.
     Record,
 }
+
+/// The controller's side of the machine's thread: the profile at work and what it holds.
+struct Ctl {
+    mapper: Option<Mapper>,
+    outs: Vec<Out>,
+    /// a control bound to Record was pressed: the run loop starts or stops the recorder
+    record: bool,
+    down: [bool; 41],
+    enc: [i32; 7],
+    pot: Option<u16>,
+    labels: u32,
+    msg: Option<String>,
+    /// the profile changed: to the window
+    changed: bool,
+    /// it was learned in (or unbound): to the project and the user's profiles too
+    learned: bool,
+}
+
+impl Ctl {
+    fn new() -> Ctl {
+        Ctl { mapper: None, outs: Vec::with_capacity(32), record: false, down: [false; 41], enc: [0; 7], pot: None,
+              labels: 0, msg: None, changed: true, learned: false }
+    }
+
+    /// A MIDI message that is due, through the profile (or straight to the jack).
+    fn feed(&mut self, bytes: &[u8], m: &mut Machine, params: &crate::Fm1Params) {
+        let Some(mp) = self.mapper.as_mut() else {
+            for &b in bytes {
+                m.soc.periph.apply(&Action::Midi { b });
+            }
+            return;
+        };
+        let outs = &mut self.outs;
+        mp.feed(bytes, &mut |o| outs.push(o));
+        self.run(Some(m), params);
+    }
+
+    /// What the profile asked for: to the machine (if one runs), the window, the recorder.
+    fn run(&mut self, mut m: Option<&mut Machine>, params: &crate::Fm1Params) {
+        let ch = params.channel.value() as u8;
+        let outs = std::mem::take(&mut self.outs);
+        for o in &outs {
+            match *o {
+                Out::Key { id, down, vel } => {
+                    if let Some(m) = m.as_deref_mut() {
+                        if down && id >= fm1_map::KEY0 {
+                            m.soc.periph.apply(&Action::KeyVel { vel: vel.clamp(1, 127) });
+                        }
+                        m.soc.periph.apply(&Action::Key { id, down });
+                    }
+                    if let Some(d) = self.down.get_mut(id as usize) {
+                        *d = down;
+                    }
+                }
+                Out::Enc { enc, clicks } => {
+                    if let Some(m) = m.as_deref_mut() {
+                        m.soc.periph.apply(&Action::Enc { enc, clicks });
+                    }
+                    if let Some(i) = crate::panel::ENCS.iter().position(|e| e.1 == enc) {
+                        self.enc[i] += clicks;
+                    }
+                }
+                Out::Adc { ch: c, value } => {
+                    if let Some(m) = m.as_deref_mut() {
+                        m.soc.periph.apply(&Action::Adc { ch: c, value });
+                    }
+                    if c == fm1_map::POT_ADC {
+                        self.pot = Some(value);
+                    }
+                }
+                Out::Midi { mut bytes, len } => {
+                    if ch != 0 && (0x80..0xf0).contains(&bytes[0]) {
+                        bytes[0] = (bytes[0] & 0xf0) | (ch - 1);
+                    }
+                    if let Some(m) = m.as_deref_mut() {
+                        for &b in &bytes[..len as usize] {
+                            m.soc.periph.apply(&Action::Midi { b });
+                        }
+                    }
+                }
+                Out::Record => self.record = true,
+                Out::Labels => self.labels += 1,
+                Out::KeysMode(k) => self.msg = Some(format!("Keys: {}", k.name())),
+                Out::Learned => {
+                    self.changed = true;
+                    self.learned = true;
+                    self.msg = Some("Learned".into());
+                }
+            }
+        }
+        self.outs = outs;
+        self.outs.clear();
+    }
+
+    fn command(&mut self, c: Cmd, m: Option<&mut Machine>, params: &crate::Fm1Params) {
+        match c {
+            Cmd::Map(p) => {
+                let outs = &mut self.outs;
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.release_all(&mut |o| outs.push(o));
+                }
+                self.run(m, params);
+                params.map_on.store(p.is_some(), Ordering::Relaxed);
+                self.mapper = p.map(Mapper::new);
+                self.changed = true;
+            }
+            Cmd::Learn(t) => {
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.learn(t);
+                }
+            }
+            Cmd::Unbind(t) => {
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.learn(None);
+                    mp.unbind(t);
+                    (self.changed, self.learned) = (true, true);
+                    self.msg = Some(format!("{t}: unbound"));
+                }
+            }
+            Cmd::KeysMode(k) => {
+                let outs = &mut self.outs;
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.set_keys_mode(k, &mut |o| outs.push(o));
+                }
+                self.run(m, params);
+            }
+            _ => {}
+        }
+    }
+
+    /// To the window (and, for a learned profile, the project and the user's profiles).
+    fn publish(&mut self, params: &crate::Fm1Params) {
+        let mut v = params.map.lock().unwrap();
+        if self.changed {
+            self.changed = false;
+            v.rev += 1;
+            v.profile = self.mapper.as_ref().map(|mp| mp.profile().clone());
+        }
+        if self.learned {
+            self.learned = false;
+            if let Some(p) = v.profile.clone() {
+                let mut c = params.controller.lock().unwrap();
+                c.chosen = true;
+                c.profile = Some(p.clone());
+                if let Err(e) = fm1_map::save_user(&p) {
+                    self.msg = Some(format!("Learned, not saved: {e}"));
+                }
+            }
+        }
+        if let Some(mp) = self.mapper.as_ref() {
+            v.keys_mode = mp.keys_mode();
+            v.learning = mp.learning();
+        } else {
+            v.learning = None;
+        }
+        v.down = self.down;
+        v.enc = self.enc;
+        if self.pot.is_some() {
+            v.pot = self.pot.take();
+        }
+        v.labels = self.labels;
+        if let Some(msg) = self.msg.take() {
+            v.msg = Some(msg);
+        }
+    }
+}
+
 
 /// What the editor shows: the screen, the LEDs and how the machine is doing.
 pub struct View {
@@ -194,6 +369,7 @@ pub fn run(
     // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
     let lcd_timed = fm1_soc::lcd_timed_from_env();
     let mut block = 1024usize;
+    let mut ctl = Ctl::new();
     let mut made: u64 = 0; // frames pushed since boot
     let mut due: VecDeque<Midi> = VecDeque::new();
     let mut pot = u16::MAX;
@@ -265,6 +441,10 @@ pub fn run(
                 }
                 Cmd::Block(b) => block = b,
                 Cmd::Record => record(&mut rec, &params),
+                c @ (Cmd::Map(_) | Cmd::Learn(_) | Cmd::Unbind(_) | Cmd::KeysMode(_)) => {
+                    ctl.command(c, m.as_mut(), &params);
+                    ctl.publish(&params);
+                }
             }
         }
         // the ring's lead: the host's block and the Lead parameter, as the window sets it
@@ -306,6 +486,10 @@ pub fn run(
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };
+        // a control bound to Record (the profile's), as the button does
+        if std::mem::take(&mut ctl.record) {
+            record(&mut rec, &params);
+        }
         let fill = rtrb_fill(&out);
         if fill < lead {
             last_take = Instant::now();
@@ -329,9 +513,7 @@ pub fn run(
         } else {
             while due.front().is_some_and(|e| e.frame <= made) {
                 let e = due.pop_front().unwrap();
-                for &b in &e.bytes[..e.len as usize] {
-                    mm.soc.periph.apply(&Action::Midi { b });
-                }
+                ctl.feed(&e.bytes[..e.len as usize], mm, &params);
             }
             let t0 = Instant::now();
             mm.run(20_000);
@@ -353,6 +535,7 @@ pub fn run(
         }
         if last_view.elapsed() >= Duration::from_millis(30) {
             last_view = Instant::now();
+            ctl.publish(&params);
             params.rec.lock().unwrap().file = rec.as_ref().map(|w| (w.path.clone(), w.frames));
             let mut v = shared.view.lock().unwrap();
             v.lcd.copy_from_slice(&mm.soc.lcd.fb);

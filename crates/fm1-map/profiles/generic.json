@@ -1,0 +1,9 @@
+{
+  "name": "Generic keyboard",
+  "pass_unmapped": true,
+  "keys_mode": "panel",
+  "notes": "Any keyboard: its notes play the panel's keys (F3 is MIDI note 53; notes outside F3..G5 move by octaves onto them); everything else goes to the firmware's MIDI IN. Use MIDI learn to bind knobs and pads to the panel.",
+  "bindings": [
+    { "src": { "notes": [0, 127] }, "to": "keys" }
+  ]
+}
