@@ -923,12 +923,21 @@ name = "fm1-isa"
 version = "0.5.0"
 
 [[package]]
+name = "fm1-map"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fm1-plugin"
 version = "0.5.0"
 dependencies = [
  "base64",
  "dispatch2",
  "fm1-core",
+ "fm1-map",
  "fm1-soc",
  "nih_plug",
  "nih_plug_egui",
