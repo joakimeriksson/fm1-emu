@@ -1378,6 +1378,38 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
+/// A firmware package from a file dialog (Windows, macOS).
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_firmware() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
+}
+
+/// F4: pick another firmware package and start again on it, with the same options.
+fn open_another() {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(path) = pick_firmware() {
+        let mut args: Vec<String> = Vec::new();
+        let mut it = std::env::args().skip(1);
+        while let Some(a) = it.next() {
+            // the old firmware out, the rest kept
+            if a == "--fw" || a == "--fwsc" || a == "--bin" {
+                it.next();
+                continue;
+            }
+            args.push(a);
+        }
+        args.push("--fwsc".into());
+        args.push(path.to_string_lossy().into_owned());
+        if let Ok(exe) = std::env::current_exe() {
+            if std::process::Command::new(exe).args(&args).spawn().is_ok() {
+                std::process::exit(0);
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    eprintln!("F4: give the firmware on the command line here (--fwsc FILE)");
+}
+
 fn main() {
     fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
@@ -1389,6 +1421,16 @@ fn main() {
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
+        return;
+    }
+    // started with nothing (a double-click): ask for a firmware package
+    #[cfg(any(windows, target_os = "macos"))]
+    if std::env::args().len() == 1 {
+        if let Some(path) = pick_firmware() {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).arg("--fwsc").arg(path).status();
+            }
+        }
         return;
     }
     let Some(o) = parse() else {
@@ -1616,7 +1658,7 @@ fn main() {
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); Esc quits");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
 
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
@@ -1731,6 +1773,7 @@ fn main() {
                 Key::Up => turn(1, 1, &mut enc_clicks, &mut turning),
                 Key::Comma => turn(2, -1, &mut enc_clicks, &mut turning),
                 Key::Period => turn(2, 1, &mut enc_clicks, &mut turning),
+                Key::F4 => open_another(),
                 _ => {}
             }
         }
