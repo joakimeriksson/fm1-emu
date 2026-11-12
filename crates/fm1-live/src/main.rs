@@ -43,6 +43,7 @@ use panel::{Ctl, ENCS, H, W};
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
 mod panel;
+mod wav;
 mod panel_smk;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1299,11 +1300,14 @@ fn main() {
     let _midi = midi_inputs(&o, &tx);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
+    // F3: a WAV of what the firmware plays, written as the emulation makes it
+    let recorder: Arc<Mutex<Option<wav::Wav>>> = Arc::new(Mutex::new(None));
 
     let audio_ok = _stream.is_some();
     let emu = {
         let (ring, lcd, leds, pads, status, quit) = (ring.clone(), lcd.clone(), leds.clone(), pads.clone(), status.clone(), quit.clone());
         let flash = o.flash.clone();
+        let recorder = recorder.clone();
         std::thread::spawn(move || {
             high_priority();
             let start = Instant::now();
@@ -1340,6 +1344,9 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 if !m.soc.periph.audio.is_empty() {
+                    if let Some(w) = recorder.lock().unwrap().as_mut() {
+                        w.write(&m.soc.periph.audio);
+                    }
                     let mut q = ring.q.lock().unwrap();
                     q.extend(m.soc.periph.audio.drain(..));
                     ring.started.store(true, Ordering::Relaxed);
@@ -1410,7 +1417,7 @@ fn main() {
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; Esc quits");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); Esc quits");
 
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
@@ -1528,6 +1535,9 @@ fn main() {
                 _ => {}
             }
         }
+        if win.is_key_pressed(Key::F3, KeyRepeat::No) {
+            toggle_record(&recorder, &o.name);
+        }
         for t in turning.iter_mut() {
             *t = t.saturating_sub(1);
         }
@@ -1544,6 +1554,10 @@ fn main() {
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st);
         }
+        if let Some(w) = recorder.lock().unwrap().as_ref() {
+            let s = w.frames / 44_100;
+            panel::text(&mut buf, (W - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
+        }
         if win.update_with_buffer(&buf, W, H).is_err() {
             break;
         }
@@ -1554,6 +1568,32 @@ fn main() {
     }
     quit.store(true, Ordering::Relaxed);
     let _ = emu.join();
+    // the window closed while recording: the file keeps what was played, with its length
+    let last = recorder.lock().unwrap().take();
+    if let Some(w) = last {
+        match w.finish() {
+            Ok(p) => eprintln!("recorded {}", p.display()),
+            Err(e) => eprintln!("recording: {e}"),
+        }
+    }
+}
+
+/// F3: start a WAV of the output (in the Music folder's fm1-emu), or finish the one being written.
+fn toggle_record(rec: &Mutex<Option<wav::Wav>>, name: &str) {
+    let mut r = rec.lock().unwrap();
+    match r.take() {
+        Some(w) => match w.finish() {
+            Ok(p) => eprintln!("recorded {}", p.display()),
+            Err(e) => eprintln!("recording: {e}"),
+        },
+        None => match wav::Wav::create(name) {
+            Ok(w) => {
+                eprintln!("recording to {} (F3 stops)", w.path.display());
+                *r = Some(w);
+            }
+            Err(e) => eprintln!("recording: {e}"),
+        },
+    }
 }
 
 /// The SMK-37's window: its panel (panel_smk.rs), the mouse on its keys (velocity: how far down
