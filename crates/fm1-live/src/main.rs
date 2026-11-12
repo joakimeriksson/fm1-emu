@@ -1434,7 +1434,7 @@ fn main() {
         };
 
         // ---- mouse
-        let pos = win.get_mouse_pos(MouseMode::Clamp).map(|(x, y)| fit.to_panel(x, y));
+        let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
@@ -1572,6 +1572,14 @@ fn main() {
     let _ = emu.join();
 }
 
+/// The mouse in the window, clamped to it. Not minifb's MouseMode::Clamp: in 0.28 it panics on a
+/// window of no size (minimized: `width - 1` is negative, and f32::clamp asserts min <= max).
+fn mouse_pos(win: &Window) -> Option<(f32, f32)> {
+    let (w, h) = win.get_size();
+    let (w, h) = ((w as f32 - 1.0).max(0.0), (h as f32 - 1.0).max(0.0));
+    win.get_mouse_pos(MouseMode::Pass).map(|(x, y)| (x.clamp(0.0, w), y.clamp(0.0, h)))
+}
+
 /// The SMK-37's window: its panel (panel_smk.rs), the mouse on its keys (velocity: how far down
 /// a key is hit), pads, faders, wheels and knobs; the computer keyboard as on the page.
 fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: &Mutex<[f32; 41]>, pads: &Mutex<[u32; 16]>, status: &Mutex<String>) {
@@ -1608,7 +1616,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, R SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let pressed = win.get_mouse_down(MouseButton::Left);
-        if let Some((mx, my)) = win.get_mouse_pos(MouseMode::Clamp) {
+        if let Some((mx, my)) = mouse_pos(&win) {
             // (the window may be resized: back to panel coordinates)
             let (ww, wh) = win.get_size();
             let (mx, my) = (mx * w as f32 / ww.max(1) as f32, my * h as f32 / wh.max(1) as f32);
