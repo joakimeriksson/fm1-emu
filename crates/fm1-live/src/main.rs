@@ -79,6 +79,9 @@ const LEAD_MS: f64 = 60.0;
 /// much at each underrun, up to AUDIO_TARGET_MAX_MS: a played note waits about that long.
 const AUDIO_TARGET_STEP_MS: f64 = 4.0;
 const AUDIO_TARGET_MAX_MS: f64 = 80.0;
+/// --latency's default: low on Windows, where it was measured; elsewhere the earlier 50 ms
+/// (the JIT's warm-up can underrun at the start there).
+const AUDIO_TARGET_DEFAULT_MS: f64 = if cfg!(windows) { 12.0 } else { 50.0 };
 /// After this long without an underrun the target comes back down by half a step (no lower than
 /// --latency): a burst of underruns (the start, while the JIT compiles the firmware's code, or
 /// another program busy for a moment) no longer leaves the latency high for good.
@@ -163,7 +166,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false,
-                       latency_ms: 12.0, buffer: None, exclusive: false };
+                       latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -1267,7 +1270,8 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--latency MS] (12)     audio queued ahead of the device to start with; it grows by itself
+         [--latency MS] (12 on Windows, else 50)
+                                 audio queued ahead of the device to start with; it grows by itself
                                  on underruns and comes back down after 20 s without one
          [--buffer FRAMES]       the audio device's buffer, if it takes one
          [--exclusive]           Windows: the output in WASAPI exclusive mode, the device's shortest
@@ -1428,7 +1432,7 @@ fn main() {
                 if u > underruns_seen {
                     underruns_seen = u;
                     calm_since = Instant::now();
-                    target = (target + AUDIO_TARGET_STEP_MS).min(AUDIO_TARGET_MAX_MS);
+                    target = (target + AUDIO_TARGET_STEP_MS).min(AUDIO_TARGET_MAX_MS.max(floor_ms));
                 } else if target > floor_ms && calm_since.elapsed() >= AUDIO_TARGET_CALM {
                     calm_since = Instant::now();
                     target = (target - AUDIO_TARGET_STEP_MS / 2.0).max(floor_ms);
