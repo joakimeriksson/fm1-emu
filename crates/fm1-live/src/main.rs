@@ -1346,8 +1346,18 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 if !m.soc.periph.audio.is_empty() {
-                    if let Some(w) = recorder.lock().unwrap().as_mut() {
-                        w.write(&m.soc.periph.audio);
+                    let stopped = {
+                        let mut r = recorder.lock().unwrap();
+                        if let Some(w) = r.as_mut() {
+                            w.write(&m.soc.periph.audio);
+                        }
+                        if r.as_ref().is_some_and(|w| w.error.is_some()) { r.take() } else { None }
+                    };
+                    // a failed write or the size limit: the take ends here, and says why
+                    if let Some(w) = stopped {
+                        if let Err(e) = w.finish() {
+                            eprintln!("recording: {e}");
+                        }
                     }
                     let mut q = ring.q.lock().unwrap();
                     q.extend(m.soc.periph.audio.drain(..));
@@ -1595,9 +1605,11 @@ fn main() {
 }
 
 /// F3: start a WAV of the output (in the Music folder's fm1-emu), or finish the one being written.
+/// (The file is finished or created outside the lock, which the emulation thread takes for every
+/// block: a slow disk must not hold up the audio.)
 fn toggle_record(rec: &Mutex<Option<wav::Wav>>, name: &str) {
-    let mut r = rec.lock().unwrap();
-    match r.take() {
+    let taken = rec.lock().unwrap().take();
+    match taken {
         Some(w) => match w.finish() {
             Ok(p) => eprintln!("recorded {}", p.display()),
             Err(e) => eprintln!("recording: {e}"),
@@ -1605,7 +1617,7 @@ fn toggle_record(rec: &Mutex<Option<wav::Wav>>, name: &str) {
         None => match wav::Wav::create(name) {
             Ok(w) => {
                 eprintln!("recording to {} (F3 stops)", w.path.display());
-                *r = Some(w);
+                *rec.lock().unwrap() = Some(w);
             }
             Err(e) => eprintln!("recording: {e}"),
         },

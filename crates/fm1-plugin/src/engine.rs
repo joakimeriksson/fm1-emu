@@ -339,6 +339,10 @@ pub fn run(
             let a = std::mem::take(&mut mm.soc.periph.audio);
             if let Some(w) = rec.as_mut() {
                 w.write(&a);
+                // a failed write or the size limit: the take ends here, and the window says why
+                if w.error.is_some() {
+                    record(&mut rec, &params);
+                }
             }
             for f in a.chunks_exact(2) {
                 // (a full ring drops the frame: the host has stopped taking them)
