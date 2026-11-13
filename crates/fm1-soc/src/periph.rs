@@ -73,6 +73,9 @@ const FRAME_T4: u64 = 544;
 pub const IRQ_ALNK0: u8 = 11;
 pub const IRQ_TIMER5: u8 = 63;
 pub const IRQ_OS_TICK: u8 = 3;
+// AC79/WL82 SDK, asm/hwi.h: USB0 SOF and SIE use separate vectors.
+pub(crate) const IRQ_USB_SOF: u8 = 8;
+pub(crate) const IRQ_USB_CTRL: u8 = 9;
 pub const IRQ_SPI1: u8 = 16;
 pub const IRQ_SARADC: u8 = 24;
 pub const IRQ_SPI2: u8 = 37;
@@ -238,6 +241,8 @@ pub struct Periph {
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
+    usb_sof_irq: bool,
+    usb_ctrl_irq: bool,
     /// The cycle the watchdog runs out at (p33.rs; MAX: stopped).
     pub(crate) wdt_at: u64,
     tmr: [Tmr; 4],
@@ -388,6 +393,8 @@ impl Default for Periph {
             spi2_next: u64::MAX,
             usb_next: u64::MAX,
             usb_period: 0,
+            usb_sof_irq: false,
+            usb_ctrl_irq: false,
             wdt_at: u64::MAX,
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
             uart: Uart { next: u64::MAX, ot_next: u64::MAX, ..Default::default() },
@@ -791,6 +798,15 @@ impl Periph {
     pub fn any_pending(&self) -> bool {
         self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+            || self.usb_sof_irq || self.usb_ctrl_irq
+    }
+
+    pub(crate) fn set_usb_irqs(&mut self, (sof, ctrl): (bool, bool)) {
+        if (sof && !self.usb_sof_irq) || (ctrl && !self.usb_ctrl_irq) {
+            self.next_due = 0;
+        }
+        self.usb_sof_irq = sof;
+        self.usb_ctrl_irq = ctrl;
     }
 
     /// Has core `core` (0, 1) source `n` enabled (its ICFG nibble's bit 0)?
@@ -841,6 +857,12 @@ impl Periph {
         }
         if self.uart_irq {
             consider(IRQ_UART1);
+        }
+        if self.usb_sof_irq {
+            consider(IRQ_USB_SOF);
+        }
+        if self.usb_ctrl_irq {
+            consider(IRQ_USB_CTRL);
         }
         for i in 0..4 {
             if self.tmr[i].pending {
