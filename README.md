@@ -49,7 +49,9 @@ firmware is playable the day it is published. Each
 name below opens the page with that firmware picked; press Start. (`?fw=` takes the Hub's ids
 too; `&embed=1` shows only the device and its controls, for a window on another site;
 `?package=URL` plays a package from another site (https, with CORS on) that the list doesn't have,
-`&name=` naming it: other hubs' "Try", older versions.)
+`&name=` naming it: other hubs' "Try", older versions; `?chip=uc25hq80` gives the FM-1 the flash
+part of units sold since autumn 2026, JEDEC B3 60 14, in place of the stock Puya, as fm1-live's
+`--flash-chip uc25hq80` does: a firmware that knows only the Puya keeps its saves in RAM there.)
 A page on this site can hand the emulator a try-out (`web/tryout.js`): `&flash=PATH` lays flash
 sectors over the package's fresh flash (records of a 4-byte little-endian offset and the 4096-byte
 sector, as the saves keep them), `&script=PATH` plays an input script from the boot (fm1-live's

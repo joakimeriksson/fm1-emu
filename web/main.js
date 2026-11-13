@@ -36,6 +36,10 @@ for (const f of catalog.firmwares) if (f.hub && !byId.has(f.hub)) byId.set(f.hub
 // <head> set data-embed before the first paint; style.css hides the rest). It does not change the
 // firmware this browser starts with on the full page.
 const EMBED = document.documentElement.hasAttribute("data-embed");
+// ?chip=uc25hq80 (or new): the FM-1 with the flash part of units sold since autumn 2026 (UC25HQ80,
+// JEDEC B3 60 14) in place of the stock Puya P25Q80: a firmware that knows only the Puya keeps its
+// saves in RAM there, as on those units. For firmware authors to try theirs.
+const CHIP = ["uc25hq80", "new"].includes((params.get("chip") || "").toLowerCase()) ? "uc25hq80" : "p25q80";
 // ?package=URL: a package on another site (https), for a page that lists firmware this one does not
 // (mutant.cloud's "Try", other hubs, older versions); &name= names it. It plays like a catalog entry,
 // its saved flash kept by its package as every firmware's is, and is not added to the list for later.
@@ -762,7 +766,8 @@ const perf = {
     const loads = this.loads.map((l) => Math.round(100 * l)), jit = this.jit;
     return [
       `FM-1 emulator report (${location.origin}${location.pathname})`,
-      `firmware: ${fw.id} ${fw.version || ""} · clock ${mhz} MHz · JIT ${params.get("jit") === "0" ? "off" : "on"}`,
+      `firmware: ${fw.id} ${fw.version || ""} · clock ${mhz} MHz · JIT ${params.get("jit") === "0" ? "off" : "on"}` +
+        (CHIP === "p25q80" ? "" : ` · flash ${CHIP}`),
       `browser: ${navigator.userAgent}`,
       `cores: ${navigator.hardwareConcurrency ?? "?"} · memory: ${navigator.deviceMemory ?? "?"} GB`,
       `audio: ${ac ? `${ac.sampleRate} Hz, buffer "${latency}", base latency ${r(1000 * (ac.baseLatency ?? NaN), 1)} ms, ` +
@@ -939,7 +944,7 @@ function boot(options = {}) {
       node.port.postMessage({ type: "boot", seq, wasm: wasm.slice(0), package: got.bytes.slice().buffer,
         sectors: packSectors(sectors).buffer, syx: importedBank ? importedBank.slice().buffer : null,
         script: trying?.script ? new TextEncoder().encode(trying.script).buffer : null,
-        mhz: clock, jit: params.get("jit") !== "0",
+        mhz: clock, jit: params.get("jit") !== "0", chip: CHIP,
         // (?ahead=0: each quantum emulates only for its own frames, as before the even pace)
         ahead: params.has("ahead") ? Number(params.get("ahead")) : undefined });
       status.textContent = `booting ${f.name}…`;
