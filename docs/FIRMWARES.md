@@ -1,6 +1,6 @@
 # Firmwares that run in the emulator
 
-201 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
+200 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here, a few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/), FM-1 SID, and
 M-VAVE's stock firmware. Each name opens [the page](https://joakimeriksson.github.io/fm1-emu/) with
 that firmware picked (press Start); each author links to the firmware's source.
@@ -206,7 +206,6 @@ Generated from `web/firmwares.json` and `web/smk37/firmwares.json` by `node tool
 | [Vector37 0.3.2](https://joakimeriksson.github.io/fm1-emu/?fw=vector37) | [genkigenki](https://github.com/genkigenki/Vector37) | An orbiting overtone synth: four corners of two overtone generators each, a sun on a path and a moon around it decide how much of each you hear; the knobs shape the selected planet. |
 | [Veffbox 0.11.0](https://joakimeriksson.github.io/fm1-emu/?fw=veffbox) | [Veff](https://github.com/galfaroth/veffbox) | Resampling sound design. |
 | [VESPER 2.0.2](https://joakimeriksson.github.io/fm1-emu/?fw=vesper) | [Fat Cat Studios](https://github.com/fatcatstudios-hub/vesper-fm1) | An ambient worship synth. |
-| [VIBE FM Link 0.4](https://joakimeriksson.github.io/fm1-emu/?fw=vibe-link) | [zvenson](https://github.com/zvenson/vibe-link) | Play the VIBE FM VST plugin with your FM-1. |
 | [Wanderer 1.4.0](https://joakimeriksson.github.io/fm1-emu/?fw=wanderer) | [Nicholas James / Low Vision Music](https://github.com/spinnicholas/lvm-wanderer-fm1) | Wanderer 1.4: author-tested synth for low-vision musicians. |
 | [WaveLoop FM-1 1.0.5.2-midi23](https://joakimeriksson.github.io/fm1-emu/?fw=waveloop) | [ELI7VH](https://github.com/ELI7VH/Felucca) | A Felucca mod: standalone Arturia MiniLab 3 control, fine track mixing, a DJ filter, momentary effects and MIDI feedback. |
 | [winampFM Synth 0.12](https://joakimeriksson.github.io/fm1-emu/?fw=winampfm) | [hericdk](https://github.com/hericdk/winampFM) | Winamp 2.x on the FM-1, built on SLOOP: your sounds as a playlist, four tracks recorded as loops, effects on sliders and a visualizer of lines. |

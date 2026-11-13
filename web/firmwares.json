@@ -1,7 +1,7 @@
 {
   "note": "Community firmwares for the M-VAVE FM-1: the FM-1 Firmware Hub's list (thefirmwarehub.com, tools/hub_catalog.mjs; its packages fetched from the Hub), then our own list (web/firmwares-own.json: this repository's FM-1 SID, M-VAVE's own, a few from fm1-editor.com/firmware). Generated: edit web/firmwares-own.json (the default too), not this file. The web page fetches each package when started and unpacks it with web/fwsc.js; tools/fetch_firmwares.mjs does the same into reference/firmwares for fm1-live. \"hub\": the firmware's id on the Hub (its card: thefirmwarehub.com/#fw-<hub>). \"skipped\": Hub firmwares not run here, by the Hub's id, with why; the page lists the Hub's other firmwares not in this file after these, marked as not yet run here (web/fwsc.js hubNewcomers).",
   "default": "felucca",
-  "skipped": {"lsdjburrito":"boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do"},
+  "skipped": {"vibe-link":"crashes in the emulator a second or two after boot (a CPU exception at 0x0200338E: its own crash screen); held back until that is understood","lsdjburrito":"boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do"},
   "firmwares": [
     { "id": "mvave", "name": "M-VAVE stock firmware", "version": "", "author": "M-VAVE", "license": "M-VAVE's own",
       "about": "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. This page does not host it and cannot download it (M-VAVE's server does not allow other pages to): download FM-1.fwsc from M-VAVE, then open it here; this browser keeps it for next time. Its patches live in flash an update does not carry, so it starts with a small bank of the emulator's own; \"DX7 bank…\" loads a 32-voice .syx.",
@@ -775,10 +775,6 @@
       "about": "An ambient worship synth. Each scene layers four lush voices in any major key around a crystal orbit home screen: pads, plucks, piano and swells. Shape them with drive, tone, granular clouds, shimmer, reverb and delay, then play live over the scene or record into it.",
       "repo": "https://github.com/fatcatstudios-hub/vesper-fm1",
       "package": "https://thefirmwarehub.com/fw/vesper-2.0.2.fwsc", "hub": "vesper" },
-    { "id": "vibe-link", "name": "VIBE FM Link", "version": "0.4", "author": "zvenson", "license": "GPL-3.0",
-      "about": "Play the VIBE FM VST plugin with your FM-1. Install this and the FM-1 is the controller: the keys play, KNOB 1-4 and every button do in the plugin what they do on the FM-1 – SLOOP, Felucca, OberVave and the other converted firmwares feel like home, in your DAW, in the Web Player and on the VIBE FM. The sound comes from the plugin, not the FM-1. Plain MIDI: any synth or DAW can learn it too.",
-      "repo": "https://github.com/zvenson/vibe-link",
-      "package": "https://thefirmwarehub.com/fw/vibe-link-0.4.fwsc", "hub": "vibe-link" },
     { "id": "wanderer", "name": "Wanderer", "version": "1.4.0", "author": "Nicholas James / Low Vision Music", "license": "GPL-3.0",
       "about": "Wanderer 1.4: author-tested synth for low-vision musicians. Protect an Anchor, evolve two layers, play 100 sounds, eight Scatter modes and a 13-pattern arp. Adaptive/steady Zoom, clear knob controls, adjustable display hold and optional audio cues.",
       "repo": "https://github.com/spinnicholas/lvm-wanderer-fm1",
