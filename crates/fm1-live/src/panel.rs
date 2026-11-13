@@ -146,16 +146,32 @@ pub fn put(buf: &mut [u32], x: i32, y: i32, c: u32, a: f32) {
 
 /// Rounded rectangle with a vertical gradient, anti-aliased edges.
 pub fn rrect(buf: &mut [u32], x: f32, y: f32, w: f32, h: f32, r: f32, top: u32, bot: u32) {
+    let cw = CANVAS_W.with(|c| c.get()) as i32;
+    let (x0, x1) = (x.floor() as i32 - 1, (x + w).ceil() as i32);
     for py in (y.floor() as i32 - 1)..=((y + h).ceil() as i32) {
-        for px in (x.floor() as i32 - 1)..=((x + w).ceil() as i32) {
-            let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
-            let qx = (fx - (x + w / 2.0)).abs() - (w / 2.0 - r);
-            let qy = (fy - (y + h / 2.0)).abs() - (h / 2.0 - r);
+        let fy = py as f32 + 0.5;
+        let c = mix(top, bot, (fy - y) / h);
+        let qy = (fy - (y + h / 2.0)).abs() - (h / 2.0 - r);
+        let a = |px: i32| {
+            let qx = (px as f32 + 0.5 - (x + w / 2.0)).abs() - (w / 2.0 - r);
             let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
-            let a = (0.5 - d).clamp(0.0, 1.0);
-            if a > 0.0 {
-                put(buf, px, py, mix(top, bot, (fy - y) / h), a);
-            }
+            (0.5 - d).clamp(0.0, 1.0)
+        };
+        // the shape is convex, so a row's fully covered pixels are one run: only its ends blend
+        let mut l = x0;
+        while l <= x1 && a(l) < 1.0 {
+            put(buf, l, py, c, a(l));
+            l += 1;
+        }
+        let mut rt = x1;
+        while rt >= l && a(rt) < 1.0 {
+            put(buf, rt, py, c, a(rt));
+            rt -= 1;
+        }
+        let (l, rt) = (l.max(0), rt.min(cw - 1));
+        if py >= 0 && py < buf.len() as i32 / cw && l <= rt {
+            let row = (py * cw) as usize;
+            buf[row + l as usize..=row + rt as usize].fill(c);
         }
     }
 }
@@ -326,5 +342,50 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
         rrect(buf, x as f32, y as f32 + off, w as f32, h as f32, w as f32 / 2.0, mix(KEY_TOP, AMBER, heat), mix(KEY_BOT, AMBER, heat * 0.8));
         let line = mix(KEY_LINE, 0xffe2b0, if down { 1.0 } else { led });
         rrect(buf, (x + w / 2) as f32 - 2.5, y as f32 + 18.0 + off, 5.0, h as f32 - 36.0, 2.5, line, line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rrect` as one SDF sample per pixel, every pixel through `put`.
+    fn rrect_per_pixel(buf: &mut [u32], x: f32, y: f32, w: f32, h: f32, r: f32, top: u32, bot: u32) {
+        for py in (y.floor() as i32 - 1)..=((y + h).ceil() as i32) {
+            for px in (x.floor() as i32 - 1)..=((x + w).ceil() as i32) {
+                let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
+                let qx = (fx - (x + w / 2.0)).abs() - (w / 2.0 - r);
+                let qy = (fy - (y + h / 2.0)).abs() - (h / 2.0 - r);
+                let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
+                let a = (0.5 - d).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    put(buf, px, py, mix(top, bot, (fy - y) / h), a);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rrect_matches_the_per_pixel_sdf() {
+        let shapes = [
+            (14.0, 14.0, (W - 28) as f32, (H - 28) as f32, 30.0, 0x5e6166, 0x4a4d52),
+            (907.0, 235.0, 50.0, 64.0, 9.0, 0x1c1d20, 0x1c1d20),
+            (61.0, 683.0, 62.0, 106.0, 31.0, 0x6a5557, 0xf2a33a),
+            (92.5, 698.0, 5.0, 70.0, 2.5, 0x8f7c7e, 0x8f7c7e),
+            (100.3, 50.7, 33.3, 20.1, 6.6, 0x102030, 0xf0e0d0),
+            (-20.0, -10.0, 60.0, 40.0, 12.0, 0x123456, 0x654321),
+            (W as f32 - 30.0, H as f32 - 20.0, 60.0, 40.0, 20.0, 0xf2a33a, 0x62d36e),
+            (300.0, 400.0, 40.0, 6.0, 5.0, 0xc3c4c8, 0xa9aaae),
+        ];
+        for cw in [W, 1920] {
+            canvas(cw);
+            for (x, y, w, h, r, top, bot) in shapes {
+                let mut want = vec![0x3a3b3c; cw * H];
+                let mut got = want.clone();
+                rrect_per_pixel(&mut want, x, y, w, h, r, top, bot);
+                rrect(&mut got, x, y, w, h, r, top, bot);
+                assert!(want == got, "rrect({x}, {y}, {w}, {h}, {r}) on a {cw}-wide canvas differs");
+            }
+        }
     }
 }
