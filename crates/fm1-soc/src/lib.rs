@@ -1608,6 +1608,9 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
     let u = fwsc::unpack(pkg)?;
     let board = Board::of_identity(&u.identity);
     let mut flash = fwsc::full_flash(&u.raw, FLASH_SIZE);
+    // the app's resource region, which the update loader writes after the app (Polly 0.6.4's
+    // band styles, Melodee 1.6's factory sounds): without it the firmware boots, and does without
+    fwsc::lay_resources(&mut flash, &u.res);
     if board == Board::Smk37 {
         // a unit's factory calibration record, with the stock defaults
         fwsc::smk_trim_fill_defaults(&mut flash);
