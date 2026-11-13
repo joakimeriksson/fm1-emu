@@ -1,8 +1,10 @@
 //! A MIDI controller as the panel (crates/fm1-map), the WAV recorder, and the labels overlay.
 //!
-//! The MIDI inputs' callbacks feed one [`Mapper`]; what it asks for goes to the machine as
-//! [`Action`]s, and what the window shows (keys held, knobs turned, the recorder, learning) to a
-//! [`View`] the window takes each frame.
+//! The MIDI inputs the profile is for feed one [`Mapper`] (the others go to the MIDI IN jack as
+//! they come); what it asks for goes to the machine as [`Action`]s, and what the window shows
+//! (keys held, knobs turned, the recorder, learning) to a [`View`] the window takes each frame.
+//!
+//! Lock order: `mapper`, then `view`. Whatever takes both takes them in that order.
 
 use crate::panel::{self, ENCS};
 use fm1_map::{KeysMode, Mapper, Out, Profile, Target};
@@ -38,8 +40,11 @@ pub struct Ctl {
     pub view: Mutex<View>,
     /// the MIDI inputs in use, for the title
     pub inputs: Mutex<Vec<String>>,
-    /// false: --map none, MIDI goes to the jack as it is
+    /// false: --map none, or auto with no profile made for an input: MIDI goes to the jack as it is
     pub on: bool,
+    /// --map auto: the profile only takes the inputs it was made for (its `device` in their
+    /// names); a profile chosen by name or file takes every input --midi opens
+    pub auto: bool,
     /// --midi-ch: what passes to the jack moved to this channel (1..16; 0: as sent)
     pub midi_ch: u8,
     /// --midi-log: print each message and what it became
@@ -56,10 +61,16 @@ impl Ctl {
             view: Mutex::new(View::default()),
             inputs: Mutex::new(Vec::new()),
             on,
+            auto: false,
         }
     }
 
-    /// One message from a MIDI input.
+    /// Whether the input named `name` goes through the profile.
+    pub fn maps(&self, name: &str) -> bool {
+        self.on && (!self.auto || fm1_map::pick_named(std::slice::from_ref(self.mapper.lock().unwrap().profile()), name).is_some())
+    }
+
+    /// One message from a MIDI input (the lock order: mapper, then view).
     pub fn feed(&self, msg: &[u8], tx: &mpsc::Sender<Action>) {
         let mut m = self.mapper.lock().unwrap();
         let mut v = self.view.lock().unwrap();
@@ -78,11 +89,6 @@ impl Ctl {
             let what = if outs.is_empty() { "(dropped)".to_string() } else { outs.join(", ") };
             eprintln!("midi in {:<9} {:<22} -> {what}", bytes.join(" "), name_of(msg));
         }
-    }
-
-    /// A target's tag for the overlay.
-    pub fn tag(&self, t: Target) -> Option<String> {
-        self.mapper.lock().unwrap().profile().tag_of(t)
     }
 
     /// The labels overlay, with the profile as it is now.
@@ -141,8 +147,8 @@ pub fn target_of(c: panel::Ctl) -> Target {
     }
 }
 
-/// The profile `--map` asks for: "auto" (by the MIDI inputs' names), "none", a profile's name,
-/// or a JSON file.
+/// The profile `--map` asks for: "auto" (the one made for a MIDI input, by its name; none if no
+/// profile was, so MIDI goes to the firmware as before), "none", a profile's name, or a JSON file.
 pub fn choose(want: &str, inputs: &[String]) -> Result<Option<Profile>, String> {
     if want == "none" {
         return Ok(None);
@@ -159,13 +165,9 @@ pub fn choose(want: &str, inputs: &[String]) -> Result<Option<Profile>, String> 
         return all.iter().find(|p| p.name.eq_ignore_ascii_case(want)).cloned().map(Some)
             .ok_or_else(|| format!("no controller profile {want:?} (have: {})", all.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
     }
-    // the first input with a profile of its own, else the generic one
-    for i in inputs {
-        if let Some(p) = all.iter().find(|p| !p.device.is_empty() && i.to_lowercase().contains(&p.device.to_lowercase())) {
-            return Ok(Some(p.clone()));
-        }
-    }
-    Ok(fm1_map::pick(&all, ""))
+    // the first input with a profile made for it; else none (not the generic profile: a keyboard
+    // or a DAW's port plays the firmware's MIDI IN as it always has)
+    Ok(inputs.iter().find_map(|i| fm1_map::pick_named(&all, i)).cloned())
 }
 
 /// A message, for people: "note on ch1 C3 (48) vel 90".

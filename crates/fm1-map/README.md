@@ -9,9 +9,11 @@ Both the standalone player (`fm1-live`) and the plugin (VST3 / CLAP) use it.
 
 ## Using it
 
-**fm1-live**: `--map auto` (the default) picks a profile by your MIDI input's name, else the
-generic one. `--map none` turns it off (MIDI goes to MIDI IN as before), `--map "Akai MPK mini 3"`
-picks one by name, `--map my.json` reads a file.
+**fm1-live**: `--map auto` (the default) uses the profile made for your controller, found by its
+MIDI input's name, and only for that input: other inputs (another keyboard, a DAW's port) and
+controllers with no profile of their own play the firmware's MIDI IN as before. `--map none` turns
+it off, `--map "Generic keyboard"` or another name picks one for every input `--midi` opens, and
+`--map my.json` reads a file.
 
 | Key | What it does |
 | --- | --- |

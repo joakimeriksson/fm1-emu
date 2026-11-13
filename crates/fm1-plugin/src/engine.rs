@@ -79,10 +79,13 @@ impl Ctl {
               labels: 0, msg: None, changed: true, learned: false }
     }
 
-    /// A MIDI message that is due, through the profile (or straight to the jack).
+    /// A MIDI message that is due, through the profile (or straight to the jack, its channel
+    /// moved by the parameter).
     fn feed(&mut self, bytes: &[u8], m: &mut Machine, params: &crate::Fm1Params) {
         let Some(mp) = self.mapper.as_mut() else {
-            for &b in bytes {
+            let ch = params.channel.value() as u8;
+            for (i, &b) in bytes.iter().enumerate() {
+                let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
                 m.soc.periph.apply(&Action::Midi { b });
             }
             return;
@@ -157,7 +160,6 @@ impl Ctl {
                     mp.release_all(&mut |o| outs.push(o));
                 }
                 self.run(m, params);
-                params.map_on.store(p.is_some(), Ordering::Relaxed);
                 self.mapper = p.map(Mapper::new);
                 self.changed = true;
             }
@@ -187,22 +189,24 @@ impl Ctl {
 
     /// To the window (and, for a learned profile, the project and the user's profiles).
     fn publish(&mut self, params: &crate::Fm1Params) {
+        // a learned profile: to the project, and to a file, with no lock the window takes held
+        if std::mem::take(&mut self.learned) {
+            if let Some(p) = self.mapper.as_ref().map(|mp| mp.profile().clone()) {
+                {
+                    let mut c = params.controller.lock().unwrap();
+                    c.chosen = true;
+                    c.profile = Some(p.clone());
+                }
+                if let Err(e) = fm1_map::save_user(&p) {
+                    self.msg = Some(format!("Learned, not saved: {e}"));
+                }
+            }
+        }
         let mut v = params.map.lock().unwrap();
         if self.changed {
             self.changed = false;
             v.rev += 1;
             v.profile = self.mapper.as_ref().map(|mp| mp.profile().clone());
-        }
-        if self.learned {
-            self.learned = false;
-            if let Some(p) = v.profile.clone() {
-                let mut c = params.controller.lock().unwrap();
-                c.chosen = true;
-                c.profile = Some(p.clone());
-                if let Err(e) = fm1_map::save_user(&p) {
-                    self.msg = Some(format!("Learned, not saved: {e}"));
-                }
-            }
         }
         if let Some(mp) = self.mapper.as_ref() {
             v.keys_mode = mp.keys_mode();

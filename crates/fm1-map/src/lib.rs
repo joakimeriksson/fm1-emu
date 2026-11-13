@@ -411,16 +411,38 @@ pub fn save_user(p: &Profile) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-/// The profile for a MIDI input named `device`: the first whose `device` it contains, else the
+/// The profile for a MIDI input named `device`: the one made for it ([`pick_named`]), else the
 /// one named "Generic", else the first.
 pub fn pick(profiles: &[Profile], device: &str) -> Option<Profile> {
-    let d = device.to_lowercase();
-    profiles
-        .iter()
-        .find(|p| !p.device.is_empty() && d.contains(&p.device.to_lowercase()))
+    pick_named(profiles, device)
         .or_else(|| profiles.iter().find(|p| p.name.to_lowercase().starts_with("generic")))
         .or_else(|| profiles.first())
         .cloned()
+}
+
+/// The profile made for a MIDI input named `device`, if there is one: its `device` in the name,
+/// however a system writes it ("MPK mini 3", "MPK Mini Mk3", "AKAI MPKmini3 MIDI 1"): case,
+/// spaces, punctuation and a "mk" before a number make no difference.
+pub fn pick_named<'a>(profiles: &'a [Profile], device: &str) -> Option<&'a Profile> {
+    fn norm(s: &str) -> String {
+        let c: Vec<char> = s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
+        let mut out = String::with_capacity(c.len());
+        let mut i = 0;
+        while i < c.len() {
+            if c[i] == 'm' && c.get(i + 1) == Some(&'k') && c.get(i + 2).is_some_and(char::is_ascii_digit) {
+                i += 2;
+                continue;
+            }
+            out.push(c[i]);
+            i += 1;
+        }
+        out
+    }
+    let d = norm(device);
+    profiles.iter().find(|p| {
+        let n = norm(&p.device);
+        !n.is_empty() && d.contains(&n)
+    })
 }
 
 /// What the mapper asks of the machine or the front end.
@@ -442,6 +464,17 @@ pub enum Out {
     KeysMode(KeysMode),
     /// A binding was learned: the profile changed (save it if you keep profiles).
     Learned,
+}
+
+/// Whether a message of `kind` (0x90 a note, 0xb0 a CC, 0xe0 pitch bend) learned onto `t`
+/// makes a binding that does something: the keys play from notes; the buttons, encoders and
+/// MASTER from notes and CCs; pitch bend only goes on to MIDI IN.
+fn learnable(t: Target, kind: u8) -> bool {
+    match (t, kind) {
+        (Target::Keys | Target::Key(_), k) => k == 0x90,
+        (Target::Midi | Target::Ignore, _) => true,
+        (_, k) => k == 0x90 || k == 0xb0,
+    }
 }
 
 /// The length of a channel message from its status byte (0: not one).
@@ -571,6 +604,13 @@ impl Mapper {
         }
     }
 
+    /// A CC on `ch` that a binding has holding a button down now.
+    fn holds_button(&self, ch: u8, cc: u8) -> bool {
+        self.profile.bindings.iter().any(|b| {
+            b.src.cc == Some(cc) && b.src.ch_ok(ch) && matches!(b.to, Target::Button(id) if self.held_btn[id.min(13) as usize] > 0)
+        })
+    }
+
     fn function_held(&self) -> bool {
         (0..14u8).any(|i| Target::Button(i).is_function() && (self.held_btn[i as usize] > 0 || self.latched[i as usize]))
     }
@@ -580,9 +620,19 @@ impl Mapper {
         let Some(&st) = msg.first() else { return };
         let len = msg_len(st) as usize;
         if len == 0 || msg.len() < len {
-            // system messages (clock, start, stop) go to the firmware as they are
-            if (0xf8..=0xfc).contains(&st) {
-                out(Out::Midi { bytes: [st, 0, 0], len: 1 });
+            // system messages go to the firmware as they are: real time (clock, start, stop) and
+            // system common (song position, song select, tune request, MTC quarter frames)
+            let n = match st {
+                0xf8..=0xfc => 1,
+                0xf6 => 1,
+                0xf1 | 0xf3 => 2,
+                0xf2 => 3,
+                _ => 0,
+            };
+            if n > 0 && msg.len() >= n {
+                let mut bytes = [st, 0, 0];
+                bytes[1..n].copy_from_slice(&msg[1..n]);
+                out(Out::Midi { bytes, len: n as u8 });
             }
             return;
         }
@@ -594,15 +644,20 @@ impl Mapper {
         let note_on = kind == 0x90 && d2 > 0;
         let note_off = kind == 0x80 || (kind == 0x90 && d2 == 0);
 
+        // learning: the next press or turn binds; a release (of a note, or of a button a CC
+        // holds) still goes where its press went, so nothing stays held
         if let Some(t) = self.learn {
-            if note_on || (kind == 0xb0) || kind == 0xe0 {
-                if kind == 0xb0 && self.profile.bindings.iter().any(|b| b.src.cc == Some(d1) && b.to == t) {
-                    return; // the rest of a knob's turn
+            let release = note_off || (kind == 0xb0 && d2 < 64 && self.holds_button(ch, d1));
+            if !release {
+                if learnable(t, kind) {
+                    if kind == 0xb0 && self.profile.bindings.iter().any(|b| b.src.cc == Some(d1) && b.to == t) {
+                        return; // the rest of a knob's turn
+                    }
+                    self.learn_from(t, kind, ch, d1);
+                    out(Out::Learned);
                 }
-                self.learn_from(t, kind, ch, d1);
-                out(Out::Learned);
+                return;
             }
-            return;
         }
 
         // a note's release goes where its press went
@@ -677,6 +732,10 @@ impl Mapper {
                         if self.key_count[n as usize] == 1 {
                             out(Out::Key { id: KEY0 + n, down: true, vel: d2.max(1) });
                         }
+                    } else {
+                        // beyond a zone that does not fold: to MIDI IN, its release after it
+                        self.held_note[ch as usize][d1 as usize] = TO_MIDI;
+                        out(pass);
                     }
                 }
                 Target::Button(id) => {

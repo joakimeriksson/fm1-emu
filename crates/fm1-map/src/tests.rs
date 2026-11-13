@@ -207,5 +207,71 @@ fn pick_by_device_name() {
     let all = builtin();
     assert_eq!(pick(&all, "MPK mini 3 MIDI 1").unwrap().name, "Akai MPK mini 3");
     assert_eq!(pick(&all, "Some Other Keyboard").unwrap().name, "Generic keyboard");
+    // the names other systems give it (Android: manufacturer and product)
+    for name in ["AKAI PROFESSIONAL,LP MPK mini 3", "MPK Mini Mk3", "MPKmini3", "mpk-mini-3 MIDI 1"] {
+        assert_eq!(pick_named(&all, name).map(|p| p.name.as_str()), Some("Akai MPK mini 3"), "{name}");
+    }
+    // nothing made for it: none (fm1-live's auto then passes its MIDI through)
+    assert!(pick_named(&all, "Some Other Keyboard").is_none());
+    assert!(pick_named(&all, "loopMIDI Port").is_none());
     assert_eq!(Profile { name: "My Pads / 2".into(), ..Profile::default() }.file_name(), "my-pads---2.json");
+}
+
+#[test]
+fn releases_get_through_while_learning() {
+    let mut m = mpk();
+    // a note held on the panel's keys and pad A8 (GLO) held, then learning starts
+    let v = run(&mut m, &[&[0x90, 60, 100], &[0x99, 43, 100]]);
+    assert_eq!(v.len(), 2, "{v:?}");
+    m.learn(Some(Target::Enc(2)));
+    let v = run(&mut m, &[&[0x80, 60, 0], &[0x89, 43, 0]]);
+    assert_eq!(v, vec![Out::Key { id: KEY0 + 7, down: false, vel: 0 }, Out::Key { id: 7, down: false, vel: 0 }],
+        "the note and the pad let go");
+    assert_eq!(m.learning(), Some(Target::Enc(2)), "a release learns nothing");
+    // and the note plays again after learning
+    m.learn(None);
+    let v = run(&mut m, &[&[0x90, 60, 100]]);
+    assert_eq!(v, vec![Out::Key { id: KEY0 + 7, down: true, vel: 100 }]);
+}
+
+#[test]
+fn only_what_works_is_learned() {
+    let mut m = mpk();
+    m.learn(Some(Target::Key(3)));
+    // pitch bend and a CC onto the keys: nothing learned, still learning
+    assert!(run(&mut m, &[&[0xe0, 0, 80], &[0xb0, 1, 64]]).is_empty());
+    assert_eq!(m.learning(), Some(Target::Key(3)));
+    assert_eq!(run(&mut m, &[&[0x90, 50, 100]]), vec![Out::Learned]);
+    // pitch bend onto an encoder: nothing learned
+    m.learn(Some(Target::Enc(2)));
+    assert!(run(&mut m, &[&[0xe0, 0, 80]]).is_empty());
+    assert_eq!(m.learning(), Some(Target::Enc(2)));
+}
+
+#[test]
+fn system_common_messages_pass_through_a_profile() {
+    let mut m = mpk();
+    let v = run(&mut m, &[&[0xf2, 0x10, 0x02], &[0xf3, 5], &[0xf1, 0x23], &[0xf6], &[0xf8]]);
+    assert_eq!(v, vec![
+        Out::Midi { bytes: [0xf2, 0x10, 0x02], len: 3 },
+        Out::Midi { bytes: [0xf3, 5, 0], len: 2 },
+        Out::Midi { bytes: [0xf1, 0x23, 0], len: 2 },
+        Out::Midi { bytes: [0xf6, 0, 0], len: 1 },
+        Out::Midi { bytes: [0xf8, 0, 0], len: 1 },
+    ]);
+}
+
+#[test]
+fn notes_beyond_a_zone_that_does_not_fold_go_to_midi_in() {
+    let mut p = Profile { name: "t".into(), ..Profile::default() };
+    let mut b = Binding::new(Src { notes: Some([0, 127]), ..Src::default() }, Target::Keys);
+    b.fold = false;
+    p.bindings.push(b);
+    let mut m = Mapper::new(p);
+    let v = run(&mut m, &[&[0x90, 30, 90], &[0x80, 30, 0], &[0x90, 53, 90]]);
+    assert_eq!(v, vec![
+        Out::Midi { bytes: [0x90, 30, 90], len: 3 },
+        Out::Midi { bytes: [0x80, 30, 0], len: 3 },
+        Out::Key { id: KEY0, down: true, vel: 90 },
+    ]);
 }
