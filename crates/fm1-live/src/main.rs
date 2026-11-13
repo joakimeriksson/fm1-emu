@@ -42,6 +42,7 @@ use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
+mod fit;
 mod panel;
 mod panel_smk;
 use std::collections::VecDeque;
@@ -1240,6 +1241,7 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
 fn main() {
+    fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", buildinfo::version("fm1-live"));
         if let Some(w) = buildinfo::stale() {
@@ -1387,7 +1389,15 @@ fn main() {
         let _ = emu.join();
         return;
     }
-    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), W, H, WindowOptions::default()) {
+    // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
+    let ((ww, wh), at) = fit::start(W, H, None);
+    // (elsewhere the window stays as it was: minifb scales it for the display itself)
+    let opts = if cfg!(windows) {
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
+    } else {
+        WindowOptions::default()
+    };
+    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1397,6 +1407,10 @@ fn main() {
         }
     };
     win.set_target_fps(60);
+    if let Some((x, y)) = at {
+        win.set_position(x, y);
+    }
+    let mut fit = fit::Fit::new(W, H);
     let base = panel::base();
     let mut buf = vec![0u32; W * H];
     let mut down = [false; 41];
@@ -1420,7 +1434,7 @@ fn main() {
         };
 
         // ---- mouse
-        let pos = win.get_mouse_pos(MouseMode::Clamp);
+        let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
@@ -1544,7 +1558,9 @@ fn main() {
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st);
         }
-        if win.update_with_buffer(&buf, W, H).is_err() {
+        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (W, H) };
+        let (frame, fw, fh) = fit.frame(&buf, ww, wh);
+        if win.update_with_buffer(frame, fw, fh).is_err() {
             break;
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
@@ -1554,6 +1570,14 @@ fn main() {
     }
     quit.store(true, Ordering::Relaxed);
     let _ = emu.join();
+}
+
+/// The mouse in the window, clamped to it. Not minifb's MouseMode::Clamp: in 0.28 it panics on a
+/// window of no size (minimized: `width - 1` is negative, and f32::clamp asserts min <= max).
+fn mouse_pos(win: &Window) -> Option<(f32, f32)> {
+    let (w, h) = win.get_size();
+    let (w, h) = ((w as f32 - 1.0).max(0.0), (h as f32 - 1.0).max(0.0));
+    win.get_mouse_pos(MouseMode::Pass).map(|(x, y)| (x.clamp(0.0, w), y.clamp(0.0, h)))
 }
 
 /// The SMK-37's window: its panel (panel_smk.rs), the mouse on its keys (velocity: how far down
@@ -1592,7 +1616,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, R SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let pressed = win.get_mouse_down(MouseButton::Left);
-        if let Some((mx, my)) = win.get_mouse_pos(MouseMode::Clamp) {
+        if let Some((mx, my)) = mouse_pos(&win) {
             // (the window may be resized: back to panel coordinates)
             let (ww, wh) = win.get_size();
             let (mx, my) = (mx * w as f32 / ww.max(1) as f32, my * h as f32 / wh.max(1) as f32);
