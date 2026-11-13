@@ -1384,8 +1384,10 @@ fn pick_firmware() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
 }
 
-/// F4: pick another firmware package and start again on it, with the same options.
-fn open_another() {
+/// F4: pick another firmware package; the arguments to start again on it, with the same
+/// options. The run then ends as on Esc (the emulation stopped, a WAV being recorded finished)
+/// and starts the new one.
+fn open_another() -> Option<Vec<String>> {
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(path) = pick_firmware() {
         let mut args: Vec<String> = Vec::new();
@@ -1400,14 +1402,37 @@ fn open_another() {
         }
         args.push("--fwsc".into());
         args.push(path.to_string_lossy().into_owned());
-        if let Ok(exe) = std::env::current_exe() {
-            if std::process::Command::new(exe).args(&args).spawn().is_ok() {
-                std::process::exit(0);
-            }
-        }
+        return Some(args);
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     eprintln!("F4: give the firmware on the command line here (--fwsc FILE)");
+    None
+}
+
+/// Started with a double-click, not from a terminal or a script: on Windows the program has a
+/// console of its own (no other process on it); on macOS launchd started it (Finder) and its
+/// input is no terminal.
+#[cfg(any(windows, target_os = "macos"))]
+fn double_clicked() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        }
+        let mut ids = [0u32; 4];
+        // SAFETY: the buffer holds the count given
+        unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::IsTerminal;
+        extern "C" {
+            fn getppid() -> i32;
+        }
+        // SAFETY: getppid takes nothing and cannot fail
+        !std::io::stdin().is_terminal() && unsafe { getppid() } == 1
+    }
 }
 
 fn main() {
@@ -1423,9 +1448,10 @@ fn main() {
         println!("{USAGE}");
         return;
     }
-    // started with nothing (a double-click): ask for a firmware package
+    // started with nothing by a double-click: ask for a firmware package (from a terminal or a
+    // script: the usage, as before)
     #[cfg(any(windows, target_os = "macos"))]
-    if std::env::args().len() == 1 {
+    if std::env::args().len() == 1 && double_clicked() {
         if let Some(path) = pick_firmware() {
             if let Ok(exe) = std::env::current_exe() {
                 let _ = std::process::Command::new(exe).arg("--fwsc").arg(path).status();
@@ -1660,7 +1686,9 @@ fn main() {
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
     eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
 
-    while win.is_open() && !win.is_key_down(Key::Escape) {
+    // F4 picked another firmware: what to start once this run has ended
+    let mut next: Option<Vec<String>> = None;
+    while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
             enc_clicks[i] += clicks;
             turning[i] = 10;
@@ -1773,7 +1801,7 @@ fn main() {
                 Key::Up => turn(1, 1, &mut enc_clicks, &mut turning),
                 Key::Comma => turn(2, -1, &mut enc_clicks, &mut turning),
                 Key::Period => turn(2, 1, &mut enc_clicks, &mut turning),
-                Key::F4 => open_another(),
+                Key::F4 => next = open_another(),
                 _ => {}
             }
         }
@@ -1819,6 +1847,12 @@ fn main() {
         match w.finish() {
             Ok(p) => eprintln!("recorded {}", p.display()),
             Err(e) => eprintln!("recording: {e}"),
+        }
+    }
+    // F4: the new firmware, now that this one has stopped
+    if let Some(args) = next {
+        if let Err(e) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).spawn()) {
+            eprintln!("F4: cannot start again: {e}");
         }
     }
 }
