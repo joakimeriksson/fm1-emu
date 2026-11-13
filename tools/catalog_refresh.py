@@ -12,7 +12,9 @@
    they were), a new one stays out of the file (the page still lists it among the Hub's newcomers,
    marked as not yet run here, web/fwsc.js hubNewcomers). A firmware gone from the Hub leaves
    tests/catalog.json too.
-4. The summary (markdown, for a pull request) says what moved, what is new, what was held back
+4. docs/FIRMWARES.md, the list with authors the README links to, follows the file
+   (tools/readme_firmwares.mjs).
+5. The summary (markdown, for a pull request) says what moved, what is new, what was held back
    and why. Exit 0 whether or not anything failed (a held-back firmware is not an error: the file
    stays one that plays); 1 only when the tools themselves could not run.
 
@@ -99,6 +101,10 @@ if held:
     text = re.sub(r",(\n  \])", r"\1", text)   # a dropped last entry leaves a trailing comma
     json.loads(text)                          # still JSON
     open(CAT, "w").write(text)
+
+
+if sh(["node", "tools/readme_firmwares.mjs"]).returncode != 0:
+    sys.exit("readme_firmwares.mjs failed")
 
 
 def ver(f):
