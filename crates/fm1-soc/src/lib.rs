@@ -44,7 +44,7 @@ pub mod usb;
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
 pub use ram::Ram;
-pub use spiflash::{SpiFlash, FLASH_SIZE};
+pub use spiflash::{FlashPart, SpiFlash, FLASH_SIZE};
 
 pub const XIP_BASE: u32 = 0x0200_0000;
 pub const RAM_BASE: u32 = 0x01c0_0000;
@@ -254,6 +254,8 @@ impl Board {
 
 pub struct Soc {
     pub board: Board,
+    /// The FM-1's flash part (its JEDEC id; `set_flash_part`): the stock Puya unless asked.
+    pub flash_part: spiflash::FlashPart,
     /// The BT baseband's window base (0x2FC44), as the firmware set it.
     bt_window: u32,
     pub xip: Vec<u8>,
@@ -505,6 +507,7 @@ impl Soc {
     pub fn new(ram_size: usize, xip: Vec<u8>) -> Self {
         let mut soc = Self {
             board: Board::Fm1,
+            flash_part: spiflash::FlashPart::P25q80,
             bt_window: BT_WINDOW_BASE,
             xip,
             ram: Ram::new(ram_size),
@@ -728,13 +731,18 @@ impl Soc {
         }
     }
 
-    /// Wire the chip into `board`'s panel (and its flash chip's id).
+    /// Wire the chip into `board`'s panel (and its flash chip's id: the SMK-37 Pro's own part,
+    /// the FM-1's `flash_part`).
     pub fn set_board(&mut self, board: Board) {
         self.board = board;
         self.periph.board = board;
-        if board == Board::Smk37 {
-            self.flash.jedec = [0xeb, 0x60, 0x14];
-        }
+        self.flash.jedec = if board == Board::Smk37 { [0xeb, 0x60, 0x14] } else { self.flash_part.jedec() };
+    }
+
+    /// Which part the FM-1's flash is (the SMK-37 Pro keeps its own): before or after the boot.
+    pub fn set_flash_part(&mut self, part: spiflash::FlashPart) {
+        self.flash_part = part;
+        self.set_board(self.board);
     }
 
     /// All unknown accesses so far — the peripheral bring-up TODO list.

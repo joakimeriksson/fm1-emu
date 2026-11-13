@@ -24,6 +24,7 @@ const USAGE: &str = "usage: fm1-emu --bin APP.bin | --fwsc FIRMWARE.fwsc [option
 run:   [--flash DECRYPTED.bin] [--raw-flash CHIP.bin] [--syx BANK.syx] [--entry 0x02000000]
        [--steps N (5000000)] [--ms MS] [--ram BYTES (1048576, at most 4194304)] [--quiet]
        [--flaky-core1 RATE [--seed N]] [--cpu1-survives (a fault on core 1 stops it alone; cpu0 goes on)]
+       [--flash-chip p25q80|uc25hq80 (the FM-1's flash part: the stock Puya, or the newer units')]
 input: [--keys 'T[-T2]:PLAY,T:n7,T:k12,T:enc0:+3,T:pot:512,T:midi:903c64'] (times in ms;
         the SMK-37's buttons by their printed names too: T:PATCH, T:SEQPLAY)
 out:   [--wav OUT.wav] [--snap MS,MS (work/lcd_MS.bmp)] [--dump ADDR N (N words at the end)]
@@ -90,6 +91,8 @@ struct Args {
     flaky_core1: Option<f64>,
     /// `--cpu1-survives`: a fault on core 1 stops that core alone, cpu0 goes on (`Soc::cpu1_survives`)
     cpu1_survives: bool,
+    /// `--flash-chip NAME`: the FM-1's flash part (`fm1_soc::FlashPart`)
+    flash_part: fm1_soc::FlashPart,
     /// the flaky core's generator seed (the same seed, the same misreads; default 1)
     seed: Option<u64>,
 }
@@ -385,6 +388,7 @@ fn main() -> ExitCode {
     // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
     soc.lcd_timed = fm1_soc::lcd_timed_from_env();
     soc.cpu1_survives = args.cpu1_survives;
+    soc.set_flash_part(args.flash_part);
     soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
     if let Some(f) = &flash_image {
         soc.flash.load(f);
@@ -954,6 +958,7 @@ fn parse_args() -> Option<Args> {
         snap: Vec::new(),
         flaky_core1: None,
         cpu1_survives: false,
+        flash_part: fm1_soc::FlashPart::P25q80,
         seed: None,
     };
     let mut have_bin = false;
@@ -1018,6 +1023,10 @@ fn parse_args() -> Option<Args> {
             "--cpu1-survives" => {
                 args.cpu1_survives = true;
                 i += 1;
+            }
+            "--flash-chip" => {
+                args.flash_part = fm1_soc::FlashPart::parse(a.get(i + 1)?)?;
+                i += 2;
             }
             "--ms" => {
                 args.ms = Some(a.get(i + 1)?.parse().ok()?);

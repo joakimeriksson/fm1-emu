@@ -159,6 +159,8 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --flash-chip NAME: which part the FM-1's flash is (the stock Puya, or the newer units' UC25HQ80)
+    flash_part: fm1_soc::FlashPart,
     /// --latency MS: the audio queued ahead of the device to start with (it grows on underruns)
     latency_ms: f64,
     /// --buffer FRAMES: ask the audio device for this buffer size
@@ -205,7 +207,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false,
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, flash_part: fm1_soc::FlashPart::P25q80,
                        latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
     while i < a.len() {
@@ -261,6 +263,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--seed" => o.seed = Some(a.get(i + 1)?.parse().ok()?),
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
+            "--flash-chip" => o.flash_part = fm1_soc::FlashPart::parse(a.get(i + 1)?)?,
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
             "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
@@ -305,6 +308,8 @@ impl Machine {
             None => std::fs::read(&o.bin)?,
         };
         let mut soc = Soc::new(RAM_SIZE, image);
+        // (before the boot: the board sets the flash chip's id from it)
+        soc.set_flash_part(o.flash_part);
         let strict = std::env::var_os("FM1_STRICT").is_some();
         // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
         // time) and as it is timed: each instruction its measured cost (fm1_core's op_cost8) on a
@@ -1340,6 +1345,9 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--buffer FRAMES]       the audio device's buffer, if it takes one
          [--exclusive]           Windows: the output in WASAPI exclusive mode, the device's shortest
                                  period (lowest latency; other programs can't play on it meanwhile)
+         [--flash-chip p25q80|uc25hq80]
+                                 the FM-1's flash part: the stock Puya P25Q80 (85 60 14), or the
+                                 UC25HQ80 (B3 60 14) of units sold since autumn 2026
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm

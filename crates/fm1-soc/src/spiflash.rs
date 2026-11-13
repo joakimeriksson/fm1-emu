@@ -8,8 +8,8 @@
 //! bit3 = enable; BUF holds the byte to send / the byte received. Chip
 //! select is PD0, driven as a GPIO by the firmware.
 //!
-//! The flash is a 1 MiB part reporting JEDEC `85 60 14` (Puya, as on real
-//! units). Commands modelled: 9F (JEDEC id), 4B (unique id), 05/35 (status
+//! The flash is a 1 MiB part reporting JEDEC `85 60 14` (the Puya of most real
+//! units), or `B3 60 14` (the UC25HQ80 of the newer ones: `FlashPart`). Commands modelled: 9F (JEDEC id), 4B (unique id), 05/35 (status
 //! 1/2), 06/04 (WREN/WRDI), 03/0B (read / fast read), 20 (4 KiB erase),
 //! D8 (64 KiB erase), 02 (page program). Erase/program are instantaneous;
 //! status never reports busy.
@@ -20,6 +20,40 @@
 
 pub const SPI0_BASE: u32 = 0x11c00;
 pub const FLASH_SIZE: usize = 1 << 20;
+
+/// The FM-1's flash part. Units sold until autumn 2026 carry a Puya P25Q80; the ones sold since
+/// (mostly from AliExpress) a UC25HQ80 (fm1-base device/fm1_flash_ok.h). Both are 1 MiB with the
+/// same plain SPI NOR commands, so only the JEDEC id the firmware reads tells them apart; a
+/// firmware that knows only the Puya takes the newer units for unknown (its saves stay in RAM,
+/// its update loader refuses to install). The SMK-37 Pro has its own part (`Soc::set_board`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlashPart {
+    /// Puya P25Q80, JEDEC 85 60 14: the stock FM-1's
+    #[default]
+    P25q80,
+    /// UC25HQ80, JEDEC B3 60 14: the newer units'
+    Uc25hq80,
+}
+
+impl FlashPart {
+    pub const NAMES: &'static str = "p25q80 (the stock part), uc25hq80 (units sold since autumn 2026)";
+
+    pub fn jedec(self) -> [u8; 3] {
+        match self {
+            FlashPart::P25q80 => [0x85, 0x60, 0x14],
+            FlashPart::Uc25hq80 => [0xb3, 0x60, 0x14],
+        }
+    }
+
+    /// By its name (`p25q80`, `puya`; `uc25hq80`, `uc25`, `new`), in any case.
+    pub fn parse(name: &str) -> Option<FlashPart> {
+        match name.to_ascii_lowercase().as_str() {
+            "p25q80" | "puya" | "stock" | "old" => Some(FlashPart::P25q80),
+            "uc25hq80" | "uc25" | "new" => Some(FlashPart::Uc25hq80),
+            _ => None,
+        }
+    }
+}
 
 pub struct SpiFlash {
     pub mem: Vec<u8>,
@@ -59,7 +93,7 @@ impl SpiFlash {
             addr: 0,
             wel: false,
             pending_prog: Vec::new(),
-            jedec: [0x85, 0x60, 0x14],
+            jedec: FlashPart::P25q80.jedec(),
             trace: std::env::var_os("FM1_FLASH_TRACE").is_some(),
             changed: None,
             revision: 0,
@@ -221,5 +255,28 @@ impl SpiFlash {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::FlashPart;
+    use crate::{Board, Soc};
+
+    /// The FM-1 reads the part asked for at its JEDEC probe; the SMK-37 Pro keeps its own.
+    #[test]
+    fn the_flash_part_sets_the_fm1s_jedec_id() {
+        assert_eq!(FlashPart::parse("UC25HQ80"), Some(FlashPart::Uc25hq80));
+        assert_eq!(FlashPart::parse("new"), Some(FlashPart::Uc25hq80));
+        assert_eq!(FlashPart::parse("puya"), Some(FlashPart::P25q80));
+        assert_eq!(FlashPart::parse("w25q80"), None);
+        let mut soc = Soc::new(64 * 1024, vec![0; 64]);
+        assert_eq!(soc.flash.jedec, [0x85, 0x60, 0x14], "the stock Puya unless asked");
+        soc.set_flash_part(FlashPart::Uc25hq80);
+        assert_eq!(soc.flash.jedec, [0xb3, 0x60, 0x14]);
+        soc.set_board(Board::Fm1);
+        assert_eq!(soc.flash.jedec, [0xb3, 0x60, 0x14], "a boot keeps the part");
+        soc.set_board(Board::Smk37);
+        assert_eq!(soc.flash.jedec, [0xeb, 0x60, 0x14], "the SMK-37 Pro's own part");
     }
 }
