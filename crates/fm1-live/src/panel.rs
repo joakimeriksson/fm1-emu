@@ -258,6 +258,13 @@ pub fn base() -> Vec<u32> {
     rrect(&mut b, 1134.0, 302.0, 112.0, 72.0, 10.0, 0x3c6b43, 0x3c6b43);
     rrect(&mut b, 1136.0, 304.0, 108.0, 68.0, 9.0, TRAY, TRAY);
     text(&mut b, 640.0, 552.0 - 2.0, "FM-1  FELUCCA", 1, 0x8c8a85);
+    // the buttons' and keys' shadows
+    for (_, _, x, y, w, h) in buttons() {
+        rrect(&mut b, x as f32 + 1.0, y as f32 + 3.0, w as f32, h as f32, 9.0, 0x1c1d20, 0x1c1d20);
+    }
+    for (_, x, y, w, h, _) in keys() {
+        rrect(&mut b, x as f32 + 1.0, y as f32 + 4.0, w as f32, h as f32, w as f32 / 2.0, 0x1a1a1c, 0x1a1a1c);
+    }
     b
 }
 
@@ -326,7 +333,6 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
         let led = bright(st.leds[id as usize]);
         let tint = if id == 12 { GREEN } else { AMBER };
         let off = if down { 2.0 } else { 0.0 };
-        rrect(buf, x as f32 + 1.0, y as f32 + 3.0, w as f32, h as f32, 9.0, 0x1c1d20, 0x1c1d20);
         let (top, bot) = (mix(BTN_TOP, tint, led * 0.85), mix(BTN_BOT, tint, led * 0.7));
         rrect(buf, x as f32, y as f32 + off, w as f32, h as f32, 9.0, top, bot);
         let ink = if led > 0.5 { 0x2a1a03 } else { BTN_INK };
@@ -337,7 +343,6 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
         let down = st.down[id as usize];
         let led = bright(st.leds[id as usize]);
         let off = if down { 3.0 } else { 0.0 };
-        rrect(buf, x as f32 + 1.0, y as f32 + 4.0, w as f32, h as f32, w as f32 / 2.0, 0x1a1a1c, 0x1a1a1c);
         let heat = if down { 0.55 } else { led * 0.6 };
         rrect(buf, x as f32, y as f32 + off, w as f32, h as f32, w as f32 / 2.0, mix(KEY_TOP, AMBER, heat), mix(KEY_BOT, AMBER, heat * 0.8));
         let line = mix(KEY_LINE, 0xffe2b0, if down { 1.0 } else { led });
