@@ -347,13 +347,16 @@ impl Plugin for Fm1 {
         let fw = self.params.firmware.lock().unwrap().clone();
         let sectors = self.params.flash.lock().unwrap().clone();
         link.boot(&fw, &sectors);
-        // the project's controller, or for a project that never chose one the last choice
+        // the project's controller. A new project (no firmware yet) takes the last choice and
+        // keeps it; a project saved before there were profiles has none, so its MIDI goes to the
+        // jack as it did, the channel moved by the parameter.
         let profile = {
             let mut c = self.params.controller.lock().unwrap();
-            if !c.chosen {
+            if !c.chosen && fw.pkg.is_empty() {
                 if let Some(last) = map::last_choice() {
                     c.profile = last;
                 }
+                c.chosen = true;
             }
             c.profile.clone()
         };
