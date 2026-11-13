@@ -21,7 +21,7 @@ picks one by name, `--map my.json` reads a file.
 | F3 | record a WAV (to Music/fm1-emu) |
 
 **Plugin**: the *Controller* bar picks the profile (the project keeps it; new projects take your
-last choice), sets the keys' mode, turns on *Learn* (click a panel control, then move one of
+last choice, and projects saved before profiles existed start with none), sets the keys' mode, turns on *Learn* (click a panel control, then move one of
 yours), and shows *Labels*. (*Record* in the bar above writes a WAV.)
 
 Learned bindings are saved as your own profile in `%APPDATA%\fm1-emu\controllers` (Windows),
