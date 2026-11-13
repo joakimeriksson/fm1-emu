@@ -1,12 +1,13 @@
-// The README's tables of firmwares, from web/firmwares.json (the FM-1) and web/smk37/firmwares.json
-// (the SMK-37): each name a link that opens its page with that firmware picked (?fw=id), its author
-// linked to the firmware's source. Rewrites the lines between each table's two markers in
-// README.md; --check only says whether they are current.
+// The tables of firmwares in docs/FIRMWARES.md (the README links to it), from web/firmwares.json
+// (the FM-1) and web/smk37/firmwares.json (the SMK-37): each name a link that opens its page with
+// that firmware picked (?fw=id), its author linked to the firmware's source. Rewrites the lines
+// between each table's two markers, and the count; --check only says whether they are current.
 //   node tools/readme_firmwares.mjs [--check]
 import { readFileSync, writeFileSync } from "node:fs";
 
 const SITE = "https://joakimeriksson.github.io/fm1-emu/";
-const readme = new URL("../README.md", import.meta.url);
+const readme = new URL("../docs/FIRMWARES.md", import.meta.url);
+const NAME = "docs/FIRMWARES.md";
 const cell = (s) => s.replace(/\|/g, "\\|");
 // the first sentence of the page's text: a ". " ends it, a ":" inside it does not
 const blurb = (f) => (f.about.match(/^.*?\.(?=\s|$)/) || [f.about])[0];
@@ -32,23 +33,23 @@ for (const t of TABLES) {
   const table = ["| Firmware (opens it on the page) | By | What it is |", "|---|---|---|", ...rows].join("\n");
   const BEGIN = `<!-- ${t.marker}: node tools/readme_firmwares.mjs -->`, END = `<!-- /${t.marker} -->`;
   const a = text.indexOf(BEGIN), b = text.indexOf(END);
-  if (a < 0 || b < a) throw new Error(`README.md has no ${BEGIN} ... ${END} section`);
+  if (a < 0 || b < a) throw new Error(`${NAME} has no ${BEGIN} ... ${END} section`);
   text = `${text.slice(0, a + BEGIN.length)}\n${table}\n${text.slice(b)}`;
   if (t.count) {
     const n = cat.firmwares.filter((f) => !t.count.includes(f.id)).length;
     const line = /^\d+ community firmwares: /m;
-    if (!line.test(text)) throw new Error('README.md has no "N community firmwares:" line');
+    if (!line.test(text)) throw new Error(`${NAME} has no "N community firmwares:" line`);
     text = text.replace(line, `${n} community firmwares: `);
   }
   counts.push(`${rows.length} ${t.marker}`);
 }
 if (process.argv.includes("--check")) {
   if (text !== next0) {
-    console.error("README.md's firmware tables are out of date: node tools/readme_firmwares.mjs");
+    console.error(`${NAME}'s firmware tables are out of date: node tools/readme_firmwares.mjs`);
     process.exit(1);
   }
-  console.log(`README.md: ${counts.join(", ")}, current`);
+  console.log(`${NAME}: ${counts.join(", ")}, current`);
 } else {
   writeFileSync(readme, text);
-  console.log(`README.md: ${counts.join(", ")}`);
+  console.log(`${NAME}: ${counts.join(", ")}`);
 }
