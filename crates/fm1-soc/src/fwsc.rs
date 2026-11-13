@@ -81,6 +81,9 @@ pub struct Unpacked {
     pub dir: Vec<Head>,
     /// The chip key the app area is scrambled with (the SFC decrypts with it: `Soc::sfc_key`).
     pub key: u16,
+    /// The app's resource regions the update loader writes after the app (`RES_TYPE` entries):
+    /// (flash offset, bytes). `stock_from_package` lays them into the flash, as an install does.
+    pub res: Vec<(usize, Vec<u8>)>,
 }
 
 impl Unpacked {
@@ -116,8 +119,10 @@ pub fn raw_flash(file: &[u8]) -> Result<Vec<u8>, String> {
     raw_flash_n(file, container(file).0)
 }
 
-/// The flash image, the header taken as `blocks` blocks.
-fn raw_flash_n(file: &[u8], blocks: usize) -> Result<Vec<u8>, String> {
+/// The package as its entries' offsets count it (the file without its header's markers), and its
+/// entries, each unmasked: type +0, offset +8 and length +12 in that stream, and a word of the
+/// entry's own at +0x14 (a resource region's flash address). The header taken as `blocks` blocks.
+fn directory(file: &[u8], blocks: usize) -> Result<(Vec<u8>, Vec<Vec<u8>>), String> {
     if file.len() < blocks * 0x30 || blocks < 20 {
         return Err("too short for an FM-1 update package (.fwsc)".into());
     }
@@ -129,6 +134,7 @@ fn raw_flash_n(file: &[u8], blocks: usize) -> Result<Vec<u8>, String> {
     if crc16(&hdr[2..0x40]) != u16le(&hdr, 0) {
         return Err("not an FM-1 update package (.fwsc)".into());
     }
+    let mut entries = Vec::new();
     for k in 0..u16le(&hdr, 8) as usize {
         let at = 0x40 + k * 0x50;
         if at + 0x50 > hdr.len() {
@@ -136,17 +142,62 @@ fn raw_flash_n(file: &[u8], blocks: usize) -> Result<Vec<u8>, String> {
         }
         let mut e = hdr[at..at + 0x50].to_vec();
         unmask(&mut e, 0xffff);
-        if u16le(&e, 0) == 0 {
-            // offsets count in the file without its markers; 36 blocks (0x6C0 bytes) reach into
-            // the image at 0x400, so the markers come out of the image's start too
-            let off = u32le(&e, 8) as usize;
-            let len = u32le(&e, 12) as usize;
-            let mut stream = hdr.clone();
-            stream.extend_from_slice(&file[blocks * 0x30..]);
-            return stream.get(off..off + len).map(|s| s.to_vec()).ok_or("truncated package".into());
-        }
+        entries.push(e);
     }
-    Err("no flash image in the package".into())
+    // 36 blocks (0x6C0 bytes) reach into the image at 0x400, so the markers come out of the
+    // image's start too
+    let mut stream = hdr;
+    stream.extend_from_slice(&file[blocks * 0x30..]);
+    Ok((stream, entries))
+}
+
+/// An entry's bytes in the stream.
+fn entry_data<'a>(stream: &'a [u8], e: &[u8]) -> Option<&'a [u8]> {
+    let (off, len) = (u32le(e, 8) as usize, u32le(e, 12) as usize);
+    stream.get(off..off.checked_add(len)?)
+}
+
+/// The flash image, the header taken as `blocks` blocks.
+fn raw_flash_n(file: &[u8], blocks: usize) -> Result<Vec<u8>, String> {
+    let (stream, entries) = directory(file, blocks)?;
+    match entries.iter().find(|e| u16le(e, 0) == 0) {
+        Some(e) => entry_data(&stream, e).map(|s| s.to_vec()).ok_or("truncated package".into()),
+        None => Err("no flash image in the package".into()),
+    }
+}
+
+/// A package entry of this type is an app's resource region (`res.bin`: read-only data kept out
+/// of the app's image, Melodee's first, fm1-base's after it), with its flash address at +0x14.
+/// The update loader writes it after the app (felucca-bsp loader/ldr_core.c `ldr_res`, after
+/// Melodee's), so a package is the whole install again.
+pub const RES_TYPE: u16 = 101;
+const RES_AT: usize = 0x14;
+/// Where the loader lets a resource region go: whole sectors of the data area, between the
+/// update records and Felucca's store (`LDR_DATA_LO`, `LDR_DATA_HI`).
+const RES_LO: usize = 0x97000;
+const RES_HI: usize = 0xE0000;
+/// Melodee's loader (keremimo/melodee firmware/loader/ldr_core.c `LDR_RES_LO`) writes its region
+/// to this fixed place and leaves the entry's word at +0x14 zero; fm1-base's names it there.
+const RES_MELODEE: usize = 0xCB000;
+
+/// The package's resource regions, where the loader writes them (`ldr_res`'s checks: whole
+/// sectors inside the data area; anything else it leaves alone, and so do we): (flash offset,
+/// bytes), the region as the FM-1 holds it after the install, its commit record first.
+fn resources_n(file: &[u8], blocks: usize) -> Vec<(usize, Vec<u8>)> {
+    let Ok((stream, entries)) = directory(file, blocks) else { return Vec::new() };
+    entries
+        .iter()
+        .filter(|e| u16le(e, 0) == RES_TYPE)
+        .filter_map(|e| {
+            let base = match u32le(e, RES_AT) as usize {
+                0 => RES_MELODEE,
+                at => at,
+            };
+            let data = entry_data(&stream, e)?;
+            let fits = !data.is_empty() && data.len() % 0x1000 == 0 && base % 0x1000 == 0;
+            (fits && base >= RES_LO && base < RES_HI && data.len() <= RES_HI - base).then(|| (base, data.to_vec()))
+        })
+        .collect()
 }
 
 /// The 16-bit key the app area is scrambled with, from isd_config.ini's 32-byte blob.
@@ -256,7 +307,8 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
         unscramble(&mut t, blk, end - blk, area, key);
         flash[area + size..end].copy_from_slice(&t[area + size..end]);
     }
-    Ok(Unpacked { identity: String::new(), raw, xip: flash[area..].to_vec(), area, size, end, dir, key })
+    let res = resources_n(file, blocks);
+    Ok(Unpacked { identity: String::new(), raw, xip: flash[area..].to_vec(), area, size, end, dir, key, res })
 }
 
 /// The SMK-37's factory calibration record (USRTRIM, flash 0xC1000; fm1-to-smk37 docs/01, 2.1):
@@ -464,6 +516,67 @@ mod tests {
         // the byte after the header (block n's marker position) must not read as 0x7D
         f[n * 0x30 + 0x2f] = 0x12;
         f
+    }
+
+    /// A package of 20 header blocks with these entries (type, the word at +0x14, bytes), laid
+    /// out as fm1-base's tools/fm1pkg_make.py does: data from 0x400 on 256-byte boundaries, offsets
+    /// counted in the stream without the markers.
+    fn package(entries: &[(u16, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut stream = vec![0u8; 20 * 0x2f];
+        stream[8..10].copy_from_slice(&(entries.len() as u16).to_le_bytes());
+        let mut off = 0x400;
+        for (k, (typ, at, d)) in entries.iter().enumerate() {
+            stream.resize(off, 0);
+            let mut e = vec![0u8; 0x50];
+            e[0..2].copy_from_slice(&typ.to_le_bytes());
+            e[8..12].copy_from_slice(&(off as u32).to_le_bytes());
+            e[12..16].copy_from_slice(&(d.len() as u32).to_le_bytes());
+            e[0x14..0x18].copy_from_slice(&at.to_le_bytes());
+            unmask(&mut e, 0xffff);
+            stream[0x40 + k * 0x50..0x90 + k * 0x50].copy_from_slice(&e);
+            stream.extend_from_slice(d);
+            off = (stream.len() + 0xff) & !0xff;
+        }
+        let crc = crc16(&stream[2..0x40]);
+        stream[0..2].copy_from_slice(&crc.to_le_bytes());
+        unmask(&mut stream[..0x40], 0xffff);
+        let mut file = Vec::new();
+        for i in 0..20 {
+            file.extend_from_slice(&stream[i * 0x2f..(i + 1) * 0x2f]);
+            file.push(b"FM-1_015".get(i).map_or(0x7d, |&c| c.wrapping_add(i as u8 + 1)));
+        }
+        file.extend_from_slice(&stream[20 * 0x2f..]);
+        file
+    }
+
+    /// The resource regions an update loader writes after the app: fm1-base's where its entry
+    /// says (Polly 0.6.4: RES1 at 0xAB000), Melodee's at its loader's fixed 0xCB000 (the entry's
+    /// word 0); only whole sectors of the data area, as `ldr_res` checks.
+    #[test]
+    fn resource_regions_go_where_the_update_loader_writes_them() {
+        let region = |magic: &[u8], len: usize| {
+            let mut r = vec![0x5au8; len];
+            r[..4].copy_from_slice(magic);
+            r
+        };
+        let flash = vec![0x11u8; 0x1000];
+        let polly = package(&[(0, 0, flash.clone()), (100, 0, vec![1; 0x80]), (RES_TYPE, 0xab000, region(b"RES1", 0x2000))]);
+        assert_eq!(raw_flash_n(&polly, 20).unwrap(), flash, "the flash image is still found");
+        assert_eq!(resources_n(&polly, 20), vec![(0xab000, region(b"RES1", 0x2000))]);
+
+        let melodee = package(&[(0, 0, flash.clone()), (RES_TYPE, 0, region(b"MRS1", 0x3000))]);
+        assert_eq!(resources_n(&melodee, 20), vec![(0xcb000, region(b"MRS1", 0x3000))]);
+
+        for (at, len, why) in [
+            (0xab000, 0x1800, "not whole sectors"),
+            (0xab800, 0x1000, "not on a sector"),
+            (0x4000, 0x1000, "the app area"),
+            (0xdf000, 0x2000, "past the data area"),
+        ] {
+            let p = package(&[(0, 0, flash.clone()), (RES_TYPE, at, region(b"RES1", len))]);
+            assert!(resources_n(&p, 20).is_empty(), "{why}");
+        }
+        assert!(resources_n(&package(&[(0, 0, flash)]), 20).is_empty(), "no entry, no region");
     }
 
     #[test]

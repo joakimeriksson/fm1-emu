@@ -1295,7 +1295,19 @@ field) are each a few instructions, and the `Cpu` and `Soc` structs grew. A nati
 the two builds side by side is the way to find it; the catalog check (interpreted, every
 firmware) is where it costs time, users run the JIT.
 
-## 5.39 Melodee 1.6.0's resource region: a package that is not the whole install (open, 2026-11-02)
+## 5.39 Melodee 1.6.0's resource region: a package that is not the whole install (open 2026-11-02, solved 2026-11-13)
+
+**Solved, 2026-11-13:** the packages carry the region now, and their own update loader writes it
+after the app: a package entry of type 101 (`res.bin`). Melodee's loader writes it to its fixed
+`0xCB000` (keremimo/melodee firmware/loader/ldr_core.c `LDR_RES_LO`; the entry's word at +0x14 is
+0); fm1-base's, after Melodee's, writes it where that word says (felucca-bsp loader/ldr_core.c
+`ldr_res`: Polly 0.6.4's band styles, `RES1` at `0xAB000`; without them the band plays nothing,
+fm1-polly #7 on a real FM-1). `fwsc::unpack` reads those entries (`Unpacked::res`, with the
+loader's checks: whole sectors of the data area `0x97000`..`0xE0000`) and `stock_from_package`
+lays them into the flash, as an install does, for fm1-live, fm1-emu, the plugin and the page alike.
+Melodee 1.6.1 boots to its PROPHET screen with its factory sounds (its catalog hash changed: it
+was the "Setup unfinished" screen's). Items 1-3 below are not needed for a package that carries
+its region.
 
 Found filming the 0.4.0 release: the page booted Melodee 1.6.0 (on the Hub since 2026-11-02) to
 **Setup unfinished / Factory sounds missing / Install the update again**, where 1.4.5 boots to its
