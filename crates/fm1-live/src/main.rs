@@ -43,6 +43,8 @@ use panel::{Ctl, ENCS, H, W};
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
 mod fit;
+#[cfg(windows)]
+mod exclusive;
 mod panel;
 mod wav;
 mod panel_smk;
@@ -72,9 +74,58 @@ const RAM_BASE: u32 = 0x01c0_0000;
 const RAM_SIZE: usize = 1 << 20;
 /// How far emulated time runs ahead of the wall clock before audio starts.
 const LEAD_MS: f64 = 60.0;
-/// Once the firmware streams audio, the emulator runs whenever less than
-/// this much sound is queued: the audio device sets the pace.
-const AUDIO_TARGET_MS: f64 = 50.0;
+/// Once the firmware streams audio, the emulator runs whenever less than the target of sound
+/// is queued: the audio device sets the pace. The target starts at --latency and grows by this
+/// much at each underrun, up to AUDIO_TARGET_MAX_MS: a played note waits about that long.
+const AUDIO_TARGET_STEP_MS: f64 = 4.0;
+const AUDIO_TARGET_MAX_MS: f64 = 80.0;
+/// --latency's default: low on Windows, where it was measured; elsewhere the earlier 50 ms
+/// (the JIT's warm-up can underrun at the start there).
+const AUDIO_TARGET_DEFAULT_MS: f64 = if cfg!(windows) { 12.0 } else { 50.0 };
+/// After this long without an underrun the target comes back down (see [`AudioTarget`]).
+const AUDIO_TARGET_CALM: Duration = Duration::from_secs(10);
+
+/// How much audio the emulator keeps queued ahead of the device. An underrun raises it by a
+/// step. After a calm while it comes back down by a quarter of the way to the lowest it may
+/// go (at least half a step), so a burst of underruns (the start, while the JIT compiles the
+/// firmware's code, or another program busy for a moment) does not leave the latency high:
+/// from 80 ms to 12 in about two minutes. A step down that underruns within the calm while
+/// shows the device needs the level before it, which then becomes the lowest it goes for the
+/// rest of the run: no probing down and clicking again every minute.
+struct AudioTarget {
+    ms: f64,
+    /// --latency: the lowest asked for
+    floor: f64,
+    /// the lowest it goes now: --latency, or a level a step down from which underran
+    low: f64,
+    calm_since: Instant,
+    /// the last step down: the level before it, and when
+    probe: Option<(f64, Instant)>,
+}
+
+impl AudioTarget {
+    fn new(floor: f64, now: Instant) -> AudioTarget {
+        AudioTarget { ms: floor, floor, low: floor, calm_since: now, probe: None }
+    }
+
+    /// One look at the device: `underran` since the last.
+    fn update(&mut self, underran: bool, now: Instant) {
+        if underran {
+            if let Some((before, at)) = self.probe.take() {
+                if now.duration_since(at) < AUDIO_TARGET_CALM {
+                    self.low = self.low.max(before);
+                }
+            }
+            self.calm_since = now;
+            self.ms = (self.ms + AUDIO_TARGET_STEP_MS).min(AUDIO_TARGET_MAX_MS.max(self.floor)).max(self.low);
+        } else if self.ms > self.low && now.duration_since(self.calm_since) >= AUDIO_TARGET_CALM {
+            let down = ((self.ms - self.low) / 4.0).max(AUDIO_TARGET_STEP_MS / 2.0);
+            self.probe = Some((self.ms, now));
+            self.calm_since = now;
+            self.ms = (self.ms - down).max(self.low);
+        }
+    }
+}
 
 struct Opts {
     bin: String,
@@ -108,6 +159,12 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
+    /// --latency MS: the audio queued ahead of the device to start with (it grows on underruns)
+    latency_ms: f64,
+    /// --buffer FRAMES: ask the audio device for this buffer size
+    buffer: Option<u32>,
+    /// --exclusive (Windows): the output in WASAPI exclusive mode
+    exclusive: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -148,11 +205,17 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false };
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false,
+                       latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
             o.usb = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--exclusive" {
+            o.exclusive = true;
             i += 1;
             continue;
         }
@@ -199,6 +262,8 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
+            "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
+            "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
             _ => return None,
         }
         i += 2;
@@ -333,7 +398,44 @@ impl Machine {
 
 /// Ask for a performance core: macOS runs default-QoS background threads on
 /// the efficiency cores, which made the emulator ~40% slower than on main.
-fn high_priority() {
+/// While it lives (Windows): the 1 ms timer period [`high_priority`] asked for.
+#[must_use]
+struct Priority;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(ms: u32) -> u32;
+    fn timeEndPeriod(ms: u32) -> u32;
+}
+
+impl Drop for Priority {
+    fn drop(&mut self) {
+        // SAFETY: pairs the timeBeginPeriod(1) in high_priority
+        #[cfg(windows)]
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
+/// The calling thread above normal (the emulation, a benchmark); on Windows also 1 ms timer
+/// ticks for its short sleeps, until the [`Priority`] returned is dropped.
+fn high_priority() -> Priority {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+        }
+        const THREAD_PRIORITY_HIGHEST: i32 = 2;
+        // SAFETY: plain calls on the current thread
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            timeBeginPeriod(1);
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         extern "C" {
@@ -344,6 +446,7 @@ fn high_priority() {
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         }
     }
+    Priority
 }
 
 fn bench(o: &Opts, ms: u64) {
@@ -531,54 +634,81 @@ struct AudioRing {
     /// Set once the firmware has produced sound (silence before that is boot).
     started: AtomicBool,
     underruns: AtomicU64,
+    /// The stream died after it had started (the exclusive one: the device unplugged or no
+    /// longer answering): the emulation goes by the clock instead.
+    dead: AtomicBool,
 }
 
-fn start_audio(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
+fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let dev = host.default_output_device().ok_or("no audio output device")?;
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
     if cfg.sample_format() != cpal::SampleFormat::F32 {
         return Err(format!("output format {:?} not handled (f32 only)", cfg.sample_format()));
     }
-    let channels = cfg.channels() as usize;
-    let rate = cfg.sample_rate().0 as f64;
-    let step = 44_100.0 / rate; // source frames per output frame
-    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
-    let stream = dev
-        .build_output_stream(
-            &cfg.config(),
-            move |out: &mut [f32], _| {
-                let mut q = ring.q.lock().unwrap();
-                let mut starved = false;
-                for frame in out.chunks_mut(channels) {
-                    pos += step;
-                    while pos >= 1.0 {
-                        pos -= 1.0;
-                        cur = next;
-                        next = match (q.pop_front(), q.pop_front()) {
-                            (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
-                            _ => {
-                                starved = true;
-                                (0.0, 0.0)
-                            }
-                        };
-                    }
-                    let f = pos as f32;
-                    let (l, r) = (cur.0 + (next.0 - cur.0) * f, cur.1 + (next.1 - cur.1) * f);
-                    for (c, s) in frame.iter_mut().enumerate() {
-                        *s = if c % 2 == 0 { l } else { r };
-                    }
-                }
-                if starved && ring.started.load(Ordering::Relaxed) {
-                    ring.underruns.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            |e| eprintln!("audio: {e}"),
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+    let mut config = cfg.config();
+    if let Some(n) = buffer {
+        let ok = match cfg.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => (*min..=*max).contains(&n),
+            cpal::SupportedBufferSize::Unknown => true,
+        };
+        if ok {
+            config.buffer_size = cpal::BufferSize::Fixed(n);
+        } else {
+            eprintln!("audio: the device does not take a {n}-frame buffer ({:?}); its own it is", cfg.buffer_size());
+        }
+    }
+    let stream = match output_stream(&dev, &config, ring.clone()) {
+        Ok(s) => s,
+        Err(e) if config.buffer_size != cpal::BufferSize::Default => {
+            eprintln!("audio: a {:?} buffer: {e}; the device's own it is", config.buffer_size);
+            config.buffer_size = cpal::BufferSize::Default;
+            output_stream(&dev, &config, ring)?
+        }
+        Err(e) => return Err(e),
+    };
+    eprintln!("audio: {} at {} Hz, {} channels, buffer {:?}", dev.name().unwrap_or_default(), config.sample_rate.0, config.channels, config.buffer_size);
     stream.play().map_err(|e| e.to_string())?;
     Ok(stream)
+}
+
+/// The output stream: the ring's 44.1 kHz frames, resampled to the device's rate.
+fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
+    let channels = config.channels as usize;
+    let step = 44_100.0 / config.sample_rate.0 as f64; // source frames per output frame
+    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
+    dev.build_output_stream(
+        config,
+        move |out: &mut [f32], _| {
+            let mut q = ring.q.lock().unwrap();
+            let mut starved = false;
+            for frame in out.chunks_mut(channels) {
+                pos += step;
+                while pos >= 1.0 {
+                    pos -= 1.0;
+                    cur = next;
+                    next = match (q.pop_front(), q.pop_front()) {
+                        (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
+                        _ => {
+                            starved = true;
+                            (0.0, 0.0)
+                        }
+                    };
+                }
+                let f = pos as f32;
+                let (l, r) = (cur.0 + (next.0 - cur.0) * f, cur.1 + (next.1 - cur.1) * f);
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = if c % 2 == 0 { l } else { r };
+                }
+            }
+            if starved && ring.started.load(Ordering::Relaxed) {
+                ring.underruns.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+        |e| eprintln!("audio: {e}"),
+        None,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
@@ -1203,6 +1333,13 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
+         [--latency MS] (12 on Windows, else 50)
+                                 audio queued ahead of the device to start with; it grows by itself
+                                 on underruns and back down after 10 s without one, no lower
+                                 than a level that underran
+         [--buffer FRAMES]       the audio device's buffer, if it takes one
+         [--exclusive]           Windows: the output in WASAPI exclusive mode, the device's shortest
+                                 period (lowest latency; other programs can't play on it meanwhile)
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
@@ -1268,7 +1405,7 @@ fn main() {
     if let Some(ms) = o.bench {
         if std::env::var("FM1_BENCH_THREAD").is_ok() {
             let o2 = Opts { bin: o.bin.clone(), ..o };
-            return std::thread::spawn(move || { high_priority(); bench(&o2, ms) }).join().unwrap();
+            return std::thread::spawn(move || { let _p = high_priority(); bench(&o2, ms) }).join().unwrap();
         }
         return bench(&o, ms);
     }
@@ -1284,12 +1421,35 @@ fn main() {
     };
     let mut pot = m.soc.periph.adc_value[4];
 
-    let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0) });
-    let _stream = match start_audio(ring.clone()) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("audio off: {e}");
-            None
+    let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
+    #[cfg(windows)]
+    let exclusive_on = o.exclusive
+        && match exclusive::start(ring.clone()) {
+            Ok(msg) => {
+                eprintln!("{msg}");
+                true
+            }
+            Err(e) => {
+                eprintln!("--exclusive: {e}; the shared output it is");
+                false
+            }
+        };
+    #[cfg(not(windows))]
+    let exclusive_on = {
+        if o.exclusive {
+            eprintln!("--exclusive: Windows only; the default output it is");
+        }
+        false
+    };
+    let _stream = if exclusive_on {
+        None
+    } else {
+        match start_audio(ring.clone(), o.buffer) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("audio off: {e}");
+                None
+            }
         }
     };
     let lcd = Arc::new(Mutex::new(vec![0u16; 240 * 240]));
@@ -1305,19 +1465,23 @@ fn main() {
     // F3: a WAV of what the firmware plays, written as the emulation makes it
     let recorder: Arc<Mutex<Option<wav::Wav>>> = Arc::new(Mutex::new(None));
 
-    let audio_ok = _stream.is_some();
+    let audio_ok = _stream.is_some() || exclusive_on;
     let emu = {
         let (ring, lcd, leds, pads, status, quit) = (ring.clone(), lcd.clone(), leds.clone(), pads.clone(), status.clone(), quit.clone());
         let flash = o.flash.clone();
         let recorder = recorder.clone();
+        let floor_ms = o.latency_ms;
         std::thread::spawn(move || {
-            high_priority();
+            let _priority = high_priority();
             let start = Instant::now();
             let mut offset_ms = 0.0f64; // wall-clock time given up after falling behind
             let mut last_lcd = Instant::now();
             let mut last_stat = Instant::now();
             let (mut stat_emu, mut stat_wall) = (0u64, Instant::now());
             let mut usb_ports = UsbPorts::default();
+            let mut target = AudioTarget::new(floor_ms, Instant::now());
+            let mut underruns_seen = 0u64;
+            let mut audio_lost = false;
             while !quit.load(Ordering::Relaxed) {
                 while let Ok(a) = rx.try_recv() {
                     m.soc.periph.apply(&a);
@@ -1331,8 +1495,18 @@ fn main() {
                     offset_ms += real - emu_ms - LEAD_MS; // too far behind: resync, do not race
                 }
                 let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
-                let behind = if audio_ok && m.soc.periph.audio_halves > 0 {
-                    buffered < AUDIO_TARGET_MS
+                // an underrun: a little more queued from now on; a calm while: a little less
+                let u = ring.underruns.load(Ordering::Relaxed);
+                target.update(u > underruns_seen, Instant::now());
+                underruns_seen = u;
+                // the audio stream died (the exclusive one, a device unplugged): the clock paces
+                // the emulation from here, so it does not stop waiting for a device that is gone
+                if audio_ok && !audio_lost && ring.dead.load(Ordering::Relaxed) {
+                    audio_lost = true;
+                    offset_ms = start.elapsed().as_secs_f64() * 1000.0 - emu_ms;
+                }
+                let behind = if audio_ok && !audio_lost && m.soc.periph.audio_halves > 0 {
+                    buffered < target.ms
                 } else {
                     emu_ms < real + LEAD_MS
                 };
@@ -1385,8 +1559,9 @@ fn main() {
                     let speed = (e - stat_emu) as f64 / stat_wall.elapsed().as_secs_f64() / 1000.0;
                     let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
                     *status.lock().unwrap() = format!(
-                        "{:.2}x real time | {} MHz | audio {:.0} ms buffered, {} underruns",
-                        speed, m.soc.periph.hz / 1_000_000, buffered, ring.underruns.load(Ordering::Relaxed)
+                        "{:.2}x real time | {} MHz | audio {:.0} ms queued (target {:.0}), {} underruns{}",
+                        speed, m.soc.periph.hz / 1_000_000, buffered, target.ms, ring.underruns.load(Ordering::Relaxed),
+                        if audio_lost { " | AUDIO STOPPED" } else { "" }
                     );
                     if e / 2000 != stat_emu / 2000 {
                         eprintln!("[{:5.1} s] {}", e as f64 / 1000.0, status.lock().unwrap());
@@ -1801,6 +1976,58 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
 
 #[cfg(test)]
 mod tests {
+    use super::AudioTarget;
+    use std::time::{Duration, Instant};
+
+    /// The target over a run: `needs` ms keep the device fed; each look is a second apart.
+    fn run(t: &mut AudioTarget, t0: Instant, from_s: u64, to_s: u64, needs: f64) -> Vec<f64> {
+        let mut seen = Vec::new();
+        for s in from_s..to_s {
+            t.update(t.ms < needs, t0 + Duration::from_secs(s));
+            seen.push(t.ms);
+        }
+        seen
+    }
+
+    #[test]
+    fn the_target_settles_where_the_device_is_fed_and_stays() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(12.0, t0);
+        // a device that needs 20 ms (WASAPI shared: a 10 ms period and jitter)
+        let first = run(&mut t, t0, 0, 120, 20.0);
+        let settled = t.ms;
+        assert!(settled >= 20.0 && settled <= 24.0, "settled at {settled}: {first:?}");
+        // then an hour: no more underruns, no more probing below what it needs
+        let later = run(&mut t, t0, 120, 3720, 20.0);
+        assert!(later.iter().all(|&ms| ms >= 20.0), "went under 20: {:?}", later.iter().cloned().fold(f64::MAX, f64::min));
+        assert_eq!(later.last(), later.first(), "it still moves: {:?}", &later[..40]);
+    }
+
+    #[test]
+    fn a_burst_at_the_start_comes_back_down_in_minutes() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(12.0, t0);
+        // the JIT's warm-up: underruns all the way up to the cap
+        for s in 0..20 {
+            t.update(true, t0 + Duration::from_secs(s));
+        }
+        assert_eq!(t.ms, 80.0);
+        // then a device that is fine at 12 ms
+        let mut s = 20;
+        while t.ms > 12.0 {
+            s += 1;
+            t.update(false, t0 + Duration::from_secs(s));
+            assert!(s < 20 + 180, "still at {} ms after {} s", t.ms, s - 20);
+        }
+    }
+
+    #[test]
+    fn a_high_latency_stays_where_it_was_set() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(200.0, t0);
+        t.update(true, t0 + Duration::from_secs(1));
+        assert_eq!(t.ms, 200.0);
+    }
     use super::*;
 
     #[test]
