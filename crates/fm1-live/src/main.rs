@@ -1201,8 +1201,10 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> 
         let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue };
         input.ignore(midir::Ignore::None);
         let (tx, ch, mapping) = (tx.clone(), o.midi_ch, control.clone());
+        // (--map auto: only the controller the profile is for; a DAW's port plays as it comes)
+        let mapped = control.maps(&name);
         let got = input.connect(&port, "fm1-live in", move |_, msg, _| {
-            if mapping.on && !msg.is_empty() && msg[0] != 0xf0 {
+            if mapped && !msg.is_empty() && msg[0] != 0xf0 {
                 mapping.feed(msg, &tx);
                 return;
             }
@@ -1213,7 +1215,7 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> 
         }, ());
         match got {
             Ok(c) => {
-                eprintln!("MIDI in: {name}");
+                eprintln!("MIDI in: {name}{}", if mapped { " (through the controller profile)" } else { "" });
                 control.inputs.lock().unwrap().push(name);
                 conns.push(c);
             }
@@ -1234,7 +1236,8 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
          [--map auto|none|NAME|FILE.json]  a MIDI controller as the panel (profiles: crates/fm1-map;
-                                 yours in %APPDATA%\\fm1-emu\\controllers or ~/.config/fm1-emu/controllers)
+                                 yours in %APPDATA%\\fm1-emu\\controllers or ~/.config/fm1-emu/controllers);
+                                 auto: the profile made for a controller, for that input only
          [--midi-log]            print each MIDI message and what the profile made of it
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 window: right-click a control, then move or press one of your controller's: MIDI learn (right-click
@@ -1350,6 +1353,7 @@ fn main() {
     }
     let mut control = ctl::Ctl::new(profile, o.midi_ch);
     control.log = o.midi_log;
+    control.auto = o.map == "auto";
     let control = Arc::new(control);
     let _midi = midi_inputs(&o, &tx, &control);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
@@ -1650,8 +1654,9 @@ fn main() {
             match k {
                 Key::F1 => labels = !labels,
                 Key::F2 if control.on => {
-                    let mut v = control.view.lock().unwrap();
+                    // (mapper, then view: the order the MIDI thread takes them in)
                     let mut mp = control.mapper.lock().unwrap();
+                    let mut v = control.view.lock().unwrap();
                     let next = mp.keys_mode().next();
                     mp.set_keys_mode(next, &mut |out| ctl::apply(out, &tx, &mut v, control.midi_ch));
                     drop(mp);

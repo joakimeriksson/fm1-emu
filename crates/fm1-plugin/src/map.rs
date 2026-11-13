@@ -17,6 +17,41 @@ pub struct Controller {
     pub profile: Option<Profile>,
 }
 
+impl Controller {
+    /// What a project saved before controller profiles has: none, as chosen.
+    pub fn before_profiles() -> Controller {
+        Controller { chosen: true, profile: None }
+    }
+    /// As nih-plug keeps a persisted field: JSON.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Fm1;
+    use nih_plug::prelude::{Plugin, PluginState};
+
+    #[test]
+    fn an_old_project_gets_no_profile_and_a_new_one_keeps_its_own() {
+        // a state saved before profiles: no "controller"
+        let mut old = PluginState { version: "0.4.0".into(), params: Default::default(), fields: Default::default() };
+        old.fields.insert("firmware".into(), "{}".into());
+        Fm1::filter_state(&mut old);
+        let c: Controller = serde_json::from_str(&old.fields["controller"]).unwrap();
+        assert!(c.chosen && c.profile.is_none());
+        // a state saved with one keeps it
+        let mine = Controller { chosen: true, profile: Some(Profile { name: "Mine".into(), ..Profile::default() }) };
+        let mut new = PluginState { version: "0.5.0".into(), params: Default::default(), fields: Default::default() };
+        new.fields.insert("controller".into(), mine.to_json());
+        Fm1::filter_state(&mut new);
+        let c: Controller = serde_json::from_str(&new.fields["controller"]).unwrap();
+        assert_eq!(c.profile.map(|p| p.name).as_deref(), Some("Mine"));
+    }
+}
+
 /// What the machine's thread tells the window about the controller.
 pub struct MapView {
     pub profile: Option<Profile>,
