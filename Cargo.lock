@@ -322,9 +322,18 @@ version = "0.5.0"
 dependencies = [
  "cpal",
  "fm1-core",
+ "fm1-map",
  "fm1-soc",
  "midir",
  "minifb",
+]
+
+[[package]]
+name = "fm1-map"
+version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

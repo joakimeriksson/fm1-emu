@@ -227,6 +227,11 @@ driver: Web MIDI on the page (Chrome, Edge, Firefox), any MIDI input natively. M
 firmware listens on channel 2 in the emulator (not yet checked on a real FM-1); Felucca plays
 its parts on channels 1–4.
 
+A MIDI controller can also be the FM-1's panel, natively (fm1-live and the plugin): its pads
+hold the buttons, its knobs turn the encoders and MASTER, its keys press the panel's keys or go
+to MIDI IN, with MIDI learn for any control. Profiles are JSON; one for the Akai MPK mini 3 and
+a generic one come with it. See [crates/fm1-map](crates/fm1-map/README.md).
+
 ## The SMK-37
 
 M-VAVE's SMK-37 (Pro / Elite, the MKE-P37 and the Donner Starrykey 37 Play share its hardware) is a

@@ -19,6 +19,9 @@ pub mod engine;
 pub mod savefile;
 #[path = "../../fm1-live/src/wav.rs"]
 pub mod wav;
+pub mod map;
+#[path = "../../fm1-live/src/labels.rs"]
+mod labels;
 #[path = "../../fm1-live/src/panel.rs"]
 #[allow(dead_code)]
 mod panel;
@@ -61,6 +64,11 @@ pub struct Fm1Params {
     pub flash: Mutex<Vec<Sector>>,
     /// The recorder, as the machine's thread reports it to the window (not saved).
     pub rec: Mutex<RecView>,
+    /// The MIDI controller profile (crates/fm1-map), with what was learned in it.
+    #[persist = "controller"]
+    pub controller: Mutex<map::Controller>,
+    /// What the machine's thread tells the window about the controller (not saved).
+    pub map: Mutex<map::MapView>,
 
     /// The MASTER pot.
     #[id = "master"]
@@ -164,6 +172,8 @@ impl Default for Fm1Params {
             firmware: Mutex::new(Firmware::default()),
             flash: Mutex::new(Vec::new()),
             rec: Mutex::new(RecView::default()),
+            controller: Mutex::new(map::Controller::default()),
+            map: Mutex::new(map::MapView::default()),
             master: FloatParam::new("Master", 900.0 / 1023.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
@@ -322,6 +332,14 @@ impl Plugin for Fm1 {
         editor::create(self.params.clone(), link)
     }
 
+    /// A project saved before controller profiles has no "controller" in its state: it gets
+    /// one that was chosen and is none, so it plays its MIDI as it did, whatever profile this
+    /// instance had and whenever the host loads the state (before or after `initialize`, which
+    /// nih-plug runs again after a state is loaded).
+    fn filter_state(state: &mut PluginState) {
+        state.fields.entry("controller".into()).or_insert_with(|| map::Controller::before_profiles().to_json());
+    }
+
     fn initialize(&mut self, _layout: &AudioIOLayout, cfg: &BufferConfig, ctx: &mut impl InitContext<Self>) -> bool {
         let link = self.start();
         self.ratio = RATE / cfg.sample_rate as f64;
@@ -334,6 +352,19 @@ impl Plugin for Fm1 {
         let fw = self.params.firmware.lock().unwrap().clone();
         let sectors = self.params.flash.lock().unwrap().clone();
         link.boot(&fw, &sectors);
+        // the project's controller. One never chosen is a new project (a saved one always has
+        // its "controller", see filter_state): it takes the last choice and keeps it.
+        let profile = {
+            let mut c = self.params.controller.lock().unwrap();
+            if !c.chosen {
+                if let Some(last) = map::last_choice() {
+                    c.profile = last;
+                }
+                c.chosen = true;
+            }
+            c.profile.clone()
+        };
+        let _ = link.cmds.send(Cmd::Map(profile));
         true
     }
 
@@ -348,17 +379,15 @@ impl Plugin for Fm1 {
             ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
         }
         let start = self.taken;
-        let ch = self.params.channel.value() as u8;
         while let Some(ev) = ctx.next_event() {
             let at = ev.timing();
-            let Some(MidiResult::Basic(mut b)) = ev.as_midi() else { continue };
+            let Some(MidiResult::Basic(b)) = ev.as_midi() else { continue };
             let len = midi_len(b[0]);
             if len == 0 {
                 continue;
             }
-            if ch != 0 {
-                b[0] = (b[0] & 0xf0) | (ch - 1);
-            }
+            // (the machine's thread moves the channel when the message is due, with or without
+            // a profile, so a profile switched on or off meanwhile routes it the new way)
             let frame = start + (at as f64 * self.ratio) as u64 + self.lead as u64;
             if let Some(m) = self.midi.as_mut() {
                 let _ = m.push(Midi { frame, bytes: b, len });

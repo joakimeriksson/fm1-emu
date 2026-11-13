@@ -35,7 +35,7 @@ jobs:
 
       # The CPU, decoder and peripherals (fm1-live needs ALSA headers, the tests do not).
       - name: Unit tests
-        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web
+        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web -p fm1-map
 
       - name: Browser code regression tests
         run: node --test web/*.test.mjs
