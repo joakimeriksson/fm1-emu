@@ -1574,7 +1574,8 @@ fn main() {
             }
         }
         {
-            let fb = lcd.lock().unwrap();
+            // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
+            let fb = lcd.lock().unwrap().clone();
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st);
         }
@@ -1771,7 +1772,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             *t = t.saturating_sub(1);
         }
         {
-            let fb = lcd.lock().unwrap();
+            let fb = lcd.lock().unwrap().clone();
             let l = *leds.lock().unwrap();
             let pc = *pads.lock().unwrap();
             let st = panel_smk::State {
