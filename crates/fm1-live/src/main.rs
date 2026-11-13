@@ -1384,22 +1384,14 @@ fn pick_firmware() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
 }
 
-/// F4: pick another firmware package; the arguments to start again on it, with the same
-/// options. The run then ends as on Esc (the emulation stopped, a WAV being recorded finished)
-/// and starts the new one.
+/// F4: pick another firmware package; the arguments to start again on it. The run then ends as
+/// on Esc (the emulation stopped, a WAV being recorded finished, MIDI and audio let go of) and
+/// [`restart`] starts the new one.
 fn open_another() -> Option<Vec<String>> {
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(path) = pick_firmware() {
-        let mut args: Vec<String> = Vec::new();
-        let mut it = std::env::args().skip(1);
-        while let Some(a) = it.next() {
-            // the old firmware out, the rest kept
-            if a == "--fw" || a == "--fwsc" || a == "--bin" {
-                it.next();
-                continue;
-            }
-            args.push(a);
-        }
+        let now: Vec<String> = std::env::args().skip(1).collect();
+        let mut args = carried_over(&now);
         args.push("--fwsc".into());
         args.push(path.to_string_lossy().into_owned());
         return Some(args);
@@ -1407,6 +1399,52 @@ fn open_another() -> Option<Vec<String>> {
     #[cfg(not(any(windows, target_os = "macos")))]
     eprintln!("F4: give the firmware on the command line here (--fwsc FILE)");
     None
+}
+
+/// The options that carry over to another firmware: how it runs, not what it is. A firmware's
+/// own (`--flash`, its saves; `--syx`, its sounds; `--entry` and the rest) stay behind, so the
+/// new one never loads or overwrites the old one's flash.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn carried_over(args: &[String]) -> Vec<String> {
+    const WITH_VALUE: [&str; 6] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map"];
+    const FLAGS: [&str; 3] = ["--usb", "--exclusive", "--midi-log"];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if WITH_VALUE.contains(&a) && i + 1 < args.len() {
+            out.extend_from_slice(&args[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        if FLAGS.contains(&a) {
+            out.push(args[i].clone());
+        }
+        i += 1;
+    }
+    out
+}
+
+/// F4's new run, once this one has stopped. On Unix it takes this process's place (the same
+/// terminal, Ctrl-C reaches it); on Windows this process waits for it and exits as it does.
+fn restart(args: &[String]) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => return eprintln!("F4: cannot start again: {e}"),
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = cmd.exec();
+        eprintln!("F4: cannot start again: {e}");
+    }
+    #[cfg(not(unix))]
+    match cmd.status() {
+        Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+        Err(e) => eprintln!("F4: cannot start again: {e}"),
+    }
 }
 
 /// Started with a double-click, not from a terminal or a script: on Windows the program has a
@@ -1453,8 +1491,17 @@ fn main() {
     #[cfg(any(windows, target_os = "macos"))]
     if std::env::args().len() == 1 && double_clicked() {
         if let Some(path) = pick_firmware() {
-            if let Ok(exe) = std::env::current_exe() {
-                let _ = std::process::Command::new(exe).arg("--fwsc").arg(path).status();
+            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--fwsc").arg(&path).status());
+            // a firmware that would not load: its error stays readable, not gone with the console
+            let failed = match run {
+                Ok(st) if st.success() => None,
+                Ok(st) => Some(format!("fm1-live stopped ({st})")),
+                Err(e) => Some(format!("cannot start fm1-live: {e}")),
+            };
+            if let Some(why) = failed {
+                eprintln!("\n{why}. Press Enter to close.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+                std::process::exit(1);
             }
         }
         return;
@@ -1849,11 +1896,13 @@ fn main() {
             Err(e) => eprintln!("recording: {e}"),
         }
     }
-    // F4: the new firmware, now that this one has stopped
+    // F4: the new firmware, now that this one has stopped, with the window, the MIDI inputs
+    // (WinMM's are one program's at a time) and the audio device let go of first
     if let Some(args) = next {
-        if let Err(e) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).spawn()) {
-            eprintln!("F4: cannot start again: {e}");
-        }
+        drop(win);
+        drop(_midi);
+        drop(_stream);
+        restart(&args);
     }
 }
 
@@ -2104,6 +2153,14 @@ mod tests {
         let mut t = AudioTarget::new(200.0, t0);
         t.update(true, t0 + Duration::from_secs(1));
         assert_eq!(t.ms, 200.0);
+    }
+
+    #[test]
+    fn f4_carries_over_how_it_runs_not_the_firmware() {
+        let a: Vec<String> = ["--fwsc", "a.fwsc", "--flash", "a.bin", "--mhz", "320", "--syx", "b.syx", "--usb",
+                              "--midi", "MPK", "--entry", "0x02000120", "--midi-ch", "2", "--latency", "20"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::carried_over(&a), ["--mhz", "320", "--usb", "--midi", "MPK", "--midi-ch", "2", "--latency", "20"]);
     }
     use super::*;
 
