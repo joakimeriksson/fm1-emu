@@ -36,14 +36,26 @@ fn wave(f: Fmt) -> WaveFormat {
 }
 
 /// Open the device and play the ring from a thread of its own. Returns once the stream runs
-/// (or with why it could not), with a line saying what was opened.
+/// (or with why it could not), with a line saying what was opened. If the stream dies later
+/// (the device unplugged, or no longer answering), the thread says why and sets `ring.dead`,
+/// and the emulation goes by the clock from then on.
 pub fn start(ring: Arc<AudioRing>) -> Result<String, String> {
     let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
     std::thread::Builder::new()
         .name("fm1-audio-exclusive".into())
         .spawn(move || {
-            crate::high_priority();
-            if let Err(e) = run(ring, &tx) {
+            let _mmcss = ProAudio::new();
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let r = run(ring.clone(), &tx, &started);
+            let e = match r {
+                Err(e) => e,
+                Ok(()) => "the stream ended".into(),
+            };
+            if started.load(Ordering::Relaxed) {
+                // start() has returned: nobody reads `tx` now
+                eprintln!("exclusive audio stopped: {e}; the emulation goes by the clock, without sound");
+                ring.dead.store(true, Ordering::Relaxed);
+            } else {
                 let _ = tx.send(Err(e));
             }
         })
@@ -51,7 +63,47 @@ pub fn start(ring: Arc<AudioRing>) -> Result<String, String> {
     rx.recv().unwrap_or_else(|_| Err("the audio thread stopped".into()))
 }
 
-fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, String>>) -> Result<(), String> {
+/// The thread in MMCSS's "Pro Audio" task (the scheduling Windows gives audio threads) while it
+/// lives; if that is not to be had, the highest normal priority.
+struct ProAudio(isize);
+
+#[link(name = "avrt")]
+extern "system" {
+    fn AvSetMmThreadCharacteristicsW(task: *const u16, index: *mut u32) -> isize;
+    fn AvRevertMmThreadCharacteristics(handle: isize) -> i32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentThread() -> isize;
+    fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+}
+
+impl ProAudio {
+    fn new() -> ProAudio {
+        let task: Vec<u16> = "Pro Audio".encode_utf16().chain(Some(0)).collect();
+        let mut index = 0u32;
+        // SAFETY: a NUL-terminated name and a place for the index, as the call asks
+        let h = unsafe { AvSetMmThreadCharacteristicsW(task.as_ptr(), &mut index) };
+        if h == 0 {
+            const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
+            // SAFETY: a plain call on the current thread
+            unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) };
+        }
+        ProAudio(h)
+    }
+}
+
+impl Drop for ProAudio {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: the handle AvSetMmThreadCharacteristicsW gave this thread
+            unsafe { AvRevertMmThreadCharacteristics(self.0) };
+        }
+    }
+}
+
+fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, String>>, started: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     let _ = wasapi::initialize_mta();
     let e = |e: wasapi::WasapiError| e.to_string();
     let device = DeviceEnumerator::new().map_err(e)?.get_default_device(&Direction::Render).map_err(e)?;
@@ -125,6 +177,7 @@ fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, Stri
     render.write_to_device(n, &data, None).map_err(e)?;
     client.start_stream().map_err(e)?;
     let ms = buffer as f64 * 1000.0 / fmt.rate as f64;
+    started.store(true, Ordering::Relaxed);
     let _ = ready.send(Ok(format!(
         "audio: WASAPI exclusive, {} Hz {}-bit{}, {} frames a period ({ms:.1} ms)",
         fmt.rate, fmt.valid, if fmt.float { " float" } else { "" }, buffer
