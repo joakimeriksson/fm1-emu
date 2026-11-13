@@ -140,7 +140,7 @@ pub fn put(buf: &mut [u32], x: i32, y: i32, c: u32, a: f32) {
     let w = CANVAS_W.with(|c| c.get());
     if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < buf.len() / w && a > 0.0 {
         let p = &mut buf[y as usize * w + x as usize];
-        *p = mix(*p, c, a);
+        *p = if a >= 1.0 { c } else { mix(*p, c, a) };
     }
 }
 
@@ -362,6 +362,16 @@ mod tests {
                     put(buf, px, py, mix(top, bot, (fy - y) / h), a);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn put_blends_as_mix_does() {
+        canvas(W);
+        for a in [0.5, 0.99, 0.999, 1.0] {
+            let mut buf = vec![0x000000; W];
+            put(&mut buf, 0, 0, 0xffffff, a);
+            assert_eq!(buf[0], mix(0x000000, 0xffffff, a), "a = {a}");
         }
     }
 
