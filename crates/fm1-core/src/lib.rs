@@ -3260,8 +3260,11 @@ impl Cpu {
                 // The block is the N bytes after the rep instruction and runs
                 // k times (register form: rR times, rR decremented to 0).
                 // A zero register count skips the block: the CRT runs
-                // `r2 = 0; rep 2 r2 {…}` unguarded for the empty overlay
-                // (needs hardware confirmation, Phase 1.3).
+                // `r2 = 0; rep 2 r2 {…}` unguarded for the empty overlay.
+                // One rep runs at most 32 times: a count c of 32 or more runs (c & 31) + 1 times
+                // and leaves c minus that in the register, which is why the compiler follows a
+                // register rep with `if (rN != 0) goto` it (an FM-1, 2026-11: counts 0, 31, 32,
+                // 33, 63, 64, 255, 256, 0x80000000 and 0xffffffff; docs/isa-notes.md).
                 let raw = raw_v(insn);
                 let n = 2 * (((raw >> 4) & 0xf) as u32 + 1);
                 self.rep_start = next_pc;
@@ -3272,9 +3275,10 @@ impl Cpu {
                     // b[r1++=1]; b[r3++=1] = r2 }`; counting in r2 overran into a return
                     // address), while `rep 4 r5 {..}; if (r5 != 0) goto rep` still sees 0.
                     let r = (raw & 0xf) as usize;
+                    let c = self.regs[r];
                     self.rep_reg = None;
-                    self.rep_count = self.regs[r];
-                    self.regs[r] = 0;
+                    self.rep_count = if c < 32 { c } else { (c & 31) + 1 };
+                    self.regs[r] = c - self.rep_count;
                 } else {
                     self.rep_reg = None;
                     self.rep_count = ((raw >> 8) & 0x1f) as u32 + 1;
@@ -5747,6 +5751,22 @@ mod tests {
         cpu.regs[2] = 0;
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.pc, 4);
+    }
+
+    #[test]
+    fn rep_runs_at_most_32_times() {
+        // `02 03` rep 2 r2 { `c3 21` r3 += 1 }, then a nop: (count, body runs, r2 after) as an FM-1
+        // ran them (2026-11, docs/isa-notes.md)
+        for (count, runs, left) in [(31u32, 31u32, 0u32), (32, 1, 31), (33, 2, 31), (63, 32, 31), (64, 1, 63), (255, 32, 223),
+            (256, 1, 255), (0x8000_0000, 1, 0x7fff_ffff), (0xffff_ffff, 32, 0xffff_ffdf)] {
+            let mut ram = FlatRam::new(vec![0x02, 0x03, 0xc3, 0x21, 0, 0, 0, 0, 0, 0]);
+            let mut cpu = Cpu::new(0);
+            (cpu.regs[2], cpu.regs[3]) = (count, 0);
+            while cpu.pc != 4 {
+                cpu.step(&mut ram).unwrap();
+            }
+            assert_eq!((cpu.regs[3], cpu.regs[2]), (runs, left), "count {count:#x}");
+        }
     }
 
     /// Encodings checked against the vendor objdump (tools/fuzz_decode.py): one instruction at 0,

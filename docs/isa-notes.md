@@ -158,14 +158,14 @@ stub hacks were removed.
   b = bit3 | bits(7,8)<<1 (`93 1c` r3 = r1 + r2, `29 1d` r1 = r2 + r5).
 - `rep N rR {` (`03 xx`): reg = bits(0,3), N = block length in bytes =
   2*(bits(4,7)+1). `rep N #k {` (`8x xx`): same N, k = bits(8,12)+1.
-  The block is the N bytes after the rep; it runs k / rR times, rR
-  decremented in place. Count 0 skips the block (assumed: the CRT runs
-  `r2 = 0; rep 2 r2 {…}` unguarded for the empty overlay) — needs a
-  hardware probe. The compiler still emits `if (rR != 0) goto rep` after
-  every register-count rep, which hints at a hardware iteration cap; the
-  emulator loops until the register hits 0 either way. **Measured on an FM-1
-  (2026-11, "Hardware facts" below): a count of 0 does skip the body, and one
-  `rep` runs at most 32 times**; the compiler's branch makes up the rest.
+  The block is the N bytes after the rep; it runs k / rR times. Count 0
+  skips the block (the CRT runs `r2 = 0; rep 2 r2 {…}` unguarded for the
+  empty overlay). **Measured on an FM-1 (2026-11, "Hardware facts" below):
+  a count of 0 does skip the body, and one `rep` runs at most 32 times**: a
+  count c of 32 or more runs (c & 31) + 1 times and leaves c minus that in
+  rR, and the compiler's `if (rR != 0) goto rep` after every register-count
+  rep makes up the rest. The emulator latches the count at the rep (rR holds
+  what will be left while the body runs: the stock memmove tail reuses it).
 
 ### 4-byte families fitted 2026-10-09 (0 mismatches over all V13 samples)
 
