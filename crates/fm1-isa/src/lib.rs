@@ -8,6 +8,8 @@
 //! bytes wins ties against sibling masks.
 
 mod fpu;
+mod pi32v2;
+pub mod pi32v2_table;
 mod generated_isa;
 pub use fpu::{FALLBACK, FPU};
 pub use generated_isa::ISA;

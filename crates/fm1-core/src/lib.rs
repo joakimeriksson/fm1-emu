@@ -21,6 +21,7 @@ use fm1_isa::{DecodeError, Instruction, SlotKind};
 /// not silently widen into a word read of a peripheral register.
 #[cfg(native_jit)]
 mod jit;
+mod pi32v2_exec;
 #[cfg(all(native_jit, target_arch = "aarch64"))]
 mod jit_a64;
 #[cfg(all(native_jit, target_arch = "x86_64"))]
@@ -228,6 +229,9 @@ pub struct Cpu {
     /// first instruction's register results are held here, (values, the bits it wrote), and
     /// committed after the second has run: where both write, the first's value stays.
     pub pair_pending: Option<([u32; 16], [u32; 16])>,
+    /// The bits of each register the last pi32v2-isa form wrote (`pi32v2_exec`): its writes for a
+    /// dual-issue pair's rule, also where it wrote a register's old value back.
+    pub pi_wrote: [u32; 16],
     /// Name of the last class with no semantics (halt reason).
     pub stuck_on: Option<&'static str>,
     /// `R = #h` rows not found in the observed-encoding table.
@@ -1572,6 +1576,12 @@ impl Cpu {
             let part = head_part(x.pre.syntax);
             let dest = head_dest(&insn, &x.pre);
             self.pair_hold(before, l.fast, part, dest);
+            // a pi32v2-isa form says what it wrote: that, not what changed
+            if x.pre.route == ROUTE_PI {
+                if let Some((_, wrote)) = self.pair_pending.as_mut() {
+                    *wrote = self.pi_wrote;
+                }
+            }
         }
         res
     }
@@ -3415,6 +3425,18 @@ impl Cpu {
                 }
             }
 
+            ROUTE_PI => {
+                let k = fm1_isa::pi32v2_table::index_of(insn.entry).expect("a pi32v2-isa form");
+                match pi32v2_exec::run(self, bus, k, insn.raw, next_pc) {
+                    Some(Ok(pi32v2_exec::Done::Next)) => {}
+                    Some(Ok(pi32v2_exec::Done::Jump(t))) => jumped = Some(t),
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        self.stuck_on = Some(name);
+                        return Err(CoreError::Unsupported { name, pc: self.pc, raw: insn.raw });
+                    }
+                }
+            }
             ROUTE_FPU => {
                 let (op, d, a, b) = decode_fpu(insn.raw);
                 let (x, y) = (self.regs[a as usize], self.regs[b as usize]);
@@ -3862,6 +3884,13 @@ static PAIR_OP_PAIR_RAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
 /// and `block_end` both decode through here, so a block's size counts the same instructions
 /// the core executes.
 fn decode_any(win: u64, pc: u32) -> Result<fm1_isa::Instruction, fm1_isa::DecodeError> {
+    // a form of pi32v2-isa's table fm1-core runs from it, where the table decodes the word so: the
+    // DSP and other forms fm1-isa's corpus classes do not have (`pi32v2_exec`)
+    if let Some(k) = pi32v2_exec::decode(win) {
+        let entry = &fm1_isa::pi32v2_table::ENTRIES[k];
+        let len_mask = if entry.len >= 8 { u64::MAX } else { (1u64 << (8 * entry.len as u32)) - 1 };
+        return Ok(fm1_isa::Instruction { addr: pc, raw: win & len_mask, entry });
+    }
     // the add / subtract-with-carry family before the table: its corpus classes fit only
     // the registers the corpora used (see carry_op_raw)
     let decoded = match carry_op_raw(win) {
@@ -6912,11 +6941,12 @@ const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 /// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
 /// end a path. A reader that is never reached costs only speed.
 /// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
-/// `ifne` (`flags_read_later`'s readers)?
+/// `ifne`, a pi32v2-isa form that does (`pi32v2_exec::reads_flags`)? (`flags_read_later`'s readers)
 fn reads_psr_flags(i: &Instruction) -> bool {
     let s = i.entry.syntax;
     s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
         || s.starts_with("ifeq") || s.starts_with("ifne")
+        || fm1_isa::pi32v2_table::index_of(i.entry).is_some_and(pi32v2_exec::reads_flags)
 }
 
 /// What an instruction does with the psr flags as the block path runs it (`Cpu::flag_audit`).
@@ -7255,6 +7285,9 @@ pub struct LineX {
 /// Which arm of `Cpu::execute` handles this instruction: the guards in the
 /// same order as there, evaluated once per instruction word and cached.
 fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) -> u16 {
+    if fm1_isa::pi32v2_table::index_of(insn.entry).is_some() {
+        return ROUTE_PI;
+    }
     let name = insn.entry.name;
     match name {
             // `[++R=R]` / `[R++=R]`, the table's classes too (one executed `h[r9++=r0] = r0.h`
@@ -7382,6 +7415,8 @@ fn sreg_list_mask(list: &str) -> Option<u16> {
 /// The route of the generic, syntax-keyed executor (`exec_syntax`).
 const ROUTE_SYNTAX: u16 = 30;
 const ROUTE_FPU: u16 = 31;
+/// A form of pi32v2-isa's table fm1-core runs from it (`pi32v2_exec`).
+const ROUTE_PI: u16 = 60;
 
 #[derive(Clone, Copy, Debug)]
 enum Base { Reg(u8), Sp }
