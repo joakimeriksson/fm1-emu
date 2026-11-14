@@ -4,7 +4,8 @@
 //! window at 0x11800 (Felucca's hal/fm1_usb.h is the reference, and its src/usb.c, which runs
 //! on real FM-1s, the behaviour this follows):
 //!   0x11800 CON0   bit 0 on, bit 2 SIE out of reset (USB_NRST), bits 3..5 set at attach,
-//!                  bit 12 write = clear SOF pending, bit 13 SOF pending, bits 19.. endpoint
+//!                  bits 10/11 enable SOF/SIE interrupts, bit 12 write = clear SOF pending,
+//!                  bits 13/14 SOF/SIE pending, bits 19.. endpoint
 //!                  DMA off (cleared = on)
 //!   0x11804 CON1   the SIE's registers, one byte at a time: write (r << 8) | v, or
 //!                  (r << 8) | 0x4000 to read; bit 15 reads "done", the low byte the data
@@ -36,10 +37,6 @@
 //! and sets UnderRun (TXCSR1 bit 2), which the firmware clears with its next TXCSR1 write.
 //! The device only answers at its own address (FADDR), so a firmware that gets SET_ADDRESS
 //! wrong drops off as it would on a real bus.
-//!
-//! Not modelled: the USB interrupt. The SIE sets its flags (INTRTX / INTRRX / INTRUSB) but
-//! raises no IRQ line, so a driver that polls them (Felucca's usb.c) enumerates, and one that
-//! waits for the interrupt (M-VAVE's own firmware) does not.
 //!
 //! SPDX-License-Identifier: MIT
 
@@ -76,6 +73,11 @@ const S_COUNT0: u32 = 22; // = RXCOUNT1 for EP1..
 const S_RXCOUNT2: u32 = 23;
 
 const NEP: usize = 5;
+const SOFIE: u32 = 1 << 10;
+const SIEIE: u32 = 1 << 11;
+const CLR_SOF_PND: u32 = 1 << 12;
+const SOF_PND: u32 = 1 << 13;
+const SIE_PND: u32 = 1 << 14;
 
 #[derive(Clone, Copy, Default, Debug)]
 struct Ep {
@@ -309,15 +311,30 @@ impl Usb {
         self.cable && self.con0() & 4 != 0
     }
 
-    /// Does a load from `addr` depend on the clock? (CON1's done bit does: a polling loop on
-    /// it must run, not be skipped.)
+    fn sie_pending(&self) -> bool {
+        self.sie_on()
+            && (self.intrtx & self.intrtxe != 0
+                || self.intrrx & self.intrrxe != 0
+                || self.intrusb & self.intrusbe != 0)
+    }
+
+    pub(crate) fn irq_lines(&self) -> (bool, bool) {
+        let con = self.con0();
+        (
+            self.sie_on() && con & (SOF_PND | SOFIE) == (SOF_PND | SOFIE),
+            con & SIEIE != 0 && self.sie_pending(),
+        )
+    }
+
+    /// CON0's pending flags and CON1's done bit can change as USB runs.
     pub fn pure(&self, addr: u32) -> bool {
-        !self.cable || addr != USB_LO + 4
+        !self.cable || !matches!(addr - USB_LO, 0 | 4)
     }
 
     pub fn read(&mut self, addr: u32, now: u64) -> u32 {
         let i = ((addr - USB_LO) / 4) as usize;
         match i {
+            0 => self.con0() | if self.sie_pending() { SIE_PND } else { 0 },
             1 => {
                 let done = self.sie_on() && now >= self.sie_done_at;
                 (self.con1 & 0xff_7f00) | if done { 0x8000 | self.sie_data as u32 } else { 0 }
@@ -330,9 +347,8 @@ impl Usb {
         let i = ((addr - USB_LO) / 4) as usize;
         match i {
             0 => {
-                // bit 13 (SOF pending) is the controller's, bit 12 writes clear it
-                let pend = if v & (1 << 12) != 0 { 0 } else { self.regs[0] & (1 << 13) };
-                self.regs[0] = (v & !(3 << 12)) | pend;
+                let pend = if v & CLR_SOF_PND != 0 { 0 } else { self.con0() & SOF_PND };
+                self.regs[0] = (v & !(CLR_SOF_PND | SOF_PND | SIE_PND)) | pend;
                 if v & 4 == 0 {
                     self.sie_reset();
                 }
@@ -722,7 +738,7 @@ impl Usb {
         }
         // SOF: the frame number, and the pending bit
         self.frame = (self.frame + 1) & 0x7ff;
-        self.regs[0] |= 1 << 13;
+        self.regs[0] |= SOF_PND;
         match self.host.clone() {
             HostState::Detached => {
                 self.log(|| "pull-up: device attached".into());

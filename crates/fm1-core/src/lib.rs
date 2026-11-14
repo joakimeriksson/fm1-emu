@@ -3686,6 +3686,10 @@ fn decode_any(win: u64, pc: u32) -> Result<fm1_isa::Instruction, fm1_isa::Decode
             let entry = if (win >> 8) & 0xff == 0xf1 { &PAIR_OP_PAIR_RAW } else { &PAIR_OP_RAW };
             Ok(fm1_isa::Instruction { addr: pc, raw: win, entry })
         }
+        // `d8 e8` / `d4 e8 <mask>`: push / pop a register mask without rets. The
+        // table classes fit only observed masks; sparse masks need the raw decoder.
+        Err(_) if win & 0xffff == 0xe8d8 => raw(&PUSH_MASK_CRAW),
+        Err(_) if win & 0xffff == 0xe8d4 => raw(&POP_MASK_CRAW),
         // `d9 e8` / `d1 e8 <mask>`: push / pop of rets and a register mask; the table's
         // classes match only the masks the corpora used (libm's sin pops {rets, r11-r8, r6-r4})
         Err(_) if win & 0xffff == 0xe8d9 => raw(&RETS_PUSH_MASK_CRAW),
@@ -4054,6 +4058,14 @@ static POST_INC_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
 static WORD_MEM_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
     name: "word_mem_craw", syntax: "[R+#i] = R (word raw)", len: 4, count: 0, mask: 0, match_: 0,
     group: "load", alt: &[], samples: &[], slots: &[],
+};
+static PUSH_MASK_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
+    name: "sp_push_mask_craw", syntax: "[--sp] = {R*2}", len: 4, count: 0, mask: 0, match_: 0,
+    group: "stack", alt: &[], samples: &[], slots: &[],
+};
+static POP_MASK_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
+    name: "sp_pop_mask_craw", syntax: "{R*2} = [sp++]", len: 4, count: 0, mask: 0, match_: 0,
+    group: "stack", alt: &[], samples: &[], slots: &[],
 };
 static RETS_PUSH_MASK_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
     name: "sp_mov_rets_mask_craw", syntax: "[--sp] = {rets, R*4}", len: 4, count: 0, mask: 0, match_: 0,
@@ -5572,6 +5584,25 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.regs[7], 0xffff_ffff);
         assert_eq!(cpu.regs[2], 0);
+    }
+
+    #[test]
+    fn push_pop_sparse_register_mask_without_rets() {
+        let mut mem = vec![0u8; 0x200];
+        mem[..8].copy_from_slice(&[0xd8, 0xe8, 0xf0, 0x0d, 0xd4, 0xe8, 0xf0, 0x0d]);
+        let mut ram = FlatRam::new(mem);
+        let mut cpu = Cpu::new(0);
+        cpu.sp = 0x200;
+        for r in 0..16 { cpu.regs[r] = 0x100 + r as u32; }
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.sp, 0x200 - 4 * 7);
+        assert_eq!(ram.read32(0x1fc), 0x10b);
+        assert_eq!(ram.read32(0x200 - 28), 0x104);
+        for r in 0..16 { cpu.regs[r] = 0; }
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.sp, 0x200);
+        assert_eq!(cpu.pc, 8);
+        assert_eq!((cpu.regs[4], cpu.regs[8], cpu.regs[9], cpu.regs[10], cpu.regs[11]), (0x104, 0x108, 0, 0x10a, 0x10b));
     }
 
     #[test]

@@ -121,6 +121,8 @@ impl Machine {
         soc.periph.skip_idle = true;
         soc.lcd_timed = unsafe { LCD_TIMED };
         soc.cpu1_survives = unsafe { CPU1_SURVIVES };
+        // (before the boot: the board sets the flash chip's id from it)
+        soc.set_flash_part(flash_part(unsafe { FLASH_PART }));
         let mut cpu = Cpu::new(entry);
         // (cpu1 follows cpu0's setting: run_dual)
         cpu.jit_on = unsafe { JIT };
@@ -198,6 +200,8 @@ static mut AHEAD: u32 = 0;
 static mut LCD_TIMED: bool = false;
 /// `fm1_cpu1_survives`: a fault on core 1 stops that core alone and cpu0 goes on (`Soc::cpu1_survives`)
 static mut CPU1_SURVIVES: bool = false;
+/// `fm1_flash_part`: the next boot's FM-1 flash part (0 the stock Puya P25Q80, 1 the UC25HQ80)
+static mut FLASH_PART: u32 = 0;
 static mut OUT_L: [f32; 1024] = [0.0; 1024];
 static mut OUT_R: [f32; 1024] = [0.0; 1024];
 static mut LEDS: [f32; 41] = [0.0; 41];
@@ -426,6 +430,19 @@ pub extern "C" fn fm1_ahead(frames: u32) {
 /// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
 /// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
 /// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
+fn flash_part(n: u32) -> fm1_soc::FlashPart {
+    if n == 1 { fm1_soc::FlashPart::Uc25hq80 } else { fm1_soc::FlashPart::P25q80 }
+}
+
+/// Which part the FM-1's flash is: 0 the stock Puya P25Q80 (JEDEC 85 60 14), 1 the UC25HQ80
+/// (B3 60 14) of units sold since autumn 2026. Before the boot, or for the machine running (a
+/// firmware reads the id at its start, so the running one goes on as it began).
+#[no_mangle]
+pub extern "C" fn fm1_flash_part(part: u32) {
+    unsafe { FLASH_PART = part };
+    if let Some(m) = machine() { m.soc.set_flash_part(flash_part(part)); }
+}
+
 /// Before the boot, or for the machine running.
 #[no_mangle]
 pub extern "C" fn fm1_cpu1_survives(on: u32) {

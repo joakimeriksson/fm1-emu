@@ -73,6 +73,9 @@ const FRAME_T4: u64 = 544;
 pub const IRQ_ALNK0: u8 = 11;
 pub const IRQ_TIMER5: u8 = 63;
 pub const IRQ_OS_TICK: u8 = 3;
+// AC79/WL82 SDK, asm/hwi.h: USB0 SOF and SIE use separate vectors.
+pub(crate) const IRQ_USB_SOF: u8 = 8;
+pub(crate) const IRQ_USB_CTRL: u8 = 9;
 pub const IRQ_SPI1: u8 = 16;
 pub const IRQ_SARADC: u8 = 24;
 pub const IRQ_SPI2: u8 = 37;
@@ -238,6 +241,8 @@ pub struct Periph {
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
+    usb_sof_irq: bool,
+    usb_ctrl_irq: bool,
     /// The cycle the watchdog runs out at (p33.rs; MAX: stopped).
     pub(crate) wdt_at: u64,
     tmr: [Tmr; 4],
@@ -388,6 +393,8 @@ impl Default for Periph {
             spi2_next: u64::MAX,
             usb_next: u64::MAX,
             usb_period: 0,
+            usb_sof_irq: false,
+            usb_ctrl_irq: false,
             wdt_at: u64::MAX,
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
             uart: Uart { next: u64::MAX, ot_next: u64::MAX, ..Default::default() },
@@ -443,6 +450,17 @@ impl Periph {
 
     pub fn cycle_of_ms(&self, ms: u64) -> u64 {
         ms * self.hz / 1000
+    }
+
+    /// I2S frames the DAC clock has counted since boot: 24 MHz / 544 a second whatever the CPU
+    /// clock, the pace the DMA keeps (half_period). `audio` holds the ones the firmware made;
+    /// the difference is its silence from boot until it started the DMA.
+    pub fn audio_frames_so_far(&self) -> u64 {
+        Self::audio_frames_at(self.cycles, self.hz)
+    }
+
+    pub fn audio_frames_at(cycles: u64, hz: u64) -> u64 {
+        (cycles as u128 * T4_HZ as u128 / (hz as u128 * FRAME_T4 as u128)) as u64
     }
 
     fn t5_period(&self) -> u64 {
@@ -780,6 +798,15 @@ impl Periph {
     pub fn any_pending(&self) -> bool {
         self.t5_pending || self.alnk_pend & 0xf0 != 0 || self.ilat != 0 || self.tick_pending || self.spi1_pending || self.exc_pending
             || self.tmr.iter().any(|t| t.pending) || self.adc_irq || self.spi2_pending || self.uart_irq
+            || self.usb_sof_irq || self.usb_ctrl_irq
+    }
+
+    pub(crate) fn set_usb_irqs(&mut self, (sof, ctrl): (bool, bool)) {
+        if (sof && !self.usb_sof_irq) || (ctrl && !self.usb_ctrl_irq) {
+            self.next_due = 0;
+        }
+        self.usb_sof_irq = sof;
+        self.usb_ctrl_irq = ctrl;
     }
 
     /// Has core `core` (0, 1) source `n` enabled (its ICFG nibble's bit 0)?
@@ -830,6 +857,12 @@ impl Periph {
         }
         if self.uart_irq {
             consider(IRQ_UART1);
+        }
+        if self.usb_sof_irq {
+            consider(IRQ_USB_SOF);
+        }
+        if self.usb_ctrl_irq {
+            consider(IRQ_USB_CTRL);
         }
         for i in 0..4 {
             if self.tmr[i].pending {
@@ -1206,17 +1239,19 @@ impl Periph {
         }
     }
 
-    /// The fraction of time each LED was lit since the last call.
-    pub fn led_take(&mut self) -> [f32; 41] {
+    /// The fraction of time each LED was lit since the last `led_take`, which goes on counting.
+    pub fn led_peek(&mut self) -> [f32; 41] {
         self.led_credit();
         self.led_flush();
         let span = (self.cycles - self.led_since).max(1) as f32;
+        std::array::from_fn(|i| self.led_acc[i] as f32 / span)
+    }
+
+    /// The fraction of time each LED was lit since the last call.
+    pub fn led_take(&mut self) -> [f32; 41] {
+        let out = self.led_peek();
         self.led_since = self.cycles;
-        let mut out = [0f32; 41];
-        for (o, a) in out.iter_mut().zip(self.led_acc.iter_mut()) {
-            *o = *a as f32 / span;
-            *a = 0;
-        }
+        self.led_acc = [0; 41];
         out
     }
 
@@ -1544,5 +1579,30 @@ mod tests {
         p.apply(&Action::Midi { b: 0xf8 });
         run_to(&mut p, 7 * byte + ms, &mut got);
         assert_eq!((got.len(), p.midi_dropped()), (5, 1));
+    }
+
+    #[test]
+    fn audio_frames_follow_the_dac_clock() {
+        // 24 MHz / 544 = 44117.6 frames per second, however fast the CPU runs
+        assert_eq!(Periph::audio_frames_at(0, CPU_HZ), 0);
+        assert_eq!(Periph::audio_frames_at(5440, CPU_HZ), 1);
+        assert_eq!(Periph::audio_frames_at(CPU_HZ, CPU_HZ), 44_117);
+        assert_eq!(Periph::audio_frames_at(160_000_000, 160_000_000), 44_117);
+        assert_eq!(Periph::audio_frames_at(60 * 60 * CPU_HZ, CPU_HZ), 60 * 60 * 44_117 + 2329);
+    }
+
+    #[test]
+    fn led_peek_reads_the_fractions_without_taking_them() {
+        let mut p = Periph::default();
+        // LED 5 lit for half of the 1000 cycles since the last take
+        p.cycles = 1000;
+        p.led_last = 1000;
+        p.led_acc[5] = 500;
+        assert_eq!(p.led_peek()[5], 0.5);
+        assert_eq!(p.led_peek()[5], 0.5, "a peek leaves the window alone");
+        assert_eq!(p.led_take()[5], 0.5, "the take still covers all of it");
+        p.cycles = 2000;
+        p.led_last = 2000;
+        assert_eq!(p.led_take()[5], 0.0, "the take did reset it");
     }
 }

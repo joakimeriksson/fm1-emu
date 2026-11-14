@@ -42,20 +42,90 @@ use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
+mod fit;
+#[cfg(windows)]
+mod exclusive;
 mod panel;
+mod wav;
 mod panel_smk;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// `--record -` streams the frames on stdout: the run's reports go to stderr then.
+static REPORTS_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// println!, except that with `--record -` it prints to stderr (the frames own stdout).
+macro_rules! println {
+    ($($arg:tt)*) => { say(format_args!($($arg)*)) };
+}
+
+fn say(args: std::fmt::Arguments) {
+    use std::io::Write;
+    let _ = if REPORTS_TO_STDERR.load(Ordering::Relaxed) {
+        writeln!(std::io::stderr(), "{args}")
+    } else {
+        writeln!(std::io::stdout(), "{args}")
+    };
+}
+
 const RAM_BASE: u32 = 0x01c0_0000;
 const RAM_SIZE: usize = 1 << 20;
 /// How far emulated time runs ahead of the wall clock before audio starts.
 const LEAD_MS: f64 = 60.0;
-/// Once the firmware streams audio, the emulator runs whenever less than
-/// this much sound is queued: the audio device sets the pace.
-const AUDIO_TARGET_MS: f64 = 50.0;
+/// Once the firmware streams audio, the emulator runs whenever less than the target of sound
+/// is queued: the audio device sets the pace. The target starts at --latency and grows by this
+/// much at each underrun, up to AUDIO_TARGET_MAX_MS: a played note waits about that long.
+const AUDIO_TARGET_STEP_MS: f64 = 4.0;
+const AUDIO_TARGET_MAX_MS: f64 = 80.0;
+/// --latency's default: low on Windows, where it was measured; elsewhere the earlier 50 ms
+/// (the JIT's warm-up can underrun at the start there).
+const AUDIO_TARGET_DEFAULT_MS: f64 = if cfg!(windows) { 12.0 } else { 50.0 };
+/// After this long without an underrun the target comes back down (see [`AudioTarget`]).
+const AUDIO_TARGET_CALM: Duration = Duration::from_secs(10);
+
+/// How much audio the emulator keeps queued ahead of the device. An underrun raises it by a
+/// step. After a calm while it comes back down by a quarter of the way to the lowest it may
+/// go (at least half a step), so a burst of underruns (the start, while the JIT compiles the
+/// firmware's code, or another program busy for a moment) does not leave the latency high:
+/// from 80 ms to 12 in about two minutes. A step down that underruns within the calm while
+/// shows the device needs the level before it, which then becomes the lowest it goes for the
+/// rest of the run: no probing down and clicking again every minute.
+struct AudioTarget {
+    ms: f64,
+    /// --latency: the lowest asked for
+    floor: f64,
+    /// the lowest it goes now: --latency, or a level a step down from which underran
+    low: f64,
+    calm_since: Instant,
+    /// the last step down: the level before it, and when
+    probe: Option<(f64, Instant)>,
+}
+
+impl AudioTarget {
+    fn new(floor: f64, now: Instant) -> AudioTarget {
+        AudioTarget { ms: floor, floor, low: floor, calm_since: now, probe: None }
+    }
+
+    /// One look at the device: `underran` since the last.
+    fn update(&mut self, underran: bool, now: Instant) {
+        if underran {
+            if let Some((before, at)) = self.probe.take() {
+                if now.duration_since(at) < AUDIO_TARGET_CALM {
+                    self.low = self.low.max(before);
+                }
+            }
+            self.calm_since = now;
+            self.ms = (self.ms + AUDIO_TARGET_STEP_MS).min(AUDIO_TARGET_MAX_MS.max(self.floor)).max(self.low);
+        } else if self.ms > self.low && now.duration_since(self.calm_since) >= AUDIO_TARGET_CALM {
+            let down = ((self.ms - self.low) / 4.0).max(AUDIO_TARGET_STEP_MS / 2.0);
+            self.probe = Some((self.ms, now));
+            self.calm_since = now;
+            self.ms = (self.ms - down).max(self.low);
+        }
+    }
+}
 
 struct Opts {
     bin: String,
@@ -64,6 +134,8 @@ struct Opts {
     bench: Option<u64>,
     /// Headless: run this many ms with a chord held, save the panel image.
     shot: Option<u64>,
+    /// --record DIR|-: a PPM frame every 16 ms and the audio while running --shot (Recorder).
+    record: Option<String>,
     /// What runs, for the window title.
     name: String,
     /// A firmware from its update package (fm1_soc::stock_from_package): a community firmware's,
@@ -80,6 +152,8 @@ struct Opts {
     cpu1_survives: bool,
     /// its generator's seed (default 1)
     seed: Option<u64>,
+    /// --lcd-only: --shot and --record take the 240x240 LCD alone, not the panel.
+    lcd_only: bool,
     /// --flash FILE: the flash chip's contents from FILE at the start (if it exists; after the
     /// package is installed), written back to it at the end (bench, shot, or the window closed)
     flash: Option<String>,
@@ -87,6 +161,14 @@ struct Opts {
     usb: bool,
     /// --theme NAME: the panel color theme (default, cool-gray, black, orange, black-green, purple, white-blue)
     theme: String,
+    /// --flash-chip NAME: which part the FM-1's flash is (the stock Puya, or the newer units' UC25HQ80)
+    flash_part: fm1_soc::FlashPart,
+    /// --latency MS: the audio queued ahead of the device to start with (it grows on underruns)
+    latency_ms: f64,
+    /// --buffer FRAMES: ask the audio device for this buffer size
+    buffer: Option<u32>,
+    /// --exclusive (Windows): the output in WASAPI exclusive mode
+    exclusive: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -110,14 +192,39 @@ fn catalog() -> Vec<(String, String, String, String)> {
 }
 
 fn parse() -> Option<Opts> {
-    let a: Vec<String> = std::env::args().collect();
+    parse_args(std::env::args().collect())
+}
+
+/// The options that only do something together: refused rather than ignored.
+fn check_opts(o: &Opts) -> Result<(), String> {
+    if o.seed.is_some() && o.flaky_core1.is_none() {
+        return Err("--seed needs --flaky-core1 (it seeds its misreads)".into());
+    }
+    if o.record.is_some() && o.shot.is_none() {
+        return Err("--record needs --shot (it records that run)".into());
+    }
+    Ok(())
+}
+
+fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into() };
+                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
+                       flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
             o.usb = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--exclusive" {
+            o.exclusive = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--lcd-only" {
+            o.lcd_only = true;
             i += 1;
             continue;
         }
@@ -159,6 +266,10 @@ fn parse() -> Option<Opts> {
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             "--theme" => o.theme = a.get(i + 1)?.clone(),
+            "--flash-chip" => o.flash_part = fm1_soc::FlashPart::parse(a.get(i + 1)?)?,
+            "--record" => o.record = Some(a.get(i + 1)?.clone()),
+            "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
+            "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
             _ => return None,
         }
         i += 2;
@@ -200,6 +311,8 @@ impl Machine {
             None => std::fs::read(&o.bin)?,
         };
         let mut soc = Soc::new(RAM_SIZE, image);
+        // (before the boot: the board sets the flash chip's id from it)
+        soc.set_flash_part(o.flash_part);
         let strict = std::env::var_os("FM1_STRICT").is_some();
         // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
         // time) and as it is timed: each instruction its measured cost (fm1_core's op_cost8) on a
@@ -293,7 +406,44 @@ impl Machine {
 
 /// Ask for a performance core: macOS runs default-QoS background threads on
 /// the efficiency cores, which made the emulator ~40% slower than on main.
-fn high_priority() {
+/// While it lives (Windows): the 1 ms timer period [`high_priority`] asked for.
+#[must_use]
+struct Priority;
+
+#[cfg(windows)]
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(ms: u32) -> u32;
+    fn timeEndPeriod(ms: u32) -> u32;
+}
+
+impl Drop for Priority {
+    fn drop(&mut self) {
+        // SAFETY: pairs the timeBeginPeriod(1) in high_priority
+        #[cfg(windows)]
+        unsafe {
+            timeEndPeriod(1);
+        }
+    }
+}
+
+/// The calling thread above normal (the emulation, a benchmark); on Windows also 1 ms timer
+/// ticks for its short sleeps, until the [`Priority`] returned is dropped.
+fn high_priority() -> Priority {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn SetThreadPriority(thread: isize, priority: i32) -> i32;
+        }
+        const THREAD_PRIORITY_HIGHEST: i32 = 2;
+        // SAFETY: plain calls on the current thread
+        unsafe {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+            timeBeginPeriod(1);
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         extern "C" {
@@ -304,6 +454,7 @@ fn high_priority() {
             pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         }
     }
+    Priority
 }
 
 fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
@@ -491,54 +642,81 @@ struct AudioRing {
     /// Set once the firmware has produced sound (silence before that is boot).
     started: AtomicBool,
     underruns: AtomicU64,
+    /// The stream died after it had started (the exclusive one: the device unplugged or no
+    /// longer answering): the emulation goes by the clock instead.
+    dead: AtomicBool,
 }
 
-fn start_audio(ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
+fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let dev = host.default_output_device().ok_or("no audio output device")?;
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
     if cfg.sample_format() != cpal::SampleFormat::F32 {
         return Err(format!("output format {:?} not handled (f32 only)", cfg.sample_format()));
     }
-    let channels = cfg.channels() as usize;
-    let rate = cfg.sample_rate().0 as f64;
-    let step = 44_100.0 / rate; // source frames per output frame
-    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
-    let stream = dev
-        .build_output_stream(
-            &cfg.config(),
-            move |out: &mut [f32], _| {
-                let mut q = ring.q.lock().unwrap();
-                let mut starved = false;
-                for frame in out.chunks_mut(channels) {
-                    pos += step;
-                    while pos >= 1.0 {
-                        pos -= 1.0;
-                        cur = next;
-                        next = match (q.pop_front(), q.pop_front()) {
-                            (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
-                            _ => {
-                                starved = true;
-                                (0.0, 0.0)
-                            }
-                        };
-                    }
-                    let f = pos as f32;
-                    let (l, r) = (cur.0 + (next.0 - cur.0) * f, cur.1 + (next.1 - cur.1) * f);
-                    for (c, s) in frame.iter_mut().enumerate() {
-                        *s = if c % 2 == 0 { l } else { r };
-                    }
-                }
-                if starved && ring.started.load(Ordering::Relaxed) {
-                    ring.underruns.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            |e| eprintln!("audio: {e}"),
-            None,
-        )
-        .map_err(|e| e.to_string())?;
+    let mut config = cfg.config();
+    if let Some(n) = buffer {
+        let ok = match cfg.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => (*min..=*max).contains(&n),
+            cpal::SupportedBufferSize::Unknown => true,
+        };
+        if ok {
+            config.buffer_size = cpal::BufferSize::Fixed(n);
+        } else {
+            eprintln!("audio: the device does not take a {n}-frame buffer ({:?}); its own it is", cfg.buffer_size());
+        }
+    }
+    let stream = match output_stream(&dev, &config, ring.clone()) {
+        Ok(s) => s,
+        Err(e) if config.buffer_size != cpal::BufferSize::Default => {
+            eprintln!("audio: a {:?} buffer: {e}; the device's own it is", config.buffer_size);
+            config.buffer_size = cpal::BufferSize::Default;
+            output_stream(&dev, &config, ring)?
+        }
+        Err(e) => return Err(e),
+    };
+    eprintln!("audio: {} at {} Hz, {} channels, buffer {:?}", dev.name().unwrap_or_default(), config.sample_rate.0, config.channels, config.buffer_size);
     stream.play().map_err(|e| e.to_string())?;
     Ok(stream)
+}
+
+/// The output stream: the ring's 44.1 kHz frames, resampled to the device's rate.
+fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
+    let channels = config.channels as usize;
+    let step = 44_100.0 / config.sample_rate.0 as f64; // source frames per output frame
+    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
+    dev.build_output_stream(
+        config,
+        move |out: &mut [f32], _| {
+            let mut q = ring.q.lock().unwrap();
+            let mut starved = false;
+            for frame in out.chunks_mut(channels) {
+                pos += step;
+                while pos >= 1.0 {
+                    pos -= 1.0;
+                    cur = next;
+                    next = match (q.pop_front(), q.pop_front()) {
+                        (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
+                        _ => {
+                            starved = true;
+                            (0.0, 0.0)
+                        }
+                    };
+                }
+                let f = pos as f32;
+                let (l, r) = (cur.0 + (next.0 - cur.0) * f, cur.1 + (next.1 - cur.1) * f);
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = if c % 2 == 0 { l } else { r };
+                }
+            }
+            if starved && ring.started.load(Ordering::Relaxed) {
+                ring.underruns.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+        |e| eprintln!("audio: {e}"),
+        None,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
@@ -581,10 +759,127 @@ fn script_keys(m: &mut Machine) -> bool {
     true
 }
 
+/// A frame every 16 ms: 62.5 fps, what tools/bench_video.sh muxes at.
+const FRAME_MS: u64 = 16;
+
+/// `--record`: the panel (or the LCD) every 16 ms and the audio of a --shot run, as numbered
+/// PPMs plus audio.raw in a directory, or (`-`) the PPMs as one stream on stdout with
+/// audio.raw in work/. The panel art is rasterized once; one buffer serves every frame.
+struct Recorder {
+    sink: RecSink,
+    audio: std::io::BufWriter<std::fs::File>,
+    audio_path: String,
+    lcd_only: bool,
+    frame: u64,
+    /// when the next frame is due (ms of firmware time)
+    next_ms: u64,
+    base: Vec<u32>,
+    w: usize,
+    h: usize,
+    buf: Vec<u32>,
+}
+
+enum RecSink {
+    Dir(String),
+    Stream(Box<dyn std::io::Write>),
+}
+
+impl Recorder {
+    fn new(target: &str, lcd_only: bool, board: fm1_soc::Board, theme: &panel::Theme) -> std::io::Result<Self> {
+        let (sink, audio_path) = if target == "-" {
+            std::fs::create_dir_all("work")?;
+            (RecSink::Stream(Box::new(std::io::BufWriter::new(std::io::stdout()))), "work/audio.raw".to_string())
+        } else {
+            std::fs::create_dir_all(target)?;
+            (RecSink::Dir(target.to_string()), format!("{target}/audio.raw"))
+        };
+        let audio = std::io::BufWriter::new(std::fs::File::create(&audio_path)?);
+        let (base, w, h) = panel_base(board, theme);
+        Ok(Self { sink, audio, audio_path, lcd_only, frame: 0, next_ms: 0, buf: vec![0; w * h], base, w, h })
+    }
+
+    /// The audio: silence from boot until the firmware started its DMA, then all it played.
+    fn finish(mut self, soc: &Soc) -> std::io::Result<String> {
+        use std::io::Write;
+        let pad = leading_silence(soc.periph.audio_frames_so_far(), soc.periph.audio.len());
+        self.audio.write_all(&vec![0u8; pad * 4])?;
+        for s in &soc.periph.audio {
+            self.audio.write_all(&s.to_le_bytes())?;
+        }
+        self.audio.flush()?;
+        if let RecSink::Stream(w) = &mut self.sink {
+            w.flush()?;
+        }
+        let frames = match &self.sink {
+            RecSink::Dir(dir) => format!("{} frames -> {dir}/", self.frame),
+            RecSink::Stream(_) => format!("{} frames on stdout", self.frame),
+        };
+        Ok(format!("recorded {frames} + {}", self.audio_path))
+    }
+}
+
+/// Stereo frames of silence before the firmware's first audio: the DAC clock has counted
+/// `frames` I2S frames since boot, the firmware has made `samples` / 2 of them.
+fn leading_silence(frames: u64, samples: usize) -> usize {
+    (frames as usize).saturating_sub(samples / 2)
+}
+
+/// One frame: the panel with the keys the script holds (the SMK-37: its own keys and LEDs),
+/// or the LCD alone. The audio stays in the machine until the end (Recorder::finish).
+fn record_frame(m: &mut Machine, rec: &mut Recorder, theme: &panel::Theme) {
+    let leds = m.soc.periph.led_take();
+    let smk_leds = m.soc.periph.smk.led_take();
+    record_frame_leds(m, rec, &leds, &smk_leds, theme);
+}
+
+/// `record_frame` with the LEDs' on-fractions given: the tail's frames peek at them, leaving
+/// the window to the final panel.
+fn record_frame_leds(m: &Machine, rec: &mut Recorder, leds: &[f32; 41], smk_leds: &[f32; fm1_soc::smk::NLED], theme: &panel::Theme) {
+    use std::io::Write;
+    let ppm = if rec.lcd_only {
+        lcd_ppm(&m.soc.lcd.fb)
+    } else {
+        let down = m.soc.periph.keys_down;
+        render_panel(m, &rec.base, &down, leds, smk_leds, &[0; 7], &mut rec.buf, theme);
+        panel_ppm(&rec.buf, rec.w, rec.h)
+    };
+    match &mut rec.sink {
+        RecSink::Dir(dir) => std::fs::write(format!("{dir}/{:06}.ppm", rec.frame), ppm).expect("write frame PPM"),
+        RecSink::Stream(w) => w.write_all(&ppm).expect("write the frame to stdout"),
+    }
+    rec.frame += 1;
+    rec.next_ms = rec.frame * FRAME_MS;
+}
+
+/// The last 40 ms of a shot, an instruction at a time: how many ran, and how many of them in
+/// ISRs. The frames due in them are recorded too; they peek at the LEDs' on-fractions, so the
+/// window the final panel reports stays the whole 40 ms.
+fn run_tail(m: &mut Machine, ms: u64, mut rec: Option<&mut Recorder>, theme: &panel::Theme) -> Result<(u64, u64), String> {
+    let (mut in_isr, mut total) = (0u64, 0u64);
+    while m.soc.periph.ms() < ms {
+        if let Some(r) = rec.as_deref_mut() {
+            if m.soc.periph.ms() >= r.next_ms {
+                let leds = m.soc.periph.led_peek();
+                let smk_leds = m.soc.periph.smk.led_peek();
+                record_frame_leds(m, r, &leds, &smk_leds, theme);
+            }
+        }
+        m.run(1)?;
+        total += 1;
+        if !m.cpu.irq_levels.is_empty() {
+            in_isr += 1;
+        }
+    }
+    Ok((in_isr, total))
+}
+
 fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
+    if o.record.as_deref() == Some("-") {
+        REPORTS_TO_STDERR.store(true, Ordering::Relaxed);
+    }
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => return eprintln!("cannot read {}: {e}", o.bin),
+        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_NO_SKIP").is_ok() {
@@ -613,6 +908,13 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let want_skip = m.soc.periph.skip_idle;
     m.soc.periph.skip_idle = want_skip && skip_from == 0;
     let mut usb_sends = usb_script();
+    let mut rec = o.record.as_deref().map(|target| {
+        Recorder::new(target, o.lcd_only, m.soc.board, theme).unwrap_or_else(|e| {
+            eprintln!("--record {target}: {e}");
+            std::process::exit(1);
+        })
+    });
+
     // FM1_TPROF=PATH,FROM_MS,TO_MS: time-weighted PC samples of both cores (every 8 cycles,
     // one instruction at a time) and the flash cache's misses by line, into PATH
     let tprof: Option<(String, u64, u64)> = std::env::var("FM1_TPROF").ok().and_then(|v| {
@@ -658,9 +960,15 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         }
         if let Err(e) = m.run(100_000) {
             usb_audio_save(&m);
-            return halted(&e);
+            halted(&e);
+            std::process::exit(1);
         }
         usb_headless(&mut m, &mut usb_sends);
+        if let Some(r) = &mut rec {
+            if m.soc.periph.ms() >= r.next_ms {
+                record_frame(&mut m, r, theme);
+            }
+        }
     }
     if o.usb {
         let u = &m.soc.usb;
@@ -670,18 +978,17 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         usb_audio_save(&m);
     }
     println!("irq levels at the end: {:?}, ie {}, skipped {} cycles", m.cpu.irq_levels, m.cpu.ie, m.soc.periph.skipped);
+    // (the LEDs' on-fractions from here: the last 40 ms, on either board, recorded or not)
     let _ = m.soc.periph.led_take();
-    let (mut in_isr, mut total) = (0u64, 0u64);
-    while m.soc.periph.ms() < ms {
-        if let Err(e) = m.run(1) {
+    let _ = m.soc.periph.smk.led_take();
+    let (in_isr, total) = match run_tail(&mut m, ms, rec.as_mut(), theme) {
+        Ok(v) => v,
+        Err(e) => {
             usb_audio_save(&m);
-            return halted(&e);
+            halted(&e);
+            std::process::exit(1);
         }
-        total += 1;
-        if !m.cpu.irq_levels.is_empty() {
-            in_isr += 1;
-        }
-    }
+    };
     println!(
         "last 40 ms: {:.0}% of instructions in ISRs = {:.1} M ISR instructions per second (clock {} MHz)",
         100.0 * in_isr as f64 / total.max(1) as f64,
@@ -734,14 +1041,26 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         println!("SMK-37 pads ({} frames): {}", p.pad_frames, pads.join(" "));
     }
     let lit: Vec<usize> = (0..41).filter(|&i| leds[i] > 0.01).collect();
-    match write_panel(&mut m, &down, &leds, "work/panel.ppm", theme) {
+    let panel_path = if o.lcd_only { "work/lcd.ppm" } else { "work/panel.ppm" };
+    let panel_res = if o.lcd_only {
+        write_lcd(&m.soc.lcd.fb, panel_path)
+    } else {
+        write_panel(&mut m, &down, &leds, panel_path, theme)
+    };
+    match panel_res {
         Ok(()) => {
             let a = &m.soc.periph.audio;
             let tail = &a[a.len().saturating_sub(44_100)..];
             let peak = tail.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
-            println!("work/panel.ppm at {} ms; LEDs lit: {lit:?}; audio peak over the last 0.5 s: {peak}", m.soc.periph.ms())
+            println!("{panel_path} at {} ms; LEDs lit: {lit:?}; audio peak over the last 0.5 s: {peak}", m.soc.periph.ms())
         }
-        Err(e) => eprintln!("work/panel.ppm: {e}"),
+        Err(e) => eprintln!("{panel_path}: {e}"),
+    }
+    if let Some(rec) = rec {
+        match rec.finish(&m.soc) {
+            Ok(what) => println!("{what}"),
+            Err(e) => { eprintln!("audio.raw: {e}"); std::process::exit(1); },
+        }
     }
     save_flash(&m, o.flash.as_ref());
 }
@@ -875,21 +1194,48 @@ fn dump_ram(m: &mut Machine) {
     }
 }
 
-/// The panel as the machine shows it now, keys `down` held and `leds` lit, as a PPM file.
-fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str, theme: &panel::Theme) -> std::io::Result<()> {
-    let st = panel::State {
-        lcd: &m.soc.lcd.fb,
-        enc_clicks: &[0, 0, 0, 3, -2, 0, 5],
-        pot: m.soc.periph.adc_value[4],
-        down,
-        leds,
-        turning: &[0, 0, 0, 0, 0, 0, 0, 0],
-    };
-    let (pw, ph) = if m.soc.board == fm1_soc::Board::Smk37 { (panel_smk::W, panel_smk::H) } else { (W, H) };
-    let mut buf = vec![0u32; pw * ph];
+/// RGB565 (the LCD's pixels) to 8 bits per channel, the low bits filled from the high ones.
+fn rgb565_to_rgb888(px: u16) -> [u8; 3] {
+    let r = ((px >> 11) & 0x1f) as u8;
+    let g = ((px >> 5) & 0x3f) as u8;
+    let b = (px & 0x1f) as u8;
+    [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)]
+}
+
+/// A binary PPM: the P6 header, then `rgb` (3 bytes per pixel, rows top down).
+fn ppm(w: usize, h: usize, rgb: &[u8]) -> Vec<u8> {
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.extend_from_slice(rgb);
+    out
+}
+
+/// The 240x240 LCD as a PPM.
+fn lcd_ppm(fb: &[u16]) -> Vec<u8> {
+    let rgb: Vec<u8> = fb.iter().flat_map(|&px| rgb565_to_rgb888(px)).collect();
+    ppm(240, 240, &rgb)
+}
+
+/// A panel image (0xRRGGBB a pixel, `w` by `h`) as a PPM.
+fn panel_ppm(buf: &[u32], w: usize, h: usize) -> Vec<u8> {
+    let rgb: Vec<u8> = buf.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]).collect();
+    ppm(w, h, &rgb)
+}
+
+/// The board's panel art, rasterized, and its size.
+fn panel_base(board: fm1_soc::Board, theme: &panel::Theme) -> (Vec<u32>, usize, usize) {
+    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { (panel::base(theme), W, H) }
+}
+
+/// The LCD as the machine shows it now, as a PPM file.
+fn write_lcd(fb: &[u16], path: &str) -> std::io::Result<()> {
+    std::fs::write(path, lcd_ppm(fb))
+}
+
+/// The panel as the machine shows it now over its art `base` into `buf`: keys `down` held,
+/// `leds` lit (the SMK-37: its own keys, and `smk_leds`), the encoders at `enc_clicks`.
+fn render_panel(m: &Machine, base: &[u32], down: &[bool; 41], leds: &[f32; 41], smk_leds: &[f32; fm1_soc::smk::NLED], enc_clicks: &[i32; 7], buf: &mut [u32], theme: &panel::Theme) {
     if m.soc.board == fm1_soc::Board::Smk37 {
-        let p = &mut m.soc.periph.smk;
-        let leds = p.led_take();
+        let p = &m.soc.periph.smk;
         let (pads, force, faders) = (p.pads, std::array::from_fn(|i| p.analog(i as u8)), std::array::from_fn(|i| p.analog(16 + i as u8)));
         let mut sdown = [false; 64];
         sdown[..55].copy_from_slice(&p.down);
@@ -898,23 +1244,30 @@ fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str,
             enc_clicks: &[0; 8],
             turning: &[0; 8],
             down: &sdown,
-            leds: &leds,
+            leds: smk_leds,
             pads: &pads,
             pad_force: &force,
             faders: &faders,
             pitch: p.analog(fm1_soc::smk::ANALOG_PITCH),
             modw: p.analog(fm1_soc::smk::ANALOG_MOD),
         };
-        println!("SMK-37 button LEDs: {}", leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
-        panel_smk::draw(&mut buf, &panel_smk::base(), &st);
+        panel_smk::draw(buf, base, &st);
     } else {
-        panel::draw(&mut buf, &panel::base(theme), &st, theme);
+        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
+        panel::draw(buf, base, &st, theme);
     }
-    let mut ppm = format!("P6\n{pw} {ph}\n255\n").into_bytes();
-    for p in &buf {
-        ppm.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+}
+
+/// The panel as the machine shows it now, keys `down` held and `leds` lit, as a PPM file.
+fn write_panel(m: &mut Machine, down: &[bool; 41], leds: &[f32; 41], path: &str, theme: &panel::Theme) -> std::io::Result<()> {
+    let (base, w, h) = panel_base(m.soc.board, theme);
+    let smk_leds = m.soc.periph.smk.led_take();
+    if m.soc.board == fm1_soc::Board::Smk37 {
+        println!("SMK-37 button LEDs: {}", smk_leds.iter().enumerate().filter(|(_, &f)| f > 0.01).map(|(k, f)| format!("{k}:{f:.2}")).collect::<Vec<_>>().join(" "));
     }
-    std::fs::write(path, ppm)
+    let mut buf = vec![0u32; w * h];
+    render_panel(m, &base, down, leds, &smk_leds, &[0, 0, 0, 3, -2, 0, 5], &mut buf, theme);
+    std::fs::write(path, panel_ppm(&buf, w, h))
 }
 
 // ---------------------------------------------------------------- input --
@@ -988,9 +1341,24 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--theme NAME] [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+         [--theme NAME] [--latency MS] (12 on Windows, else 50)
+                                 audio queued ahead of the device to start with; it grows by itself
+                                 on underruns and back down after 10 s without one, no lower
+                                 than a level that underran
+         [--buffer FRAMES]       the audio device's buffer, if it takes one
+         [--exclusive]           Windows: the output in WASAPI exclusive mode, the device's shortest
+                                 period (lowest latency; other programs can't play on it meanwhile)
+         [--flash-chip p25q80|uc25hq80]
+                                 the FM-1's flash part: the stock Puya P25Q80 (85 60 14), or the
+                                 UC25HQ80 (B3 60 14) of units sold since autumn 2026
+         [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
+          --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
+                       from boot as DIR/audio.raw (44118 Hz stereo s16le; silence until the DMA starts)
+          --record -   the frames as one PPM stream on stdout (tools/bench_video.sh pipes it into ffmpeg),
+                       audio.raw in work/; the run's reports go to stderr then
+          --lcd-only   --shot, --record: the 240x240 LCD alone (work/lcd.ppm), not the panel
 env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted input (--bench, --shot;
                          times in ms; ^ releases, @VEL the velocity, eN an encoder's clicks, mHEX: MIDI
                          bytes into the DIN jack; @FILE: the script from a file)
@@ -1021,7 +1389,103 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
+/// A firmware package from a file dialog (Windows, macOS).
+#[cfg(any(windows, target_os = "macos"))]
+fn pick_firmware() -> Option<std::path::PathBuf> {
+    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
+}
+
+/// F4: pick another firmware package; the arguments to start again on it. The run then ends as
+/// on Esc (the emulation stopped, a WAV being recorded finished, MIDI and audio let go of) and
+/// [`restart`] starts the new one.
+fn open_another() -> Option<Vec<String>> {
+    #[cfg(any(windows, target_os = "macos"))]
+    if let Some(path) = pick_firmware() {
+        let now: Vec<String> = std::env::args().skip(1).collect();
+        let mut args = carried_over(&now);
+        args.push("--fwsc".into());
+        args.push(path.to_string_lossy().into_owned());
+        return Some(args);
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    eprintln!("F4: give the firmware on the command line here (--fwsc FILE)");
+    None
+}
+
+/// The options that carry over to another firmware: how it runs, not what it is. A firmware's
+/// own (`--flash`, its saves; `--syx`, its sounds; `--entry` and the rest) stay behind, so the
+/// new one never loads or overwrites the old one's flash.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn carried_over(args: &[String]) -> Vec<String> {
+    const WITH_VALUE: [&str; 7] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
+    const FLAGS: [&str; 3] = ["--usb", "--exclusive", "--midi-log"];
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if WITH_VALUE.contains(&a) && i + 1 < args.len() {
+            out.extend_from_slice(&args[i..i + 2]);
+            i += 2;
+            continue;
+        }
+        if FLAGS.contains(&a) {
+            out.push(args[i].clone());
+        }
+        i += 1;
+    }
+    out
+}
+
+/// F4's new run, once this one has stopped. On Unix it takes this process's place (the same
+/// terminal, Ctrl-C reaches it); on Windows this process waits for it and exits as it does.
+fn restart(args: &[String]) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => return eprintln!("F4: cannot start again: {e}"),
+    };
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let e = cmd.exec();
+        eprintln!("F4: cannot start again: {e}");
+    }
+    #[cfg(not(unix))]
+    match cmd.status() {
+        Ok(st) => std::process::exit(st.code().unwrap_or(1)),
+        Err(e) => eprintln!("F4: cannot start again: {e}"),
+    }
+}
+
+/// Started with a double-click, not from a terminal or a script: on Windows the program has a
+/// console of its own (no other process on it); on macOS launchd started it (Finder) and its
+/// input is no terminal.
+#[cfg(any(windows, target_os = "macos"))]
+fn double_clicked() -> bool {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        }
+        let mut ids = [0u32; 4];
+        // SAFETY: the buffer holds the count given
+        unsafe { GetConsoleProcessList(ids.as_mut_ptr(), ids.len() as u32) == 1 }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::IsTerminal;
+        extern "C" {
+            fn getppid() -> i32;
+        }
+        // SAFETY: getppid takes nothing and cannot fail
+        !std::io::stdin().is_terminal() && unsafe { getppid() } == 1
+    }
+}
+
 fn main() {
+    fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", buildinfo::version("fm1-live"));
         if let Some(w) = buildinfo::stale() {
@@ -1033,12 +1497,32 @@ fn main() {
         println!("{USAGE}");
         return;
     }
+    // started with nothing by a double-click: ask for a firmware package (from a terminal or a
+    // script: the usage, as before)
+    #[cfg(any(windows, target_os = "macos"))]
+    if std::env::args().len() == 1 && double_clicked() {
+        if let Some(path) = pick_firmware() {
+            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--fwsc").arg(&path).status());
+            // a firmware that would not load: its error stays readable, not gone with the console
+            let failed = match run {
+                Ok(st) if st.success() => None,
+                Ok(st) => Some(format!("fm1-live stopped ({st})")),
+                Err(e) => Some(format!("cannot start fm1-live: {e}")),
+            };
+            if let Some(why) = failed {
+                eprintln!("\n{why}. Press Enter to close.");
+                let _ = std::io::stdin().read_line(&mut String::new());
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let Some(o) = parse() else {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
-    if o.seed.is_some() && o.flaky_core1.is_none() {
-        eprintln!("error: --seed needs --flaky-core1 (it seeds its misreads)");
+    if let Err(e) = check_opts(&o) {
+        eprintln!("error: {e}");
         std::process::exit(2);
     }
     let theme = panel::Theme::try_by_name(&o.theme).unwrap_or_else(|| {
@@ -1052,7 +1536,7 @@ fn main() {
     if let Some(ms) = o.bench {
         if std::env::var("FM1_BENCH_THREAD").is_ok() {
             let o2 = Opts { bin: o.bin.clone(), ..o };
-            return std::thread::spawn(move || { high_priority(); bench(&o2, ms, theme) }).join().unwrap();
+            return std::thread::spawn(move || { let _p = high_priority(); bench(&o2, ms, theme) }).join().unwrap();
         }
         return bench(&o, ms, theme);
     }
@@ -1068,12 +1552,35 @@ fn main() {
     };
     let mut pot = m.soc.periph.adc_value[4];
 
-    let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0) });
-    let _stream = match start_audio(ring.clone()) {
-        Ok(s) => Some(s),
-        Err(e) => {
-            eprintln!("audio off: {e}");
-            None
+    let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
+    #[cfg(windows)]
+    let exclusive_on = o.exclusive
+        && match exclusive::start(ring.clone()) {
+            Ok(msg) => {
+                eprintln!("{msg}");
+                true
+            }
+            Err(e) => {
+                eprintln!("--exclusive: {e}; the shared output it is");
+                false
+            }
+        };
+    #[cfg(not(windows))]
+    let exclusive_on = {
+        if o.exclusive {
+            eprintln!("--exclusive: Windows only; the default output it is");
+        }
+        false
+    };
+    let _stream = if exclusive_on {
+        None
+    } else {
+        match start_audio(ring.clone(), o.buffer) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("audio off: {e}");
+                None
+            }
         }
     };
     let lcd = Arc::new(Mutex::new(vec![0u16; 240 * 240]));
@@ -1086,19 +1593,26 @@ fn main() {
     let _midi = midi_inputs(&o, &tx);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
+    // F3: a WAV of what the firmware plays, written as the emulation makes it
+    let recorder: Arc<Mutex<Option<wav::Wav>>> = Arc::new(Mutex::new(None));
 
-    let audio_ok = _stream.is_some();
+    let audio_ok = _stream.is_some() || exclusive_on;
     let emu = {
         let (ring, lcd, leds, pads, status, quit) = (ring.clone(), lcd.clone(), leds.clone(), pads.clone(), status.clone(), quit.clone());
         let flash = o.flash.clone();
+        let recorder = recorder.clone();
+        let floor_ms = o.latency_ms;
         std::thread::spawn(move || {
-            high_priority();
+            let _priority = high_priority();
             let start = Instant::now();
             let mut offset_ms = 0.0f64; // wall-clock time given up after falling behind
             let mut last_lcd = Instant::now();
             let mut last_stat = Instant::now();
             let (mut stat_emu, mut stat_wall) = (0u64, Instant::now());
             let mut usb_ports = UsbPorts::default();
+            let mut target = AudioTarget::new(floor_ms, Instant::now());
+            let mut underruns_seen = 0u64;
+            let mut audio_lost = false;
             while !quit.load(Ordering::Relaxed) {
                 while let Ok(a) = rx.try_recv() {
                     m.soc.periph.apply(&a);
@@ -1112,8 +1626,18 @@ fn main() {
                     offset_ms += real - emu_ms - LEAD_MS; // too far behind: resync, do not race
                 }
                 let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
-                let behind = if audio_ok && m.soc.periph.audio_halves > 0 {
-                    buffered < AUDIO_TARGET_MS
+                // an underrun: a little more queued from now on; a calm while: a little less
+                let u = ring.underruns.load(Ordering::Relaxed);
+                target.update(u > underruns_seen, Instant::now());
+                underruns_seen = u;
+                // the audio stream died (the exclusive one, a device unplugged): the clock paces
+                // the emulation from here, so it does not stop waiting for a device that is gone
+                if audio_ok && !audio_lost && ring.dead.load(Ordering::Relaxed) {
+                    audio_lost = true;
+                    offset_ms = start.elapsed().as_secs_f64() * 1000.0 - emu_ms;
+                }
+                let behind = if audio_ok && !audio_lost && m.soc.periph.audio_halves > 0 {
+                    buffered < target.ms
                 } else {
                     emu_ms < real + LEAD_MS
                 };
@@ -1127,6 +1651,19 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 if !m.soc.periph.audio.is_empty() {
+                    let stopped = {
+                        let mut r = recorder.lock().unwrap();
+                        if let Some(w) = r.as_mut() {
+                            w.write(&m.soc.periph.audio);
+                        }
+                        if r.as_ref().is_some_and(|w| w.error.is_some()) { r.take() } else { None }
+                    };
+                    // a failed write or the size limit: the take ends here, and says why
+                    if let Some(w) = stopped {
+                        if let Err(e) = w.finish() {
+                            eprintln!("recording: {e}");
+                        }
+                    }
                     let mut q = ring.q.lock().unwrap();
                     q.extend(m.soc.periph.audio.drain(..));
                     ring.started.store(true, Ordering::Relaxed);
@@ -1153,8 +1690,9 @@ fn main() {
                     let speed = (e - stat_emu) as f64 / stat_wall.elapsed().as_secs_f64() / 1000.0;
                     let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
                     *status.lock().unwrap() = format!(
-                        "{:.2}x real time | {} MHz | audio {:.0} ms buffered, {} underruns",
-                        speed, m.soc.periph.hz / 1_000_000, buffered, ring.underruns.load(Ordering::Relaxed)
+                        "{:.2}x real time | {} MHz | audio {:.0} ms queued (target {:.0}), {} underruns{}",
+                        speed, m.soc.periph.hz / 1_000_000, buffered, target.ms, ring.underruns.load(Ordering::Relaxed),
+                        if audio_lost { " | AUDIO STOPPED" } else { "" }
                     );
                     if e / 2000 != stat_emu / 2000 {
                         eprintln!("[{:5.1} s] {}", e as f64 / 1000.0, status.lock().unwrap());
@@ -1174,7 +1712,15 @@ fn main() {
         let _ = emu.join();
         return;
     }
-    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), W, H, WindowOptions::default()) {
+    // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
+    let ((ww, wh), at) = fit::start(W, H, None);
+    // (elsewhere the window stays as it was: minifb scales it for the display itself)
+    let opts = if cfg!(windows) {
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
+    } else {
+        WindowOptions::default()
+    };
+    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1184,6 +1730,10 @@ fn main() {
         }
     };
     win.set_target_fps(60);
+    if let Some((x, y)) = at {
+        win.set_position(x, y);
+    }
+    let mut fit = fit::Fit::new(W, H);
     let base = panel::base(theme);
     let mut buf = vec![0u32; W * H];
     let mut down = [false; 41];
@@ -1197,9 +1747,11 @@ fn main() {
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; Esc quits");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
 
-    while win.is_open() && !win.is_key_down(Key::Escape) {
+    // F4 picked another firmware: what to start once this run has ended
+    let mut next: Option<Vec<String>> = None;
+    while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
             enc_clicks[i] += clicks;
             turning[i] = 10;
@@ -1207,7 +1759,7 @@ fn main() {
         };
 
         // ---- mouse
-        let pos = win.get_mouse_pos(MouseMode::Clamp);
+        let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
@@ -1312,8 +1864,12 @@ fn main() {
                 Key::Up => turn(1, 1, &mut enc_clicks, &mut turning),
                 Key::Comma => turn(2, -1, &mut enc_clicks, &mut turning),
                 Key::Period => turn(2, 1, &mut enc_clicks, &mut turning),
+                Key::F4 => next = open_another(),
                 _ => {}
             }
+        }
+        if win.is_key_pressed(Key::F3, KeyRepeat::No) {
+            toggle_record(&recorder, &o.name);
         }
         for t in turning.iter_mut() {
             *t = t.saturating_sub(1);
@@ -1327,11 +1883,18 @@ fn main() {
             }
         }
         {
-            let fb = lcd.lock().unwrap();
+            // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
+            let fb = lcd.lock().unwrap().clone();
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme);
         }
-        if win.update_with_buffer(&buf, W, H).is_err() {
+        if let Some(w) = recorder.lock().unwrap().as_ref() {
+            let s = w.frames / 44_100;
+            panel::text(&mut buf, (W - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
+        }
+        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (W, H) };
+        let (frame, fw, fh) = fit.frame(&buf, ww, wh);
+        if win.update_with_buffer(frame, fw, fh).is_err() {
             break;
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
@@ -1341,6 +1904,50 @@ fn main() {
     }
     quit.store(true, Ordering::Relaxed);
     let _ = emu.join();
+    // the window closed while recording: the file keeps what was played, with its length
+    let last = recorder.lock().unwrap().take();
+    if let Some(w) = last {
+        match w.finish() {
+            Ok(p) => eprintln!("recorded {}", p.display()),
+            Err(e) => eprintln!("recording: {e}"),
+        }
+    }
+    // F4: the new firmware, now that this one has stopped, with the window, the MIDI inputs
+    // (WinMM's are one program's at a time) and the audio device let go of first
+    if let Some(args) = next {
+        drop(win);
+        drop(_midi);
+        drop(_stream);
+        restart(&args);
+    }
+}
+
+/// F3: start a WAV of the output (in the Music folder's fm1-emu), or finish the one being written.
+/// (The file is finished or created outside the lock, which the emulation thread takes for every
+/// block: a slow disk must not hold up the audio.)
+fn toggle_record(rec: &Mutex<Option<wav::Wav>>, name: &str) {
+    let taken = rec.lock().unwrap().take();
+    match taken {
+        Some(w) => match w.finish() {
+            Ok(p) => eprintln!("recorded {}", p.display()),
+            Err(e) => eprintln!("recording: {e}"),
+        },
+        None => match wav::Wav::create(name) {
+            Ok(w) => {
+                eprintln!("recording to {} (F3 stops)", w.path.display());
+                *rec.lock().unwrap() = Some(w);
+            }
+            Err(e) => eprintln!("recording: {e}"),
+        },
+    }
+}
+
+/// The mouse in the window, clamped to it. Not minifb's MouseMode::Clamp: in 0.28 it panics on a
+/// window of no size (minimized: `width - 1` is negative, and f32::clamp asserts min <= max).
+fn mouse_pos(win: &Window) -> Option<(f32, f32)> {
+    let (w, h) = win.get_size();
+    let (w, h) = ((w as f32 - 1.0).max(0.0), (h as f32 - 1.0).max(0.0));
+    win.get_mouse_pos(MouseMode::Pass).map(|(x, y)| (x.clamp(0.0, w), y.clamp(0.0, h)))
 }
 
 /// The SMK-37's window: its panel (panel_smk.rs), the mouse on its keys (velocity: how far down
@@ -1379,7 +1986,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, R SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let pressed = win.get_mouse_down(MouseButton::Left);
-        if let Some((mx, my)) = win.get_mouse_pos(MouseMode::Clamp) {
+        if let Some((mx, my)) = mouse_pos(&win) {
             // (the window may be resized: back to panel coordinates)
             let (ww, wh) = win.get_size();
             let (mx, my) = (mx * w as f32 / ww.max(1) as f32, my * h as f32 / wh.max(1) as f32);
@@ -1482,7 +2089,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             *t = t.saturating_sub(1);
         }
         {
-            let fb = lcd.lock().unwrap();
+            let fb = lcd.lock().unwrap().clone();
             let l = *leds.lock().unwrap();
             let pc = *pads.lock().unwrap();
             let st = panel_smk::State {
@@ -1506,5 +2113,193 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             win.set_title(&format!("SMK-37 · {} — {}", o.name, status.lock().unwrap()));
             last_title = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioTarget;
+    use std::time::{Duration, Instant};
+
+    /// The target over a run: `needs` ms keep the device fed; each look is a second apart.
+    fn run(t: &mut AudioTarget, t0: Instant, from_s: u64, to_s: u64, needs: f64) -> Vec<f64> {
+        let mut seen = Vec::new();
+        for s in from_s..to_s {
+            t.update(t.ms < needs, t0 + Duration::from_secs(s));
+            seen.push(t.ms);
+        }
+        seen
+    }
+
+    #[test]
+    fn the_target_settles_where_the_device_is_fed_and_stays() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(12.0, t0);
+        // a device that needs 20 ms (WASAPI shared: a 10 ms period and jitter)
+        let first = run(&mut t, t0, 0, 120, 20.0);
+        let settled = t.ms;
+        assert!(settled >= 20.0 && settled <= 24.0, "settled at {settled}: {first:?}");
+        // then an hour: no more underruns, no more probing below what it needs
+        let later = run(&mut t, t0, 120, 3720, 20.0);
+        assert!(later.iter().all(|&ms| ms >= 20.0), "went under 20: {:?}", later.iter().cloned().fold(f64::MAX, f64::min));
+        assert_eq!(later.last(), later.first(), "it still moves: {:?}", &later[..40]);
+    }
+
+    #[test]
+    fn a_burst_at_the_start_comes_back_down_in_minutes() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(12.0, t0);
+        // the JIT's warm-up: underruns all the way up to the cap
+        for s in 0..20 {
+            t.update(true, t0 + Duration::from_secs(s));
+        }
+        assert_eq!(t.ms, 80.0);
+        // then a device that is fine at 12 ms
+        let mut s = 20;
+        while t.ms > 12.0 {
+            s += 1;
+            t.update(false, t0 + Duration::from_secs(s));
+            assert!(s < 20 + 180, "still at {} ms after {} s", t.ms, s - 20);
+        }
+    }
+
+    #[test]
+    fn a_high_latency_stays_where_it_was_set() {
+        let t0 = Instant::now();
+        let mut t = AudioTarget::new(200.0, t0);
+        t.update(true, t0 + Duration::from_secs(1));
+        assert_eq!(t.ms, 200.0);
+    }
+
+    #[test]
+    fn f4_carries_over_how_it_runs_not_the_firmware() {
+        let a: Vec<String> = ["--fwsc", "a.fwsc", "--flash", "a.bin", "--mhz", "320", "--syx", "b.syx", "--usb",
+                              "--midi", "MPK", "--entry", "0x02000120", "--midi-ch", "2", "--latency", "20", "--flash-chip", "uc25hq80"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::carried_over(&a), ["--mhz", "320", "--usb", "--midi", "MPK", "--midi-ch", "2", "--latency", "20",
+                                              "--flash-chip", "uc25hq80"]);
+    }
+    use super::*;
+
+    #[test]
+    fn rgb565_expands_to_the_full_range() {
+        assert_eq!(rgb565_to_rgb888(0x0000), [0, 0, 0]);
+        assert_eq!(rgb565_to_rgb888(0xffff), [255, 255, 255]);
+        assert_eq!(rgb565_to_rgb888(0xf800), [255, 0, 0]);
+        assert_eq!(rgb565_to_rgb888(0x07e0), [0, 255, 0]);
+        assert_eq!(rgb565_to_rgb888(0x001f), [0, 0, 255]);
+        assert_eq!(rgb565_to_rgb888(0x8410), [132, 130, 132]);
+    }
+
+    #[test]
+    fn ppm_is_a_p6_header_then_the_bytes() {
+        let p = ppm(2, 1, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(&p[..11], b"P6\n2 1\n255\n");
+        assert_eq!(&p[11..], &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn lcd_ppm_is_240_by_240_rgb() {
+        let mut fb = vec![0u16; 240 * 240];
+        fb[0] = 0xf800;
+        let p = lcd_ppm(&fb);
+        assert_eq!(p.len(), "P6\n240 240\n255\n".len() + 240 * 240 * 3);
+        assert_eq!(&p[15..18], &[255, 0, 0]);
+    }
+
+    #[test]
+    fn panel_ppm_unpacks_0xrrggbb() {
+        let p = panel_ppm(&[0x112233, 0xaabbcc], 2, 1);
+        assert_eq!(&p[11..], &[0x11, 0x22, 0x33, 0xaa, 0xbb, 0xcc]);
+    }
+
+    #[test]
+    fn leading_silence_is_the_frames_before_the_dma_started() {
+        assert_eq!(leading_silence(7628, 7000 * 2), 628);
+        assert_eq!(leading_silence(1000, 0), 1000);
+        assert_eq!(leading_silence(1000, 1000 * 2), 0);
+    }
+
+    #[test]
+    fn leading_silence_never_underflows() {
+        assert_eq!(leading_silence(1000, 1200 * 2), 0);
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        std::iter::once("fm1-live").chain(a.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn record_needs_shot() {
+        let o = parse_args(args(&["--record", "frames"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--record", "frames", "--bench", "100"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn seed_needs_flaky_core1() {
+        let o = parse_args(args(&["--seed", "3", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_err());
+        let o = parse_args(args(&["--seed", "3", "--flaky-core1", "0.1", "--shot", "100"])).unwrap();
+        assert!(check_opts(&o).is_ok());
+    }
+
+    /// Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs); skipped without it.
+    #[test]
+    fn a_shot_records_the_key_it_plays_and_the_audio_starts_after_boot() {
+        let fwsc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        if !std::path::Path::new(fwsc).exists() {
+            return eprintln!("no {fwsc}: skipped");
+        }
+        let o = parse_args(args(&["--fwsc", fwsc, "--shot", "2000"])).unwrap();
+        let mut m = Machine::new(&o).unwrap();
+        let at = m.soc.periph.cycle_of_ms(1500);
+        m.soc.periph.script.push_back((at, Action::Key { id: 21, down: true }));
+        let dir = std::env::temp_dir().join(format!("fm1-live-test-{}", std::process::id()));
+        let theme = panel::Theme::by_name("default");
+        let mut rec = Recorder::new(&dir.to_string_lossy(), false, m.soc.board, theme).unwrap();
+        while m.soc.periph.ms() < 1600 {
+            if m.soc.periph.ms() >= rec.next_ms {
+                record_frame(&mut m, &mut rec, theme);
+            }
+            m.run(100_000).unwrap();
+        }
+        assert!(m.soc.periph.keys_down[21], "the scripted key is down");
+        assert!(!m.soc.periph.audio.is_empty(), "the firmware streams audio");
+        let pad = leading_silence(m.soc.periph.audio_frames_so_far(), m.soc.periph.audio.len());
+        let pad_ms = pad * 1000 / 44_100;
+        assert!((50..500).contains(&pad_ms), "the DMA started {pad_ms} ms after boot");
+        assert_eq!(rec.frame, 100, "a frame every 16 ms over 1600 ms");
+        assert!(dir.join("000099.ppm").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Needs reference/firmwares/felucca.fwsc; skipped without it.
+    #[test]
+    fn the_last_40_ms_of_a_shot_have_frames_too() {
+        let fwsc = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        if !std::path::Path::new(fwsc).exists() {
+            return eprintln!("no {fwsc}: skipped");
+        }
+        let o = parse_args(args(&["--fwsc", fwsc, "--shot", "2000"])).unwrap();
+        let mut m = Machine::new(&o).unwrap();
+        let dir = std::env::temp_dir().join(format!("fm1-live-tail-{}", std::process::id()));
+        let theme = panel::Theme::by_name("default");
+        let mut rec = Recorder::new(&dir.to_string_lossy(), false, m.soc.board, theme).unwrap();
+        // shot()'s main loop stops 40 ms short; its tail runs the rest an instruction at a time
+        while m.soc.periph.ms() + 40 < 2000 {
+            if m.soc.periph.ms() >= rec.next_ms {
+                record_frame(&mut m, &mut rec, theme);
+            }
+            m.run(100_000).unwrap();
+        }
+        let before = rec.frame;
+        run_tail(&mut m, 2000, Some(&mut rec), theme).unwrap();
+        assert_eq!(rec.frame, 125, "frames every 16 ms up to 1984 ms ({before} before the tail)");
+        assert!(dir.join("000124.ppm").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

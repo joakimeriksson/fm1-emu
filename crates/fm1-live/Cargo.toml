@@ -11,3 +11,11 @@ fm1-soc = { path = "../fm1-soc" }
 minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"
+
+# --exclusive: WASAPI exclusive mode
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.26"
+
+# a file picker for the firmware (started with no arguments, F4)
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+rfd = "0.15"

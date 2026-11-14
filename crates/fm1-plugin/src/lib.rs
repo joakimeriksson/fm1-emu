@@ -17,6 +17,8 @@ use std::sync::{mpsc, Arc, Mutex};
 mod editor;
 pub mod engine;
 pub mod savefile;
+#[path = "../../fm1-live/src/wav.rs"]
+pub mod wav;
 #[path = "../../fm1-live/src/panel.rs"]
 #[allow(dead_code)]
 mod panel;
@@ -42,6 +44,13 @@ pub struct Sector {
     pub data: Arc<Vec<u8>>,
 }
 
+/// The recorder: the file being written and its frames, and what last happened (for the status bar).
+#[derive(Default)]
+pub struct RecView {
+    pub file: Option<(std::path::PathBuf, u64)>,
+    pub msg: Option<String>,
+}
+
 #[derive(Params)]
 pub struct Fm1Params {
     #[persist = "editor-state"]
@@ -50,6 +59,8 @@ pub struct Fm1Params {
     pub firmware: Mutex<Firmware>,
     #[persist = "flash"]
     pub flash: Mutex<Vec<Sector>>,
+    /// The recorder, as the machine's thread reports it to the window (not saved).
+    pub rec: Mutex<RecView>,
 
     /// The MASTER pot.
     #[id = "master"]
@@ -152,6 +163,7 @@ impl Default for Fm1Params {
             editor_state: EguiState::from_size(960, 660),
             firmware: Mutex::new(Firmware::default()),
             flash: Mutex::new(Vec::new()),
+            rec: Mutex::new(RecView::default()),
             master: FloatParam::new("Master", 900.0 / 1023.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))

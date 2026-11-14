@@ -151,6 +151,8 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   - a key or button is held while pressed, and a drag across the keys plays a glissando;
   - a knob turns when you drag it up or down, or scroll over it;
   - on the SMK-37 the pads, faders and wheels work too.
+- **Record** writes the FM-1's output to a WAV (44.1 kHz, 16-bit) in your Music folder's
+  `fm1-emu`, until you press Stop.
 - **The status bar** shows the emulation's speed against real time, and counts the frames that
   came late when the computer couldn't keep up.
 - **Lead** is how far ahead of the host the firmware runs beyond one host block, 23, 12 or

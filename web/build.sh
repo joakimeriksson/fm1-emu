@@ -32,4 +32,11 @@ cp web/index.html web/style.css web/main.js web/persistence.js web/tryout.js web
 mkdir -p "$OUT/smk37"
 cp web/smk37/index.html web/smk37/firmwares.json web/smk37/og.png "$OUT/smk37/"
 cp web/style.css web/main.js web/persistence.js web/tryout.js web/worklet.js web/jit.js web/fwsc.js "$OUT/fm1_web.wasm" "$OUT/smk37/"
+# the release in the pages (the header's version, what's new, the downloads): from Cargo.toml's
+# version and its notes, docs/releases/v<version>.md; without node the pages keep the committed copy
+if command -v node >/dev/null; then
+  node web/release.mjs "$OUT/index.html" "$OUT/smk37/index.html"
+else
+  echo "warning: no node; the pages keep the release blocks committed in web/index.html" >&2
+fi
 ls -la "$OUT" | grep -v "^total"

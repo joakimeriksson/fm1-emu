@@ -270,6 +270,10 @@ pub fn base() -> Vec<u32> {
             text(&mut b, (x + w / 2) as f32, if black { 546.0 } else { 557.0 }, s, 1, INK_DIM);
         }
     }
+    // the buttons' shadows
+    for (_, _, x, y, w, h) in buttons() {
+        rrect(&mut b, x as f32 + 1.0, y as f32 + 3.0, w as f32, h as f32, 7.0, 0x09090a, 0x09090a);
+    }
     b
 }
 
@@ -406,7 +410,6 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
         let led = ((st.leds[(id - BTN0) as usize] - 0.15) / 0.35).clamp(0.0, 1.0);
         let lc = if name == "BT" { LED_BT } else { LED };
         let off = if down { 2.0 } else { 0.0 };
-        rrect(buf, x + 1.0, y + 3.0, w, h, 7.0, 0x09090a, 0x09090a);
         if led > 0.0 {
             rrect(buf, x - 2.0, y - 2.0 + off, w + 4.0, h + 4.0, 9.0, mix(BODY_TOP, lc, led * 0.45), mix(BODY_BOT, lc, led * 0.35));
         }

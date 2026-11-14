@@ -3,6 +3,7 @@
 #   - macOS (Apple silicon): the plugin (AU, VST3, CLAP; tested, validated, tools/package_plugin.sh)
 #     and fm1-live / fm1-emu (tools/package_apps.sh)
 #   - Windows x86-64: the plugin (VST3, CLAP; tested, validated, tools/package_plugin.ps1)
+#     and fm1-live / fm1-emu (tools/package_apps.sh, a zip)
 #   - Linux arm64 and x86-64: fm1-live / fm1-emu
 # each built, smoke-tested on FM-1 SID's package, and published as one GitHub Release: the notes
 # file, then the merged pull requests GitHub lists. Run by hand (workflow_dispatch), or on a pull
@@ -127,6 +128,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true      # fm1-sid/: joakimeriksson/fm1-sid
 
       - uses: actions/setup-node@v4
         with:
@@ -160,10 +163,21 @@ jobs:
         shell: pwsh
         run: tools/package_plugin.ps1
 
+      - name: fm1-live and fm1-emu
+        shell: bash
+        run: |
+          cargo build --release --locked -p fm1-live -p fm1-emu
+          target/release/fm1-live --version
+          target/release/fm1-live --fwsc fm1-sid/web/sidplayer.fwsc --bench 3000 | tee bench.txt
+          grep -q "ms emulated" bench.txt
+          tools/package_apps.sh windows-x86_64
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64
-          path: target/plugin/release/*.zip
+          path: |
+            target/plugin/release/*.zip
+            target/release-apps/*.zip
 
   linux:
     strategy:
@@ -222,8 +236,8 @@ jobs:
         run: |
           v=${GITHUB_REF_NAME#v}
           ls -laR dist
-          # the plugin's two zips (macOS, Windows) and three fm1-emu archives, as files (not folders)
+          # the plugin's two zips (macOS, Windows) and four fm1-emu archives (three .tar.gz, the Windows .zip), as files (not folders)
           files=$(find dist -type f \( -name '*.zip' -o -name '*.tar.gz' \))
-          test "$(echo "$files" | wc -l)" -eq 5 || { echo "expected 5 files"; exit 1; }
+          test "$(echo "$files" | wc -l)" -eq 6 || { echo "expected 6 files"; exit 1; }
           gh release create "$GITHUB_REF_NAME" $files --title "fm1-emu $v" \
             --notes-file "docs/releases/v$v.md" --generate-notes

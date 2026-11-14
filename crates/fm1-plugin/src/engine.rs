@@ -44,6 +44,8 @@ pub enum Cmd {
     Vel(u32),
     /// The host's block in the machine's frames: the ring's lead is that plus the Lead parameter.
     Block(usize),
+    /// Start a WAV of the output, or finish the one being written.
+    Record,
 }
 
 /// What the editor shows: the screen, the LEDs and how the machine is doing.
@@ -205,6 +207,7 @@ pub fn run(
     let mut active_pkg: Option<Arc<Vec<u8>>> = None;
     let mut pending = Vec::new();
     let (mut speed_t, mut speed_ms, mut busy, mut starved0) = (Instant::now(), 0u64, Duration::ZERO, 0u64);
+    let mut rec: Option<crate::wav::Wav> = None;
     while !shared.quit.load(Ordering::Relaxed) {
         while let Ok(c) = cmds.try_recv() {
             let (c, prepared, loaded) = match c {
@@ -261,6 +264,7 @@ pub fn run(
                     }
                 }
                 Cmd::Block(b) => block = b,
+                Cmd::Record => record(&mut rec, &params),
             }
         }
         // the ring's lead: the host's block and the Lead parameter, as the window sets it
@@ -333,6 +337,13 @@ pub fn run(
             mm.run(20_000);
             busy += t0.elapsed();
             let a = std::mem::take(&mut mm.soc.periph.audio);
+            if let Some(w) = rec.as_mut() {
+                w.write(&a);
+                // a failed write or the size limit: the take ends here, and the window says why
+                if w.error.is_some() {
+                    record(&mut rec, &params);
+                }
+            }
             for f in a.chunks_exact(2) {
                 // (a full ring drops the frame: the host has stopped taking them)
                 if out.push([f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]).is_ok() {
@@ -342,6 +353,7 @@ pub fn run(
         }
         if last_view.elapsed() >= Duration::from_millis(30) {
             last_view = Instant::now();
+            params.rec.lock().unwrap().file = rec.as_ref().map(|w| (w.path.clone(), w.frames));
             let mut v = shared.view.lock().unwrap();
             v.lcd.copy_from_slice(&mm.soc.lcd.fb);
             v.leds = if mm.soc.board == Board::Smk37 {
@@ -374,6 +386,35 @@ pub fn run(
             }
         }
     }
+    // the plugin closed while recording: the file keeps what was played, with its length
+    if let Some(w) = rec.take() {
+        let _ = w.finish();
+    }
+}
+
+/// Start a WAV of the output (in the Music folder's fm1-emu, named after the firmware), or
+/// finish the one being written; what happened goes to the window.
+fn record(rec: &mut Option<crate::wav::Wav>, params: &crate::Fm1Params) {
+    let msg = match rec.take() {
+        Some(w) => match w.finish() {
+            Ok(p) => format!("Recorded {}", p.display()),
+            Err(e) => format!("Recording: {e}"),
+        },
+        None => {
+            let name = params.firmware.lock().unwrap().name.clone();
+            match crate::wav::Wav::create(if name.is_empty() { "fm1" } else { &name }) {
+                Ok(w) => {
+                    let m = format!("Recording to {}", w.path.display());
+                    *rec = Some(w);
+                    m
+                }
+                Err(e) => format!("Recording: {e}"),
+            }
+        }
+    };
+    let mut r = params.rec.lock().unwrap();
+    r.file = rec.as_ref().map(|w| (w.path.clone(), w.frames));
+    r.msg = Some(msg);
 }
 
 fn apply(m: &mut Option<Machine>, a: Action) {

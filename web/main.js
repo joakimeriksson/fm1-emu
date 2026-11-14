@@ -36,7 +36,16 @@ for (const f of catalog.firmwares) if (f.hub && !byId.has(f.hub)) byId.set(f.hub
 // <head> set data-embed before the first paint; style.css hides the rest). It does not change the
 // firmware this browser starts with on the full page.
 const EMBED = document.documentElement.hasAttribute("data-embed");
-let fw = byId.get(params.get("fw")) || byId.get(stored(DEV.key + "fw")) || byId.get(catalog.default) || catalog.firmwares[0];
+// ?chip=uc25hq80 (or new): the FM-1 with the flash part of units sold since autumn 2026 (UC25HQ80,
+// JEDEC B3 60 14) in place of the stock Puya P25Q80: a firmware that knows only the Puya keeps its
+// saves in RAM there, as on those units. For firmware authors to try theirs.
+const CHIP = ["uc25hq80", "new"].includes((params.get("chip") || "").toLowerCase()) ? "uc25hq80" : "p25q80";
+// ?package=URL: a package on another site (https), for a page that lists firmware this one does not
+// (mutant.cloud's "Try", other hubs, older versions); &name= names it. It plays like a catalog entry,
+// its saved flash kept by its package as every firmware's is, and is not added to the list for later.
+const linked = linkedFirmware(params);
+if (linked) byId.set(linked.id, linked);
+let fw = linked || byId.get(params.get("fw")) || byId.get(stored(DEV.key + "fw")) || byId.get(catalog.default) || catalog.firmwares[0];
 // ?flash= / ?script=: a try-out of that firmware (web/tryout.js), from this site's own files: a session of its
 // own (this browser's saved flash neither loaded nor saved), started at once where the browser lets it play
 let tryOut = null, tryOutError = null;
@@ -48,6 +57,17 @@ try {
 function tell(state, text = "") {
   if (typeof window === "undefined" || window.parent === window) return;
   try { window.parent.postMessage({ source: "fm1-emu", type: "tryout", state, text }, location.origin); } catch { /* not ours */ }
+}
+function linkedFirmware(q) {
+  let url;
+  try { url = new URL(q.get("package")); } catch { return null; }
+  if (url.protocol !== "https:") return null;
+  const raw = url.pathname.split("/").pop() || url.host;
+  let file = raw;
+  try { file = decodeURIComponent(raw); } catch { /* a malformed escape: the name as written */ }
+  file = file.replace(/\.fwsc$/i, "");
+  return { id: "link", name: q.get("name") || file, version: "", author: "", license: "", about: "",
+    repo: url.href, package: url.href, link: true };
 }
 function endTryOut() {
   if (!tryOut) return;
@@ -129,6 +149,7 @@ if (newcomers.length) {
   for (const f of newcomers) group.append(new Option(`${f.name} ${f.version}`, f.id));
   fwSel.append(group);
 }
+if (linked) fwSel.add(new Option(`${linked.name} (from a link)`, linked.id), 0);
 for (const c of new Set([...CLOCKS, mhz].sort((a, b) => a - b))) mhzSel.add(new Option(`${c} MHz`, c));
 fwSel.value = fw.id;
 mhzSel.value = mhz;
@@ -232,7 +253,7 @@ async function keptEntry(id) {
 async function packageOf(f) {
   if (f.id === "local") return { bytes: f.bytes, url: null };
   if (packages.has(f.id)) return packages.get(f.id);
-  const kept = await keptEntry(f.id);
+  const kept = !f.link && await keptEntry(f.id);   // (a link's entry is whichever link ran last)
   if (kept) {
     const got = { bytes: kept.package, url: kept.url };
     packages.set(f.id, got);
@@ -285,6 +306,8 @@ function showFirmware() {
   let parts;
   if (fw.id === "local") {
     parts = [b, "Opened from this computer; kept with its saved flash after Start."];
+  } else if (fw.link) {
+    parts = [b, "From a link: not in this page's list, so it may not run here."];
   } else if (fw.byo) {
     const dl = document.createElement("a");
     dl.href = fw.download;
@@ -331,8 +354,10 @@ function showFirmware() {
   const q = new URLSearchParams(location.search);
   q.set("fw", fw.id);
   q.set("mhz", mhz);
+  if (!fw.link) { q.delete("package"); q.delete("name"); }
   history.replaceState(null, "", `?${q}`);
   const full = new URLSearchParams(fw.id === "local" ? "" : { fw: fw.id });
+  if (fw.link) for (const k of ["package", "name"]) if (q.has(k)) full.set(k, q.get(k));
   if (tryOut) for (const k of ["flash", "script"]) if (q.has(k)) full.set(k, q.get(k));
   document.getElementById("fullpage").href = `./${String(full) ? `?${full}` : ""}`;
 }
@@ -342,7 +367,7 @@ fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
   endTryOut();
   loadedUrl = null;
-  if (!EMBED) store(DEV.key + "fw", fw.id);
+  if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
   showFirmware();
   fwSel.blur();                 // back to playing from the keyboard
   if (node) boot();
@@ -768,7 +793,8 @@ const perf = {
     const loads = this.loads.map((l) => Math.round(100 * l)), jit = this.jit;
     return [
       `FM-1 emulator report (${location.origin}${location.pathname})`,
-      `firmware: ${fw.id} ${fw.version || ""} · clock ${mhz} MHz · JIT ${params.get("jit") === "0" ? "off" : "on"}`,
+      `firmware: ${fw.id} ${fw.version || ""} · clock ${mhz} MHz · JIT ${params.get("jit") === "0" ? "off" : "on"}` +
+        (CHIP === "p25q80" ? "" : ` · flash ${CHIP}`),
       `browser: ${navigator.userAgent}`,
       `cores: ${navigator.hardwareConcurrency ?? "?"} · memory: ${navigator.deviceMemory ?? "?"} GB`,
       `audio: ${ac ? `${ac.sampleRate} Hz, buffer "${latency}", base latency ${r(1000 * (ac.baseLatency ?? NaN), 1)} ms, ` +
@@ -945,7 +971,7 @@ function boot(options = {}) {
       node.port.postMessage({ type: "boot", seq, wasm: wasm.slice(0), package: got.bytes.slice().buffer,
         sectors: packSectors(sectors).buffer, syx: importedBank ? importedBank.slice().buffer : null,
         script: trying?.script ? new TextEncoder().encode(trying.script).buffer : null,
-        mhz: clock, jit: params.get("jit") !== "0",
+        mhz: clock, jit: params.get("jit") !== "0", chip: CHIP,
         // (?ahead=0: each quantum emulates only for its own frames, as before the even pace)
         ahead: params.has("ahead") ? Number(params.get("ahead")) : undefined });
       status.textContent = `booting ${f.name}…`;

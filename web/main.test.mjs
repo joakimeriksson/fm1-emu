@@ -292,3 +292,24 @@ test("the Hub's newcomers come last, marked as not yet run here, and ?fw= picks 
   const q = await page(storage(), '?fw=c', '', false, { hubNewcomers: async () => [] });
   assert.equal(q.api.fw.id, 'a', 'the default');
 });
+test('?package= plays a package from a link, named by &name=, and a reload fetches the link again', async () => {
+  const fetched = [];
+  const fetchPackage = async f => { fetched.push(f.package); return { bytes: new Uint8Array(960).fill(f.package.length % 250), url: f.package }; };
+  const url = 'https://mutant.cloud/dl/fomajam/fomajam-1.0.fwsc';
+  const p = await page(storage(), `?package=${encodeURIComponent(url)}&name=Fomajam`, '', false, { fetchPackage });
+  assert.equal(p.api.fw.id, 'link');
+  assert.equal(p.api.fw.name, 'Fomajam');
+  assert.equal(p.elements.get('fw').options[0].value, 'link');
+  assert.match(p.location.search, /package=/);
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  assert.deepEqual(fetched, [url]);
+  // another link on the same browser: its own package, not the last link's kept one
+  const other = 'https://example.test/other.fwsc';
+  const q = await page(p.disk, `?package=${encodeURIComponent(other)}`, '', false, { fetchPackage });
+  assert.equal(q.api.fw.name, 'other');
+  await q.api.startAudio(); await q.api.boot();
+  assert.deepEqual(fetched, [url, other]);
+  // not https: ignored, the page as without it
+  const r = await page(storage(), '?package=http%3A%2F%2Fexample.test%2Fx.fwsc');
+  assert.equal(r.api.fw.id, 'a');
+});

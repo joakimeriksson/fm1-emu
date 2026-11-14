@@ -44,7 +44,7 @@ pub mod usb;
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
 pub use ram::Ram;
-pub use spiflash::{SpiFlash, FLASH_SIZE};
+pub use spiflash::{FlashPart, SpiFlash, FLASH_SIZE};
 
 pub const XIP_BASE: u32 = 0x0200_0000;
 pub const RAM_BASE: u32 = 0x01c0_0000;
@@ -254,6 +254,8 @@ impl Board {
 
 pub struct Soc {
     pub board: Board,
+    /// The FM-1's flash part (its JEDEC id; `set_flash_part`): the stock Puya unless asked.
+    pub flash_part: spiflash::FlashPart,
     /// The BT baseband's window base (0x2FC44), as the firmware set it.
     bt_window: u32,
     pub xip: Vec<u8>,
@@ -505,6 +507,7 @@ impl Soc {
     pub fn new(ram_size: usize, xip: Vec<u8>) -> Self {
         let mut soc = Self {
             board: Board::Fm1,
+            flash_part: spiflash::FlashPart::P25q80,
             bt_window: BT_WINDOW_BASE,
             xip,
             ram: Ram::new(ram_size),
@@ -728,13 +731,18 @@ impl Soc {
         }
     }
 
-    /// Wire the chip into `board`'s panel (and its flash chip's id).
+    /// Wire the chip into `board`'s panel (and its flash chip's id: the SMK-37 Pro's own part,
+    /// the FM-1's `flash_part`).
     pub fn set_board(&mut self, board: Board) {
         self.board = board;
         self.periph.board = board;
-        if board == Board::Smk37 {
-            self.flash.jedec = [0xeb, 0x60, 0x14];
-        }
+        self.flash.jedec = if board == Board::Smk37 { [0xeb, 0x60, 0x14] } else { self.flash_part.jedec() };
+    }
+
+    /// Which part the FM-1's flash is (the SMK-37 Pro keeps its own): before or after the boot.
+    pub fn set_flash_part(&mut self, part: spiflash::FlashPart) {
+        self.flash_part = part;
+        self.set_board(self.board);
     }
 
     /// All unknown accesses so far — the peripheral bring-up TODO list.
@@ -753,6 +761,7 @@ impl Soc {
             let pullup = self.sfr_get(usb::USB_IO_CON0) & 0x40 != 0;
             let mut u = std::mem::take(&mut self.usb);
             u.frame(self, pullup);
+            self.periph.set_usb_irqs(u.irq_lines());
             self.usb = u;
         }
         if let Some((adr, words)) = due.audio_half {
@@ -1481,7 +1490,10 @@ impl Soc {
                 }
                 self.sfr_set(addr, value)
             }
-            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => self.usb.write(addr, value, self.periph.cycles),
+            Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => {
+                self.usb.write(addr, value, self.periph.cycles);
+                self.periph.set_usb_irqs(self.usb.irq_lines());
+            }
             Region::Usb => {
                 if addr == 0x16a0c && self.board == Board::Smk37 {
                     self.periph.smk.commons = value;
@@ -1604,6 +1616,9 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
     let u = fwsc::unpack(pkg)?;
     let board = Board::of_identity(&u.identity);
     let mut flash = fwsc::full_flash(&u.raw, FLASH_SIZE);
+    // the app's resource region, which the update loader writes after the app (Polly 0.6.4's
+    // band styles, Melodee 1.6's factory sounds): without it the firmware boots, and does without
+    fwsc::lay_resources(&mut flash, &u.res);
     if board == Board::Smk37 {
         // a unit's factory calibration record, with the stock defaults
         fwsc::smk_trim_fill_defaults(&mut flash);
@@ -1865,6 +1880,45 @@ mod tests {
         soc.write32(0x11d00, 0xc021);
         soc.advance(1_000_000);
         assert_eq!(soc.periph.pending_irq(), None);
+    }
+
+    #[test]
+    fn usb_frame_and_bus_reset_interrupts_are_acknowledged_independently() {
+        const CON0: u32 = usb::USB_LO;
+        const CON1: u32 = CON0 + 4;
+        const ON: u32 = 0x0005;
+        const SOFIE: u32 = 1 << 10;
+        const SIEIE: u32 = 1 << 11;
+        const CLR_SOF_PND: u32 = 1 << 12;
+        const SOF_PND: u32 = 1 << 13;
+        const SIE_PND: u32 = 1 << 14;
+
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for irq in [periph::IRQ_USB_SOF, periph::IRQ_USB_CTRL] {
+            soc.periph.icfg[(irq >> 3) as usize] |= 1 << ((irq & 7) * 4);
+        }
+        soc.usb_plug();
+        let frame = soc.periph.usb_period;
+        soc.write32(usb::USB_IO_CON0, 0x40);
+        soc.write32(CON0, ON | SOFIE);
+        soc.advance(frame);
+        assert_eq!(soc.pending_irq(), Some((periph::IRQ_USB_SOF, 0)));
+        soc.write32(CON0, ON | CLR_SOF_PND);
+        assert_eq!(soc.read32(CON0) & SOF_PND, 0);
+        assert_eq!(soc.pending_irq(), None);
+
+        for _ in 0..100 {
+            soc.advance(frame);
+        }
+        soc.write32(CON0, ON | SIEIE);
+        assert_eq!(soc.pending_irq(), None, "reset is masked in the SIE");
+        soc.write32(CON1, 0x0b04); // INTRUSBE: enable reset
+        assert_ne!(soc.read32(CON0) & SIE_PND, 0);
+        assert_eq!(soc.pending_irq(), Some((periph::IRQ_USB_CTRL, 0)));
+        soc.write32(CON1, 0x4600); // INTRUSB: read and acknowledge reset
+        assert_eq!(soc.pending_irq(), None);
+        assert_eq!(soc.read32(CON0) & SIE_PND, 0);
+        assert_ne!(soc.read32(CON0) & SOF_PND, 0);
     }
 
     #[test]

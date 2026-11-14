@@ -18,6 +18,7 @@ const OWN = new URL("../web/firmwares-own.json", import.meta.url);
 const OURS = { salt: "felucca-salt", floyd: "sloop-floyd", sloopbanks: "sloop-banks" };
 // listed on the Hub, not run here yet
 const SKIP = {
+  "vibe-link": "crashes in the emulator a second or two after boot (a CPU exception at 0x0200338E: its own crash screen); held back until that is understood",
   lsdjburrito: "boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do",
 };
 // first in the list (the page's default first), then by id
