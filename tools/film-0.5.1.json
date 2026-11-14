@@ -1,0 +1,182 @@
+{
+  "_about": "The 0.5.1 film: python3 tools/film.py tools/film-0.5.1.json work/film/film-0.5.1.mp4. A rapid cut, no 'before' scenes: each fix is a caption over the firmware working. Packages are the Hub's (curl -o work/film/pkgs/NAME.fwsc https://thefirmwarehub.com/fw/NAME.fwsc); every scene runs target/release/fm1-live built from master.",
+  "scenes": [
+    {
+      "name": "open-amb",
+      "fwsc": "work/film/pkgs/amb-1.3.2.fwsc",
+      "ms": 8000,
+      "from": 1.6,
+      "dur": 2.8,
+      "captions": [
+        {
+          "text": "FM-1 emulator 0.5.1",
+          "sub": "the M-VAVE FM-1 and its firmwares, in a browser, on a computer, in a DAW",
+          "from": 0.2,
+          "to": 2.6,
+          "style": "title"
+        }
+      ]
+    },
+    {
+      "name": "frasil",
+      "fwsc": "work/film/pkgs/frasil-3.3.fwsc",
+      "ms": 11000,
+      "from": 4.4,
+      "dur": 3.0,
+      "keys": "1500:C3,1700:C3^,3000:G3,3200:G3^,6000:D4,6200:D4^",
+      "captions": [
+        {
+          "text": "Fixed: FRASIL plays",
+          "sub": "every firmware on the new felucca-bsp has its sound",
+          "from": 0.2,
+          "to": 2.8
+        }
+      ]
+    },
+    {
+      "name": "melodee",
+      "fwsc": "work/film/pkgs/melodee-1.6.1.fwsc",
+      "ms": 9500,
+      "from": 1.9,
+      "dur": 3.0,
+      "keys": "2000:C4,2000:E4,2000:G4,3400:C4^,3400:E4^,3400:G4^,3500:A3,3500:C4,3500:E4,4900:A3^,4900:C4^,4900:E4^,5000:F3,5000:A3,5000:C4,6400:F3^,6400:A3^,6400:C4^,6500:G3,6500:B3,6500:D4,8800:G3^,8800:B3^,8800:D4^",
+      "captions": [
+        {
+          "text": "Fixed: Melodee's factory sounds",
+          "sub": "a package is the whole install again",
+          "from": 0.2,
+          "to": 2.8
+        }
+      ]
+    },
+    {
+      "name": "choppah",
+      "fwsc": "work/film/pkgs/choppah-1.3.fwsc",
+      "ms": 9000,
+      "from": 1.3,
+      "dur": 3.0,
+      "keys": "1500:C4,5000:C4^,5200:E4,8000:E4^",
+      "captions": [
+        {
+          "text": "New: CHOPPAH",
+          "sub": "eight Amen breaks on the white keys",
+          "from": 0.2,
+          "to": 2.8
+        }
+      ]
+    },
+    {
+      "name": "faster-monkey",
+      "fwsc": "work/film/pkgs/purplemonkey-0.12.fwsc",
+      "ms": 9000,
+      "from": 2.0,
+      "dur": 2.8,
+      "keys": "1500:C4,1900:C4^,2000:E4,2400:E4^,2500:G4,2900:G4^,3000:C5,3400:C5^,3500:A4,3900:A4^,4000:F4,4400:F4^,4500:D4,4900:D4^,5000:B3,5400:B3^,5500:C4,5500:E4,5500:G4,7500:C4^,7500:E4^,7500:G4^",
+      "captions": [
+        {
+          "text": "Faster: 4.3x to 6.7x real time",
+          "sub": "Purple Monkey on the native JIT",
+          "from": 0.2,
+          "to": 2.6
+        }
+      ]
+    },
+    {
+      "name": "polly",
+      "fwsc": "work/film/pkgs/polly-0.6.4.fwsc",
+      "ms": 12000,
+      "from": 3.0,
+      "dur": 3.6,
+      "keys": "2000:PLAY,2200:PLAY^,3000:C4,3000:E4,3000:G4,6000:C4^,6000:E4^,6000:G4^,6200:F4,6200:A4,6200:C5,9000:F4^,9000:A4^,9000:C5^,9200:G4,9200:B4,9200:D5,11500:G4^,11500:B4^,11500:D5^",
+      "captions": [
+        {
+          "text": "Fixed: Polly's band plays",
+          "sub": "it follows your chords",
+          "from": 0.2,
+          "to": 3.4
+        }
+      ]
+    },
+    {
+      "name": "firmware-wall",
+      "clip": "work/film/src/wall.mp4",
+      "from": 0,
+      "dur": 11.0,
+      "_source": "python3 tools/film_wall.py capture && python3 tools/film_wall.py compose work/film/src/wall.mp4 --start polly --seconds 11: every firmware on the page (web/firmwares.json after the 2026-11-14 refresh; M-VAVE's own, which the user brings, not among them), 5 s of its LCD from fm1-live --shot --record --lcd-only with PLAY and a chord; the sound is the firmware nearest the middle",
+      "captions": [
+        {
+          "text": "Polly is one of them",
+          "sub": "every firmware on the page, live",
+          "from": 0.3,
+          "to": 2.6,
+          "style": "top"
+        },
+        {
+          "text": "200 community firmwares run here",
+          "sub": "each from its own package, each listed with its author",
+          "from": 7.6,
+          "to": 10.8
+        }
+      ]
+    },
+    {
+      "name": "outro",
+      "fwsc": "work/film/pkgs/amb-1.3.2.fwsc",
+      "ms": 16000,
+      "from": 7.0,
+      "dur": 6.0,
+      "card": {
+        "lines": [
+          [
+            "FM-1 emulator 0.5.1",
+            76
+          ],
+          [
+            "joakimeriksson.github.io/fm1-emu",
+            42
+          ],
+          [
+            " ",
+            8
+          ],
+          [
+            "fm1-live for Windows: double-click a firmware, F4 for another",
+            29
+          ],
+          [
+            "lower latency: 12 ms on Windows, WASAPI exclusive mode",
+            29
+          ],
+          [
+            "the newer FM-1's flash chip: ?chip=uc25hq80 shows which firmwares save on it",
+            29
+          ],
+          [
+            "?package=URL plays any firmware from a link",
+            29
+          ],
+          [
+            "the FM-1 Sampler over USB; the native JIT on Android x86-64",
+            29
+          ],
+          [
+            "200 community firmwares on the page, the Hub's newest the day they appear",
+            29
+          ],
+          [
+            " ",
+            8
+          ],
+          [
+            "with bask209, eubide, pcace, justifiably, jamminstein,",
+            27
+          ],
+          [
+            "DimmKirr, konsumer, GenericJam, profikid and the firmware authors",
+            27
+          ]
+        ]
+      }
+    }
+  ]
+}
