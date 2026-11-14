@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Pack the release's command-line programs (fm1-live, fm1-emu, built with
-# `cargo build --release -p fm1-live -p fm1-emu`) for one platform:
+# `cargo build --release -p fm1-live -p fm1-emu`, for macos-universal with
+# `--target aarch64-apple-darwin --target x86_64-apple-darwin`) for one platform:
 # target/release-apps/fm1-emu-<version>-<platform>.tar.gz (on Windows .zip) with the two programs
 # and a README.
-#   tools/package_apps.sh macos-arm64|linux-arm64|linux-x86_64|windows-x86_64
+#   tools/package_apps.sh macos-universal|linux-arm64|linux-x86_64|windows-x86_64
 # Not signed: the README says how to let macOS (or Windows SmartScreen) run them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,11 +17,19 @@ mkdir -p "$out/$name"
 exe=
 run=./fm1-live
 case $platform in windows-*) exe=.exe run=fm1-live ;; esac
-cp target/release/fm1-live$exe target/release/fm1-emu$exe "$out/$name/"
+if [ "$platform" = macos-universal ]; then
+  for p in fm1-live fm1-emu; do
+    lipo -create -output "$out/$name/$p" target/{aarch64,x86_64}-apple-darwin/release/$p
+  done
+else
+  cp target/release/fm1-live$exe target/release/fm1-emu$exe "$out/$name/"
+fi
 
 case $platform in
-  macos-arm64)
-    speed="It runs the FM-1's 240 MHz clock in real time with its AArch64 JIT."
+  macos-universal)
+    speed="It compiles the firmware to native code (AArch64 on Apple silicon, x86-64 on Intel) and
+runs the FM-1's 240 MHz clock in real time. On a slower Mac, if the sound stutters, lower the
+clock: --mhz 160."
     setup='These programs are not signed with an Apple Developer ID, so macOS blocks them until you
 allow it. In this folder, run once:
 

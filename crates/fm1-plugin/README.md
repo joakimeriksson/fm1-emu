@@ -104,7 +104,8 @@ The plugin is released with the rest of the emulator (`.github/workflows/release
 version, in this crate's `Cargo.toml`, is the workspace's. On an Apple silicon runner the
 workflow:
 1. runs the tests;
-2. builds and installs the plugin and runs Apple's AU validator;
+2. builds and installs the plugin for Apple silicon and Intel (`UNIVERSAL=1`) and runs Apple's
+   AU validator on both (Intel through Rosetta);
 3. builds Steinberg's validator and runs it on the VST3;
 4. packages the zip (`tools/package_plugin.sh`: the three plugins and an `INSTALL.txt`).
 

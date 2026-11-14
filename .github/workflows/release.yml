@@ -1,7 +1,7 @@
 # The release: on a tag v<version> (the workspace's version in Cargo.toml, which
 # crates/fm1-plugin's must equal, with its notes in docs/releases/v<version>.md):
-#   - macOS (Apple silicon): the plugin (AU, VST3, CLAP; tested, validated, tools/package_plugin.sh)
-#     and fm1-live / fm1-emu (tools/package_apps.sh)
+#   - macOS, one build for Apple silicon and Intel: the plugin (AU, VST3, CLAP; tested, validated,
+#     tools/package_plugin.sh) and fm1-live / fm1-emu (tools/package_apps.sh)
 #   - Windows x86-64: the plugin (VST3, CLAP; tested, validated, tools/package_plugin.ps1)
 #     and fm1-live / fm1-emu (tools/package_apps.sh, a zip)
 #   - Linux arm64 and x86-64: fm1-live / fm1-emu
@@ -23,6 +23,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/release.yml
+      - tools/build_plugin.sh
       - tools/package_apps.sh
       - tools/package_plugin.sh
       - tools/package_plugin.ps1
@@ -44,8 +45,12 @@ jobs:
         with:
           node-version: '22'
 
+      # Rosetta: the Intel builds run on this Apple silicon runner too (the AU validator, the smoke test)
       - name: Tools
-        run: brew install ninja
+        run: |
+          brew install ninja
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          softwareupdate --install-rosetta --agree-to-license
 
       - name: The tag names the version; its notes exist
         run: |
@@ -81,10 +86,12 @@ jobs:
         run: |
           node tools/fetch_firmwares.mjs felucca
           test -f reference/firmwares/felucca.fwsc  # (the fetch exits 0 on a failed download; without the file the engine tests skip themselves)
-          cd crates/fm1-plugin && cargo test --release
+          cd crates/fm1-plugin && cargo test --release --target aarch64-apple-darwin
 
-      - name: Build, install, Apple's AU validator
-        run: tools/build_plugin.sh
+      - name: Build, install, Apple's AU validator (Apple silicon, then Intel)
+        run: |
+          UNIVERSAL=1 tools/build_plugin.sh
+          arch -x86_64 auval -v aumu Fm1s Fm1e
 
       - name: Steinberg's VST3 validator
         run: |
@@ -103,11 +110,13 @@ jobs:
 
       - name: fm1-live and fm1-emu
         run: |
-          cargo build --release --locked -p fm1-live -p fm1-emu
-          target/release/fm1-live --version
-          target/release/fm1-live --fwsc fm1-sid/web/sidplayer.fwsc --bench 3000 | tee bench.txt
-          grep -q "ms emulated" bench.txt
-          tools/package_apps.sh macos-arm64
+          cargo build --release --locked -p fm1-live -p fm1-emu --target aarch64-apple-darwin --target x86_64-apple-darwin
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            target/$t/release/fm1-live --version
+            target/$t/release/fm1-live --fwsc fm1-sid/web/sidplayer.fwsc --bench 3000 | tee bench.txt
+            grep -q "ms emulated" bench.txt
+          done
+          tools/package_apps.sh macos-universal
 
       # (one flat folder: with two paths the artifact would keep their folders)
       - name: The files
@@ -118,7 +127,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-arm64
+          name: macos-universal
           path: dist/*
 
   # The Windows plugin: the tests, the CLAP and the VST3 (tools/build_plugin.ps1), Steinberg's
