@@ -1429,26 +1429,33 @@ impl Cpu {
         let jumped = self.exec_fast(bus, f, next_pc);
         self.pair_commit(pending);
         if head {
-            self.pair_hold(before, Some(f));
+            // (route 40 is `R.bN = #i`, a byte of a register)
+            let part = if matches!(f, Fast::Raw { route: 40, .. }) { 1 } else { 4 };
+            self.pair_hold(before, Some(f), part);
         }
         jumped
     }
 
     /// A pair head has run (from `before`, the head's micro-op `f` when it has one): hold its
     /// register results back for `pair_commit`, with the bits it wrote. Those are the registers
-    /// its micro-op writes (`Fast::regs_rw`), and any halfword it changed: an FM-1 keeps the
-    /// head's value even where it wrote the old one back (`r5 = r5 #` then a load into r5 left r5),
-    /// and merges per halfword (`r2.h = #i #` then a load into r2 kept the loaded low half;
-    /// pi32v2-isa hw/fm1-2026-10-24-v3).
-    fn pair_hold(&mut self, before: [u32; 16], f: Option<Fast>) {
+    /// its micro-op writes (`Fast::regs_rw`), and any register it changed, whole, or in `part`-byte
+    /// pieces for a head that writes part of one (1: `R.bN =`, 2: `R.l =` / `R.h =`, 4: whole): an
+    /// FM-1 keeps the head's value even where it wrote the old one back (`r5 = r5 #` then a load
+    /// into r5 left r5), and only the part it writes (`r2.h = #i #` then a load into r2 kept the
+    /// loaded low half; pi32v2-isa hw/fm1-2026-10-24-v3).
+    fn pair_hold(&mut self, before: [u32; 16], f: Option<Fast>, part: u32) {
         let after = self.regs;
         let exact = f.and_then(|f| f.regs_rw()).map_or(0, |(_, w)| w);
+        let piece = if part >= 4 { u32::MAX } else { (1u32 << (8 * part)) - 1 };
         let mut wrote = [0u32; 16];
         for i in 0..16 {
             let ch = before[i] ^ after[i];
-            wrote[i] = if exact >> i & 1 != 0 { !0 } else { 0 }
-                | if ch & 0xffff != 0 { 0xffff } else { 0 }
-                | if ch >> 16 != 0 { 0xffff_0000 } else { 0 };
+            wrote[i] = if exact >> i & 1 != 0 { !0 } else { 0 };
+            for k in (0..32).step_by(8 * part.min(4) as usize) {
+                if ch & piece.wrapping_shl(k) != 0 {
+                    wrote[i] |= piece.wrapping_shl(k);
+                }
+            }
         }
         self.regs = before;
         self.pair_pending = Some((after, wrote));
@@ -1536,7 +1543,10 @@ impl Cpu {
         let res = self.execute(bus, &insn, &x.pre, next_pc);
         self.pair_commit(pending);
         if is_pair_head && res.is_ok() {
-            self.pair_hold(before, l.fast);
+            // a head that writes part of a register: `R.bN = ...`, `R.l = ...`, `R.h = ...`
+            let s = x.pre.syntax;
+            let part = if s.starts_with("R.b") { 1 } else if s.starts_with("R.") { 2 } else { 4 };
+            self.pair_hold(before, l.fast, part);
         }
         res
     }
@@ -6192,6 +6202,17 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.regs[2], 0xe221_7ba7, "r2.h = 57889 #; r2 = [r1+12]");
         assert_eq!(cpu.pc, 10);
+        // a head that writes a whole register keeps all of it, the half it left as it was too:
+        // `35 f4 d1 05` r0 = smin(r13, r5) # then `30 62` r0 = [r3+8] (smin.rrr.p)
+        let mut mem = vec![0u8; 0x100];
+        mem[..6].copy_from_slice(&[0x35, 0xf4, 0xd1, 0x05, 0x30, 0x62]);
+        mem[0x48..0x4c].copy_from_slice(&0x09b6_0005u32.to_le_bytes());
+        let mut ram = FlatRam::new(mem);
+        let mut cpu = Cpu::new(0);
+        (cpu.regs[0], cpu.regs[3], cpu.regs[5], cpu.regs[13]) = (0x1f, 0x40, 7, 2);
+        cpu.step(&mut ram).unwrap();
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.regs[0], 2, "r0 = smin(r13, r5) #; r0 = [r3+8]");
     }
 
     #[test]
