@@ -311,13 +311,12 @@ impl Gen<'_> {
     fn f2i(&mut self, signed: bool) {
         let (done, zero, max) = (self.a.label(), self.a.label(), self.a.label());
         self.a.movd_xr(0, RAX);
+        // (a NaN goes as the infinity of its sign, `fpu`)
         if signed {
             // 0x8000_0000: out of range or NaN, or exactly -2^31
             self.a.cvttss2si(RAX, 0, false);
             self.a.alu_ri(Alu::Cmp, RAX, 0x8000_0000);
             self.a.jcc(Cc::Ne, done);
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, done); // negative: i32::MIN
@@ -334,9 +333,7 @@ impl Gen<'_> {
             self.a.jcc(Cc::Ne, max);
             self.a.jmp(done);
             self.a.bind(neg);
-            // NaN or below zero: 0; 2^63 and up: u32::MAX
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
+            // below zero or a negative NaN: 0; 2^63 and up or a positive NaN: u32::MAX
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, zero);
@@ -595,7 +592,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.a.bind(taken);
             g.chain(next_pc, count);
         }
-        // (the multiply-accumulates 7 / 8 read d too, min / max are Rust's, and the rounding
+        // (the multiply-accumulates 7 / 8 read d too, min / max are `fminmax`, and the rounding
         // conversions other than trunc have no single SSE instruction here: through the
         // interpreter's executor)
         Fast::FOp { d, a, b, op } if matches!(op, 0..=3 | 0x1f | 0x5f | 0x8f | 0x9f) => {
@@ -608,6 +605,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     let f = match op { 0 => Fop::Add, 1 => Fop::Sub, 2 => Fop::Mul, _ => Fop::Div };
                     g.a.fop(f, 0, 1);
                     g.a.movd_rx(RAX, 0);
+                    // every NaN is 0x7f800001 (`fnan`)
+                    g.a.mov_rr(RCX, RAX);
+                    g.a.alu_ri(Alu::And, RCX, 0x7fff_ffff);
+                    g.a.alu_ri(Alu::Cmp, RCX, 0x7f80_0000);
+                    g.a.mov_ri(RCX, 0x7f80_0001);
+                    g.a.cmov(Cc::A, RAX, RCX);
                 }
                 0x1f => g.f2i(true),
                 0x5f => g.f2i(false),

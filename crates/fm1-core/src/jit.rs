@@ -1353,14 +1353,23 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.a.bind(taken);
             g.chain(next_pc, count);
         }
-        // (the multiply-accumulates 7 / 8 read d too, and the rounding conversions other than
-        // trunc have no single A64 instruction here: through the interpreter's executor)
-        Fast::FOp { d, a, b, op } if matches!(op, 0..=6 | 0x1f | 0x5f | 0x8f | 0x9f) => {
+        // (the multiply-accumulates 7 / 8 read d too, min / max are `fminmax`, and the rounding
+        // conversions other than trunc have no single A64 instruction here: through the
+        // interpreter's executor)
+        Fast::FOp { d, a, b, op } if matches!(op, 0..=3 | 0x1f | 0x5f | 0x8f | 0x9f) => {
             g.ld_reg(0, a);
             match op {
                 0x1f | 0x5f => {
                     g.a.fmov_s_w(0, 0);
                     if op == 0x1f { g.a.fcvtzs(0, 0) } else { g.a.fcvtzu(0, 0) }
+                    // a NaN goes as the infinity of its sign (`fpu`): w1 = sign ^ 0x7fffffff /
+                    // !sign, w1 when unordered
+                    g.a.fmov_w_s(1, 0);
+                    g.a.asr_imm(1, 1, 31);
+                    if op == 0x1f { g.a.mov32(2, 0x7fff_ffff); } else { g.a.mov32(2, u32::MAX); }
+                    g.a.eor(1, 1, 2);
+                    g.a.fcmp(0, 0);
+                    g.a.csel(0, 1, 0, AC::Vs);
                 }
                 0x8f | 0x9f => {
                     if op == 0x8f { g.a.scvtf(0, 0) } else { g.a.ucvtf(0, 0) }
@@ -1370,9 +1379,13 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     g.ld_reg(1, b);
                     g.a.fmov_s_w(0, 0);
                     g.a.fmov_s_w(1, 1);
-                    let opc = match op { 0 => 0x1e20_2800, 1 => 0x1e20_3800, 2 => 0x1e20_0800, 3 => 0x1e20_1800, 5 => 0x1e20_7800, _ => 0x1e20_6800 };
+                    let opc = match op { 0 => 0x1e20_2800, 1 => 0x1e20_3800, 2 => 0x1e20_0800, _ => 0x1e20_1800 };
                     g.a.fop(opc, 0, 0, 1);
                     g.a.fmov_w_s(0, 0);
+                    // every NaN is 0x7f800001 (`fnan`)
+                    g.a.fcmp(0, 0);
+                    g.a.mov32(1, 0x7f80_0001);
+                    g.a.csel(0, 1, 0, AC::Vs);
                 }
             }
             g.st_reg(0, d);
