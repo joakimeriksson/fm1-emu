@@ -219,7 +219,7 @@ fn covers(e: &IsaEntry, win: u64) -> bool {
     match e.name {
         // `R = #i`: `rN = 0..255` for r0..r7 (`001i iiii 01jj jrrr`) and `rN = 0` for r8..r15
         // (`0001 0100 1100 0rrr`). The other words of c040/0040, e.g. `45 00`..`48 00`, change nothing
-        // on an FM-1.
+        // on an FM-1: `decode_win` gives them the nop class.
         "r_mov_i_l2" => win & 0xe0c0 == 0x2040 || win & 0xfff8 == 0x14c0,
         _ => true,
     }
@@ -235,8 +235,12 @@ pub fn decode_win(win: u64, addr: u32) -> Result<Instruction, DecodeError> {
         }
     }
     let mut best: Option<&'static IsaEntry> = None;
+    // a word a class's mask takes but `covers` does not: it changes nothing on an FM-1
+    let mut nothing = false;
     for e in generated_isa::ISA {
-        if (win & e.mask) == e.match_ && covers(e, win) {
+        if (win & e.mask) == e.match_ && !covers(e, win) {
+            nothing = true;
+        } else if (win & e.mask) == e.match_ {
             // Sample tiebreak compares only the entries own length bytes
             // (samples are stored as len-byte little-endian integers, the
             // window is always a 6-byte fetch).
@@ -253,6 +257,10 @@ pub fn decode_win(win: u64, addr: u32) -> Result<Instruction, DecodeError> {
     }
     if best.is_none() {
         best = fpu::FALLBACK.iter().find(|e| (win & e.mask) == e.match_);
+    }
+    if best.is_none() && nothing {
+        // (`45 00`..`48 00`: no register, flag or trap, 4 of 4)
+        best = generated_isa::ISA.iter().find(|e| e.name == "nop");
     }
     match best {
         Some(e) => Ok(Instruction {
@@ -323,6 +331,16 @@ mod tests {
     fn table_has_everything() {
         // 1067 classes as of the five-corpus build
         assert!(entry_count() > 1000);
+    }
+
+    #[test]
+    fn words_r_mov_i_l2_does_not_cover_are_nops() {
+        // an FM-1 (2026-11): `45 00`..`48 00` change nothing (4 of 4)
+        for w in ["4500", "4600", "4700", "4800"] {
+            assert_eq!(le(w).unwrap().syntax(), "nop", "{w}");
+        }
+        // `45 20` (r5 = 0) is still the constant
+        assert_eq!(le("4520").unwrap().entry.name, "r_mov_i_l2");
     }
 
     #[test]
