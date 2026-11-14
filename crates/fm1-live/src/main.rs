@@ -1041,7 +1041,11 @@ fn main() {
         eprintln!("error: --seed needs --flaky-core1 (it seeds its misreads)");
         std::process::exit(2);
     }
-    let theme = panel::Theme::by_name(&o.theme);
+    let theme = panel::Theme::try_by_name(&o.theme).unwrap_or_else(|| {
+        let names: Vec<&str> = panel::THEMES.iter().map(|(n, _, _)| *n).collect();
+        eprintln!("error: unknown --theme {:?}; available: {}", o.theme, names.join(", "));
+        std::process::exit(2);
+    });
     if let Some(ms) = o.shot {
         return shot(&o, ms, theme);
     }

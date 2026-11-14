@@ -19,6 +19,7 @@ pub struct Theme {
     pub body_bot: u32,
     pub tray: u32,
     pub silk: u32,
+    pub brand: u32,
     pub btn_top: u32,
     pub btn_bot: u32,
     pub btn_ink: u32,
@@ -37,41 +38,48 @@ const fn blend_toward_white(color: u32, t: u32) -> u32 {
 pub const THEMES: &[(&str, &str, Theme)] = &[
     ("default", "Grey (Emulator Classic)", Theme {
         body_top: 0x5E6166, body_bot: 0x4A4D52, tray: 0x2B2C2F, silk: 0xC9C6BD,
+        brand: 0x8c8a85,
         btn_top: 0x4B4E54, btn_bot: 0x3B3D42, btn_ink: 0x9C9A94,
         key_top: 0x6A5557, key_bot: 0x4F3F42, key_line: 0x8F7C7E,
     }),
     ("cool-gray", "Cool Gray", Theme {
         body_top: 0xDAD1CC, body_bot: 0xCCC3BC, tray: 0x424649, silk: 0x6A6560,
+        brand: 0x6A6560,
         btn_top: 0x44484B, btn_bot: 0x363A3D, btn_ink: 0xA8A49E,
         key_top: 0x393D40, key_bot: 0x2C3033,
         key_line: blend_toward_white(0x393D40, 35),
     }),
     ("black", "Black", Theme {
         body_top: 0x3A3C3B, body_bot: 0x303131, tray: 0x181818, silk: 0x8A8A8A,
+        brand: 0x8A8A8A,
         btn_top: 0x2E2E2E, btn_bot: 0x222222, btn_ink: 0x787878,
         key_top: 0x1C1C1C, key_bot: 0x141414,
         key_line: blend_toward_white(0x1C1C1C, 35),
     }),
     ("orange", "Orange", Theme {
         body_top: 0xAE6246, body_bot: 0x9A5538, tray: 0x945B4C, silk: 0xE8CFC0,
+        brand: 0xE8CFC0,
         btn_top: 0xB06045, btn_bot: 0x985238, btn_ink: 0xE0C8B8,
         key_top: 0x8C5347, key_bot: 0x76443A,
         key_line: blend_toward_white(0x8C5347, 35),
     }),
     ("black-green", "Black & Green", Theme {
         body_top: 0x3A3A3D, body_bot: 0x2E2E30, tray: 0x75C0B7, silk: 0xA0D8D0,
+        brand: 0xA0D8D0,
         btn_top: 0x65C6B8, btn_bot: 0x52B0A0, btn_ink: 0x1E3830,
         key_top: 0x65C6B8, key_bot: 0x52B0A0,
         key_line: blend_toward_white(0x65C6B8, 35),
     }),
     ("purple", "Purple", Theme {
         body_top: 0xB58BC9, body_bot: 0xA078B5, tray: 0x7C72B3, silk: 0xE4D6F0,
+        brand: 0xE4D6F0,
         btn_top: 0x9070AE, btn_bot: 0x7C5E9A, btn_ink: 0xE0D0EC,
         key_top: 0x746AB1, key_bot: 0x5E5498,
         key_line: blend_toward_white(0x746AB1, 35),
     }),
     ("white-blue", "White & Blue", Theme {
         body_top: 0xEAE7E0, body_bot: 0xDCD8D0, tray: 0x5A7795, silk: 0x5A6878,
+        brand: 0x5A6878,
         btn_top: 0x516F8F, btn_bot: 0x3E5C7A, btn_ink: 0xD0D8E0,
         key_top: 0x516F8F, key_bot: 0x3E5C7A,
         key_line: blend_toward_white(0x516F8F, 35),
@@ -79,10 +87,12 @@ pub const THEMES: &[(&str, &str, Theme)] = &[
 ];
 
 impl Theme {
+    pub fn try_by_name(name: &str) -> Option<&'static Theme> {
+        THEMES.iter().find(|(n, _, _)| *n == name).map(|(_, _, t)| t)
+    }
+
     pub fn by_name(name: &str) -> &'static Theme {
-        THEMES.iter().find(|(n, _, _)| *n == name)
-            .map(|(_, _, t)| t)
-            .unwrap_or(&THEMES[0].2)
+        Self::try_by_name(name).unwrap_or(&THEMES[0].2)
     }
 }
 
@@ -304,7 +314,7 @@ pub fn base(theme: &Theme) -> Vec<u32> {
     // PLAY / REC outlined, as on the panel
     rrect(&mut b, 1134.0, 302.0, 112.0, 72.0, 10.0, 0x3c6b43, 0x3c6b43);
     rrect(&mut b, 1136.0, 304.0, 108.0, 68.0, 9.0, theme.tray, theme.tray);
-    text(&mut b, 640.0, 552.0 - 2.0, "FM-1  FELUCCA", 1, theme.silk);
+    text(&mut b, 640.0, 552.0 - 2.0, "FM-1  FELUCCA", 1, theme.brand);
     b
 }
 
@@ -403,6 +413,7 @@ mod tests {
         assert_eq!(t.body_bot, 0x4a4d52);
         assert_eq!(t.tray, 0x2b2c2f);
         assert_eq!(t.silk, 0xc9c6bd);
+        assert_eq!(t.brand, 0x8c8a85);
         assert_eq!(t.btn_top, 0x4b4e54);
         assert_eq!(t.btn_bot, 0x3b3d42);
         assert_eq!(t.btn_ink, 0x9c9a94);
