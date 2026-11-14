@@ -39,7 +39,9 @@ test('every release\'s notes read cleanly', () => {
 test('0.5.1 as the page shows it', () => {
   const r = parseNotes(read('docs/releases/v0.5.1.md'), '0.5.1');
   assert.deepEqual(r.thanks, ['bask209', 'eubide', 'pcace']);
-  assert.match(r.highlights[0].html, /^<b>fm1-live and fm1-emu for Windows<\/b>: a double-click asks for a firmware, F4 opens another, and/);
+  // the short "## Highlights" list, not the longer what's new
+  assert.match(r.highlights[0].html, /^<b>fm1-live for Windows<\/b>: double-click it and pick a firmware; F4 opens another\.$/);
+  assert.equal(r.highlights.length, 7);
   assert.deepEqual(r.downloads.map((d) => `${d.kind} ${d.os} ${d.arch}${d.isNew ? ' new' : ''}`), [
     'plugin macos arm64', 'plugin windows x86_64', 'live windows x86_64 new', 'live macos arm64', 'live linux arm64', 'live linux x86_64']);
   const text = announcement({ ...r, version: '0.5.1', url: 'https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1' });
@@ -66,6 +68,13 @@ test('the film shows once the notes link it, and not before', () => {
   const withFilm = render({ ...base, ...parseNotes(md + '\nThe release film: https://youtu.be/AbC_dEf-123\n', '0.5.1') }).section;
   assert.match(withFilm, /<a class="film" href="https:\/\/www\.youtube\.com\/watch\?v=AbC_dEf-123" data-yt="AbC_dEf-123"/);
   assert.equal(parseNotes('x\n\n[film](https://www.youtube.com/watch?v=Zz9_-Zz9_-Z&t=3)', '1').film, 'Zz9_-Zz9_-Z');
+});
+
+test('without a Highlights list, what\'s new is the list', () => {
+  const md = 'Lead.\n\n## What\'s new\n\n- **One**: a thing (#1).\n- **Two**: another.\n- **Contributors:** a, b and c.\n';
+  const r = parseNotes(md, '9.9.9');
+  assert.deepEqual(r.highlights.map((h) => h.text), ['One: a thing.', 'Two: another.']);
+  assert.deepEqual(r.thanks, ['a', 'b', 'c']);
 });
 
 test('inline Markdown: asides and pull requests go, code and links stay', () => {

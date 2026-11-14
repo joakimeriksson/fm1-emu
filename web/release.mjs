@@ -72,20 +72,26 @@ export function parseNotes(md, version) {
     });
   }
 
-  // what's new: one item per bullet; the contributors' bullet becomes the thanks
-  const items = [];
-  for (const l of sectionOf(/^## What's new/)) {
-    if (/^- /.test(l)) items.push(l.slice(2));
-    else if (/^\s+\S/.test(l) && items.length) items[items.length - 1] += " " + l.trim();
-    else if (l.trim() && !/^\s/.test(l)) break;            // a paragraph after the list
-  }
+  // a section's bullets, one item each (continuation lines joined)
+  const bullets = (re) => {
+    const items = [];
+    for (const l of sectionOf(re)) {
+      if (/^- /.test(l)) items.push(l.slice(2));
+      else if (/^\s+\S/.test(l) && items.length) items[items.length - 1] += " " + l.trim();
+      else if (l.trim() && !/^\s/.test(l)) break;            // a paragraph after the list
+    }
+    return items;
+  };
+  // the highlights: "## Highlights" (short lines, for the page and an announcement) when the notes
+  // have it, else what's new; the contributors' bullet (in either) becomes the thanks
+  const short = bullets(/^## Highlights/);
   const highlights = [];
   let thanks = [];
-  for (const item of items) {
+  for (const item of [...(short.length ? short : []), ...bullets(/^## What's new/)]) {
     const text = inline(item, "text");
     const c = /^(Contributors[^:]*|Thanks[^:]*):\s*(.*)$/i.exec(text);
     if (c) thanks = c[2].replace(/\.$/, "").split(/,\s*|\s+and\s+/).map((n) => n.trim()).filter(Boolean);
-    else highlights.push({ html: inline(item, "html"), text });
+    else if (!short.length || short.includes(item)) highlights.push({ html: inline(item, "html"), text });
   }
 
   const film = /https:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{6,})/.exec(md);

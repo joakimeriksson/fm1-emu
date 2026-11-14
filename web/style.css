@@ -24,6 +24,7 @@ a, button, select, .file, .cards li { transition: color .15s, background-color .
 .wrap { max-width: 1360px; margin: 0 auto; padding-inline: 24px; }
 header.site { position: relative; border-bottom: 1px solid var(--rule); background: linear-gradient(180deg, #1d1e21, var(--bar)); }
 /* an amber hairline along the header's foot, brightest in the middle */
+[data-embed] header.site::after { display: none; }
 header.site::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px; pointer-events: none;
   background: linear-gradient(90deg, transparent, rgba(242, 163, 58, .5) 25%, rgba(242, 163, 58, .5) 75%, transparent); }
 header.site .wrap { padding-block: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 20px; }
