@@ -36,7 +36,11 @@ cp web/style.css web/main.js web/persistence.js web/tryout.js web/worklet.js web
 # version and its notes, docs/releases/v<version>.md; without node the pages keep the committed copy
 if command -v node >/dev/null; then
   node web/release.mjs "$OUT/index.html" "$OUT/smk37/index.html"
+  # every file the pages load under this build's name, so a browser's cached copy of one file is
+  # never run with another build's (GitHub Pages lets each be kept 10 minutes): the commit, or
+  # the time for a build outside git
+  node web/stamp.mjs "$(git rev-parse --short HEAD 2>/dev/null || date +%s)" "$OUT" "$OUT/smk37"
 else
-  echo "warning: no node; the pages keep the release blocks committed in web/index.html" >&2
+  echo "warning: no node; the pages keep the release blocks committed in web/index.html, unstamped" >&2
 fi
 ls -la "$OUT" | grep -v "^total"
