@@ -89,7 +89,11 @@ impl X<'_> {
 
 // ---- helpers (the models' own: q.py, r.py, _r_util.py) -----------------------------------------------
 
+/// x's low `bits` bits as a signed number.
 fn sx(x: u64, bits: u32) -> i64 {
+    if bits >= 64 {
+        return x as i64;
+    }
     let x = x & mask(bits);
     if bits > 0 && x >> (bits - 1) & 1 != 0 { x as i64 - (1i64 << bits) } else { x as i64 }
 }
@@ -464,9 +468,167 @@ fn exec<B: Bus>(cpu: &mut Cpu, bus: &mut B, base: usize, o: &Ops, next_pc: u32) 
             let m = base == id::MADD_MUL4_M_PRR;
             pack16(&mut x, [0, 1, 2, 3].map(|k| acc[k] + a[k] * if m { sb(b[k]) } else { b[k] }), d);
         }
+        // ==== q.py: lane compares, min / max, saturation, packing, shifts by a signed count ====
+        id::ABS_RHRH | id::NEGS_RHRH => {
+            let v = sx(half(x.r[o.r("s")], o.t("m") == ".h") as u64, 16);
+            let y = clip(if base == id::ABS_RHRH { v.abs() } else { -v }, 16, true);
+            x.wh(o.r("r"), o.t("n"), y as u32);
+        }
+        id::ABS_V_RR | id::NEGS_V_RR | id::NEGS_RR => {
+            let bits = if base == id::NEGS_RR { 32 } else { 16 };
+            let abs = base == id::ABS_V_RR;
+            let ys: Vec<i64> = lanes(x.r[o.r("s")] as u64, bits, 32).into_iter()
+                .map(|v| { let v = sx(v, bits); clip(if abs { v.abs() } else { -v }, bits, true) }).collect();
+            x.w(o.r("r"), join(&ys, bits) as u32);
+        }
+        id::UMAX_RHRHRH | id::SMAX_RHRHRH | id::UMIN_RHRHRH | id::SMIN_RHRHRH
+        | id::UMAX_V_RRR | id::SMAX_V_RRR | id::UMIN_V_RRR | id::SMIN_V_RRR => {
+            let h = fid.contains("rhrhrh");
+            let (a, b) = if h {
+                (half(x.r[o.r("s")], o.t("m") == ".h") as u64, half(x.r[o.r("t")], o.t("p") == ".h") as u64)
+            } else {
+                (x.r[o.r("s")] as u64, x.r[o.r("t")] as u64)
+            };
+            let (signed, max) = (fid.starts_with('s'), fid[1..].starts_with("max"));
+            let tot = if h { 16 } else { 32 };
+            let ys: Vec<i64> = lanes(a, 16, tot).into_iter().zip(lanes(b, 16, tot))
+                .map(|(p, q)| {
+                    let (p, q) = if signed { (sx(p, 16), sx(q, 16)) } else { (p as i64, q as i64) };
+                    if max { p.max(q) } else { p.min(q) }
+                }).collect();
+            let y = join(&ys, 16) as u32;
+            if h { x.wh(o.r("r"), o.t("n"), y) } else { x.w(o.r("r"), y) }
+        }
+        _ if fid.ends_with(".v") && ["all.", "alls.", "any.", "anys.", "cmp.", "cmps."].iter().any(|p| fid.starts_with(p))
+            && !fid.contains("unknown") => {
+            let mut it = fid.split('.');
+            let (family, cond, shape) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let pairs = shape == "ppp";
+            let (bits, total) = if pairs { (16, 64) } else { (8, 32) };
+            let (a, b) = if pairs { (x.pair(o.r("s")), x.pair(o.r("t"))) } else { (x.r[o.r("s")] as u64, x.r[o.r("t")] as u64) };
+            let signed = family.ends_with('s');
+            let m: Vec<bool> = lanes(a, bits, total).into_iter().zip(lanes(b, bits, total))
+                .map(|(p, q)| {
+                    let (p, q) = if signed { (sx(p, bits), sx(q, bits)) } else { (p as i64, q as i64) };
+                    match cond { "eq" => p == q, "ne" => p != q, "ge" => p >= q, "gt" => p > q, "le" => p <= q, _ => p < q }
+                }).collect();
+            let y = if family.starts_with("all") {
+                if m.iter().all(|&v| v) { mask(total) } else { 0 }
+            } else if family.starts_with("any") {
+                if m.iter().any(|&v| v) { mask(total) } else { 0 }
+            } else {
+                join(&m.iter().map(|&v| -(v as i64)).collect::<Vec<_>>(), bits)
+            };
+            if pairs { x.wp(o.r("r"), y) } else { x.w(o.r("r"), y as u32) }
+        }
+        id::SAT8_U_RHRH | id::SAT8_S_RHRH => {
+            let signed = base == id::SAT8_S_RHRH;
+            let v = half(x.r[o.r("s")], o.t("m") == ".h") as u64;
+            let v = if signed { sx(v, 16) } else { v as i64 };
+            let y = clip(v, 8, signed);
+            x.wh(o.r("r"), o.t("n"), y as u32);
+            let f = nz(x.f, y as u64, 16);
+            x.flags(f);
+        }
+        // (revision-3 spellings this chip runs as sat16)
+        id::SAT8_U_RR | id::SAT8_S_RR => {
+            let signed = base == id::SAT8_S_RR;
+            let v = x.r[o.r("s")];
+            let v = if signed { v as i32 as i64 } else { v as i64 };
+            let y = clip(v, 16, signed);
+            x.w(o.r("r"), y as u32);
+            let f = nz(x.f, y as u64, 32);
+            x.flags(f);
+        }
+        id::VSAT16_U_RP | id::VSAT16_S_RP | id::PACKB_RP | id::PACKB_RPE | id::PACKB_RP_STOU => {
+            let src = if fid.starts_with("vsat16") { "p" } else { "s" };
+            let mode = match base {
+                id::VSAT16_U_RP => "(usat)",
+                id::VSAT16_S_RP => "(ssat)",
+                id::PACKB_RP => "truncate",
+                id::PACKB_RP_STOU => "stou",
+                _ => o.t("n"),
+            };
+            let xs: Vec<i64> = lanes(x.pair(o.r(src)), 16, 64).into_iter().map(|v| match mode {
+                "(usat)" => clip(v as i64, 8, false),
+                "(ssat)" => clip(sx(v, 16), 8, true),
+                "stou" => clip(sx(v, 16), 8, false),
+                _ => v as i64,
+            }).collect();
+            x.w(o.r("r"), join(&xs, 8) as u32);
+        }
+        id::UNPACKB_U_PR | id::UNPACKB_S_PR | id::UNPACK4_U_PR | id::UNPACK4_S_PR => {
+            let signed = fid.contains(".s.");
+            let dest = if fid.starts_with("unpack4") { "p" } else { "r" };
+            let xs: Vec<i64> = lanes(x.r[o.r("s")] as u64, 8, 32).into_iter()
+                .map(|v| if signed { sx(v, 8) } else { v as i64 }).collect();
+            x.wp(o.r(dest), join(&xs, 16));
+        }
+        id::MTS0_PRR | id::MTS1_PRR => {
+            let bits = if base == id::MTS0_PRR { 8 } else { 16 };
+            // (low lane first: t0, s0, t1, s1, ...)
+            let xs: Vec<i64> = lanes(x.r[o.r("s")] as u64, bits, 32).into_iter().zip(lanes(x.r[o.r("t")] as u64, bits, 32))
+                .flat_map(|(a, b)| [b as i64, a as i64]).collect();
+            x.wp(o.r("r"), join(&xs, bits));
+        }
+        id::SAD4_ACC_PRR => {
+            // (each lane saturates on its own, without carry)
+            let d = o.r("r");
+            let acc = lanes(x.pair(d), 16, 64);
+            let (a, b) = (lanes(x.r[o.r("s")] as u64, 8, 32), lanes(x.r[o.r("t")] as u64, 8, 32));
+            let xs: Vec<i64> = (0..4).map(|k| (acc[k] as i64 + (a[k] as i64 - b[k] as i64).abs()).min(65535)).collect();
+            x.wp(d, join(&xs, 16));
+        }
+        id::ALIGN8_RRR | id::ALIGN16_RRR | id::ALIGN24_RRR => {
+            let n = match base { id::ALIGN8_RRR => 8, id::ALIGN16_RRR => 16, _ => 24 };
+            let v = ((x.r[o.r("s")] as u64) << 32 | x.r[o.r("t")] as u64) >> n;
+            x.w(o.r("r"), v as u32);
+        }
+        id::PACK_RRHRH => {
+            let v = half(x.r[o.r("s")], o.t("n") == ".h") << 16 | half(x.r[o.r("t")], o.t("m") == ".h");
+            x.w(o.r("r"), v);
+        }
+        // `><`: a shift by a signed count, left for a positive one
+        id::XCHG_PR | id::XCHG_PR_SAT | id::XCHG_RHRHR | id::XCHG_RHRHR_SAT | id::XCHG_RRR_SAT | id::XCHG_V_RRR
+        | id::XCHG_RRR_SAT_V => {
+            let shape = match base {
+                id::XCHG_PR | id::XCHG_PR_SAT => "pr",
+                id::XCHG_RHRHR | id::XCHG_RHRHR_SAT => "rhrhr",
+                id::XCHG_V_RRR | id::XCHG_RRR_SAT_V => "v",
+                _ => "rrr",
+            };
+            let sat_ = fid.contains("sat");
+            let bits: u32 = match shape { "pr" => 64, "rhrhr" | "v" => 16, _ => 32 };
+            let count = x.r[o.r(if shape == "pr" { "s" } else { "t" })] as u64;
+            let n = sx(count, match bits { 16 => 5, 32 => 6, _ => 7 });
+            let src = match shape {
+                "pr" => x.pair(o.r("r")),
+                "rhrhr" => half(x.r[o.r("s")], o.t("m") == ".h") as u64,
+                _ => x.r[o.r("s")] as u64,
+            };
+            let one = |v: u64| -> i64 {
+                let val: i128 = if sat_ { sx(v, bits) as i128 } else { v as i128 };
+                let val = if n >= 0 { val << n } else { val >> -n };
+                if sat_ { val.clamp(-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1) as i64 } else { (val as u128 & mask(bits) as u128) as i64 }
+            };
+            let total = match shape { "pr" => 64, "v" => 32, _ => bits };
+            let y = join(&lanes(src, bits, total).into_iter().map(one).collect::<Vec<_>>(), bits);
+            let carry = if n != 0 {
+                let sh = if n > 0 { bits as i64 - n } else { -n - 1 };
+                (src >> sh) & 1
+            } else {
+                ((x.f >> 1) & 1) as u64
+            };
+            let shifted = (x.f & !F_C) | (carry as u32) << 1;
+            match shape {
+                "pr" => { x.wp(o.r("r"), y); x.flags(shifted); }
+                "rhrhr" => x.wh(o.r("r"), o.t("n"), y as u32),
+                "v" => x.w(o.r("r"), y as u32),
+                _ => { x.w(o.r("r"), y as u32); let f = nz(shifted, y, 32); x.flags(f); }
+            }
+        }
         _ => return None,
     }
-    let _ = (x.f, clip(0, 1, false), nz(0, 0, 1), lanes(0, 8, 32), join(&[], 8));
     Some(Ok(Done::Next))
 }
 

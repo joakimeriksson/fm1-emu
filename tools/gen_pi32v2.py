@@ -71,7 +71,10 @@ def main():
             lines.append(f"        {fl},")
         lines.append("    ] },")
         consts.append(f"    pub const {i.id.upper().replace('.', '_')}: usize = {k};")
-        entries.append(f"    IsaEntry {{ name: {rs('pi:' + i.id)}, syntax: {rs(i.syntax)}, len: {2 * len(i.words)}, count: 0, "
+        # (a `.p` form is a dual-issue pair's head, which the emulator's decoder tells by a trailing `#`: the
+        # table's vector compares' twins have none in their syntax)
+        syntax = i.syntax + "  #" if i.id.endswith(".p") and not i.syntax.rstrip().endswith("#") else i.syntax
+        entries.append(f"    IsaEntry {{ name: {rs('pi:' + i.id)}, syntax: {rs(syntax)}, len: {2 * len(i.words)}, count: 0, "
                        f"mask: {to_window(nbits, i.mask):#x}, match_: {to_window(nbits, i.value):#x}, group: {rs(i.group)}, "
                        f"alt: &[], samples: &[], slots: &[] }},")
     lines += ["];", "", "/// Each form as a class of the emulator's decoder (`FORMS`' order; named `pi:` and the id).",

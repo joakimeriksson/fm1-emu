@@ -113,9 +113,9 @@ impl Form {
         self.fields.iter().find(|f| f.name == name)
     }
 
-    /// A dual-issue pair's head (`#`).
+    /// A dual-issue pair's head (a `.p` id: the table's vector compares' twins have no `#` in their syntax).
     pub fn pair_head(&self) -> bool {
-        self.syntax.trim_end().ends_with('#')
+        self.id.ends_with(".p")
     }
 
     /// The id without a pair head's `.p`: the form whose semantics it has.
