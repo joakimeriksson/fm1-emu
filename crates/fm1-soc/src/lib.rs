@@ -282,8 +282,9 @@ pub struct Soc {
     pub lcd_timed: bool,
     /// A 16- or 32-bit RAM access that is not aligned raises the CPU exception (EMU_MSG bit 0), as
     /// on an FM-1 (a probe, 2026-10-24: every misaligned load or store to RAM faulted; XIP reads
-    /// across). Only where loads and stores go through the bus: fm1-live's FM1_STRICT=1 runs
-    /// without the JIT for it.
+    /// across), and moves the aligned-down halfword or word, as an FM-1 does (2026-11; the chip
+    /// takes the exception some 7 instructions later, here after the instruction). Only where
+    /// loads and stores go through the bus: fm1-live's FM1_STRICT=1 runs without the JIT for it.
     pub strict_align: bool,
     /// The flash cache (FM1_STRICT): XIP reads and code fetched from XIP that miss it cost a line's
     /// fill (`XipCache`)
@@ -1203,7 +1204,9 @@ impl Bus for Soc {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
             if addr & 3 != 0 && self.strict_align {
+                // the aligned-down word, as an FM-1 loads it (H3, 2026-11)
                 self.misaligned(addr, 4);
+                return self.ram.read32((o & !3) as u32);
             }
             return self.ram.read32(o as u32);
         }
@@ -1270,7 +1273,9 @@ impl Bus for Soc {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
         if o + 4 <= self.ram.len() {
             if addr & 3 != 0 && self.strict_align {
+                // the whole word at the aligned-down address, as an FM-1 stores it (H3, 2026-11)
                 self.misaligned(addr, 4);
+                return self.ram.write32((o & !3) as u32, value);
             }
             return self.ram.write32(o as u32, value);
         }

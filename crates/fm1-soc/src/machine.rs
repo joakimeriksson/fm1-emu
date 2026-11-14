@@ -1067,6 +1067,21 @@ mod tests {
     }
 
     #[test]
+    fn misaligned_words_move_the_aligned_down_word() {
+        // an FM-1 (H3, 2026-11): a misaligned word load gives the aligned-down word, a misaligned
+        // word store writes the whole word there; a halfword load at +1 the aligned-down halfword
+        let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.strict_align = true;
+        soc.write32(RAM_BASE + 0x100, 0x1122_3344);
+        soc.write32(RAM_BASE + 0x104, 0x5566_7788);
+        assert_eq!(soc.read32(RAM_BASE + 0x103), 0x1122_3344);
+        assert_eq!(soc.read16(RAM_BASE + 0x101), 0x3344);
+        soc.write32(RAM_BASE + 0x106, 0xa1b2_c3d4);
+        assert_eq!((soc.read32(RAM_BASE + 0x100), soc.read32(RAM_BASE + 0x104)), (0x1122_3344, 0xa1b2_c3d4));
+        assert_eq!(soc.emu_cause, 1);
+    }
+
+    #[test]
     fn a_chip_reset_clears_the_guards() {
         // after a watchdog or PR_PWR reset the PC limits and the causes are as at power-on: a boot
         // into code outside the old windows takes no exception
