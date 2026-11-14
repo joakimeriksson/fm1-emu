@@ -5201,6 +5201,8 @@ mod tests {
         assert!(fetch(&[0x80, 0x19, 0x64, 0xe0, 0x00, 0x05]), "a psr read after the &");
         // `b4 e0 00 00` r0 = r0 + r0, the &, then `b8 e0 10 12` (+ c): the & keeps C, the add stays careful
         assert!(fetch(&[0xb4, 0xe0, 0x00, 0x00, 0x80, 0x19, 0xb8, 0xe0, 0x10, 0x12]), "the add's carry, read past the &");
+        // `3f e5 40 56` r5 = r4 + r6 (f) keeps the flags: the search goes on past it to the psr read
+        assert!(fetch(&[0x80, 0x19, 0x3f, 0xe5, 0x40, 0x56, 0x64, 0xe0, 0x00, 0x15]), "a psr read past a float add");
         // with nothing reading them, compiled
         assert!(!fetch(&[0x80, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00]));
     }
@@ -6774,9 +6776,15 @@ thread_local! {
 /// Add / subtract shapes: they set all four flags (`Cpu::flags`), so a reader past one reads
 /// its flags, not an earlier op's (`flags_read_later` stops there; the other flag writers keep C
 /// or V and do not end the search).
+///
+/// Only the plain integer forms (and the brev add, measured): the float `(f)` forms keep the
+/// flags, and neither the saturating `(ssat)` / `(usat)` forms nor the multiply-accumulates are
+/// known to replace all four, so the search goes on past them.
 fn is_flag_producer(s: &str) -> bool {
-    s.starts_with("R = R + ") || s.starts_with("R = R - ") || s.starts_with("R += ") || s.starts_with("R -= ")
-        || s.starts_with("R = #h - ") || s.starts_with("R = #i - ")
+    (s.starts_with("R = R + ") || s.starts_with("R = R - ") || s.starts_with("R += ") || s.starts_with("R -= ")
+        || s.starts_with("R = #h - ") || s.starts_with("R = #i - "))
+        && !s.contains('*')
+        && (!s.contains('(') || s.ends_with("(brev)"))
 }
 
 /// How far past a flag producer `flags_read_later` looks for a reader.
