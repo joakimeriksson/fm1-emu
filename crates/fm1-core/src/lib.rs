@@ -2555,7 +2555,9 @@ impl Cpu {
             "R = sextra(R, p:#i, l:#i)" => {
                 let d = r(self, 0)?;
                 let src = self.regs[r(self, 1)?];
-                self.regs[d] = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, true);
+                let x = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, true);
+                self.set_nz(x);
+                self.regs[d] = x;
                 return Ok(Some(None));
             }
             "R.l = #i" | "R.h = #i" => {
@@ -2645,19 +2647,23 @@ impl Cpu {
             if rest.is_empty() {
                 let d = r(self, 0)?;
                 let src = self.regs[r(self, 1)?];
-                self.regs[d] = bit_insert(self.regs[d], src, v(self, 2)? & 31, v(self, 3)? & 31);
+                let x = bit_insert(self.regs[d], src, v(self, 2)? & 31, v(self, 3)? & 31);
+                self.set_nz(x);
+                self.regs[d] = x;
                 return Ok(Some(None));
             }
         }
         if s == "R = uextra(R, p:#i, l:#i)" {
             let d = r(self, 0)?;
             let src = self.regs[r(self, 1)?];
-            self.regs[d] = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, false);
+            let x = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, false);
+            self.set_nz(x);
+            self.regs[d] = x;
             return Ok(Some(None));
         }
         match s {
             "R = smin(R, R)" | "R = smax(R, R)" | "R = umin(R, R)" | "R = umax(R, R)" => {
-                // e4 and its flag-setting twin f4 share one layout: d bits
+                // e4 and f4 (a dual-issue pair's head) share one layout: d bits
                 // 28-31, a bits 20-23, b bits 24-27 (the f4 forms have too few
                 // corpus samples for the slot solver)
                 let raw = insn.raw;
@@ -3884,7 +3890,8 @@ fn decode_any(win: u64, pc: u32) -> Result<fm1_isa::Instruction, fm1_isa::Decode
         // 4-byte ALU forms decode_alu4 knows the layout of (`6c e8` `[R+#i] <<= #n`, `64 e8`
         // `[R+#i] &= R`, `6e e8` `[R+#i] >>= R`, ...): the table's classes fit only the offsets
         // the corpora used (m6502's `[r0+24] <<= 1`, `[r1+-4] &= r0`), and had no `6e e8` at all
-        Err(_) if decode_alu4(win & 0xffff_ffff).is_some() => raw(&ALU4_CRAW),
+        // (byte 1 `f0` / `f1`: a dual-issue pair's head)
+        Err(_) if decode_alu4(win & 0xffff_ffff).is_some() => raw(if matches!((win >> 8) & 0xff, 0xf0 | 0xf1) { &ALU4_PAIR_CRAW } else { &ALU4_CRAW }),
         // `d0..d7 ec`: word loads / stores at an offset or pre-incremented (route 18)
         Err(_) if matches!(win & 0xff, 0xd0..=0xd7) && (win >> 8) & 0xff == 0xec => raw(&WORD_MEM_CRAW),
         // post-increment loads / stores `[R++=#i]` (route 19 decodes the fields; the classes fit
@@ -4213,6 +4220,10 @@ static ALU4_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
     name: "alu4_craw", syntax: "R op= (alu4 raw)", len: 4, count: 0, mask: 0, match_: 0,
     group: "alu", alt: &[], samples: &[], slots: &[],
 };
+static ALU4_PAIR_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
+    name: "alu4_craw", syntax: "R op= (alu4 raw)  #", len: 4, count: 0, mask: 0, match_: 0,
+    group: "alu", alt: &[], samples: &[], slots: &[],
+};
 static POST_INC_CRAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
     name: "post_inc_craw", syntax: "[R++=#i] = R (raw)", len: 4, count: 0, mask: 0, match_: 0,
     group: "load", alt: &[], samples: &[], slots: &[],
@@ -4462,7 +4473,7 @@ fn sext6x4(v: u64) -> i32 {
 ///                           eb {2 += composed, 3 += sext12(bits(16,27))}
 fn decode_alu4(raw: u64) -> Option<Alu4> {
     let b0 = (raw & 0xff) as u32;
-    // f0/f1 are the flag-setting twins of e0/e1 (printed with a trailing `#`)
+    // f0/f1 are e0/e1 as a dual-issue pair's head (printed with a trailing `#`)
     let b1 = match ((raw >> 8) & 0xff) as u32 { 0xf0 => 0xe0, 0xf1 => 0xe1, x => x };
     let op4 = b0 >> 4;
     let code = ((raw >> 24) & 0xf) as u32;
@@ -6181,6 +6192,22 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.regs[2], 0xe221_7ba7, "r2.h = 57889 #; r2 = [r1+12]");
         assert_eq!(cpu.pc, 10);
+    }
+
+    #[test]
+    fn a_4_byte_alu_pair_head_is_a_pair() {
+        // `94 f1 50 5c` r5 = r5 | (1 << r12) # with `45 64` r5 = [r4+16]: the pair runs as one, the
+        // head's r5 stays (pi32v2-isa hw/fm1-2026-10-24-v3, or.bit.rrr.p)
+        let mut mem = vec![0u8; 0x100];
+        mem[..6].copy_from_slice(&[0x94, 0xf1, 0x50, 0x5c, 0x45, 0x64]);
+        mem[0x50..0x54].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        let mut ram = FlatRam::new(mem);
+        let mut cpu = Cpu::new(0);
+        (cpu.regs[4], cpu.regs[5], cpu.regs[12]) = (0x40, 2, 4);
+        cpu.step(&mut ram).unwrap();
+        assert!(cpu.pair_pending.is_some(), "a pair's head");
+        cpu.step(&mut ram).unwrap();
+        assert_eq!((cpu.regs[5], cpu.pc), (0x12, 6));
     }
 
     #[test]
