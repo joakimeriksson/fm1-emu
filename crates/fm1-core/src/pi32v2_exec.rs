@@ -12,15 +12,18 @@ use crate::{Bus, CoreError, Cpu, F_C, F_N, F_V, F_Z};
 use fm1_isa::pi32v2_table::{self as pt, id, Form, FORMS};
 use std::sync::OnceLock;
 
-/// A form's operands, read from its window.
+/// A form's operands, read from its window. The arms name the fields as the base form does; a pair
+/// head's twin may name them otherwise (`{d}` for `{r}`): `field_as` finds the one in the same place of
+/// the syntax.
 pub(crate) struct Ops {
     pub win: u64,
     pub form: &'static Form,
+    pub base: &'static Form,
 }
 
 impl Ops {
     fn f(&self, name: &str) -> &'static pt::Field {
-        self.form.field(name).unwrap_or_else(|| panic!("{}: no field {name}", self.form.id))
+        field_as(self.form, self.base, name).unwrap_or_else(|| panic!("{}: no field {name}", self.form.id))
     }
     /// A register field's register (a pair's even one).
     fn r(&self, name: &str) -> usize {
@@ -38,6 +41,14 @@ impl Ops {
     fn t(&self, name: &str) -> &'static str {
         self.f(name).text(self.win)
     }
+}
+
+/// `form`'s field for `base`'s field `name`: the same name, or the one in the same place of the syntax.
+fn field_as(form: &'static Form, base: &'static Form, name: &str) -> Option<&'static pt::Field> {
+    form.field(name).or_else(|| {
+        let k = pt::placeholders(base.syntax).iter().position(|&p| p == name)?;
+        form.field(pt::placeholders(form.syntax).get(k)?)
+    })
 }
 
 /// What an arm does besides writing registers.
@@ -77,10 +88,6 @@ impl X<'_> {
     /// The pair at n (even), as it was.
     fn pair(&self, n: usize) -> u64 {
         self.r[n & 15] as u64 | (self.r[(n + 1) & 15] as u64) << 32
-    }
-    /// The half `part` of register n, as it was.
-    fn half(&self, n: usize, part: &str) -> u32 {
-        (self.r[n & 15] >> if part == ".h" { 16 } else { 0 }) & 0xffff
     }
     fn flags(&mut self, f: u32) {
         self.cpu.flags = f & 0xf;
@@ -137,11 +144,6 @@ fn sat(v: i64, signed: bool, bits: u32) -> u64 {
 /// The half of v (`.h` or `.l`).
 fn half(v: u32, high: bool) -> u32 {
     if high { v >> 16 } else { v & 0xffff }
-}
-
-fn sethalf(old: u32, high: bool, h: u64) -> u32 {
-    let h = (h & 0xffff) as u32;
-    if high { (old & 0xffff) | h << 16 } else { (old & 0xffff_0000) | h }
 }
 
 /// One lane of an add / subtract with a mode such as `(ssat,x2)`: a and b raw `bits`-bit lanes; the raw
@@ -259,6 +261,101 @@ fn mul2(x: &mut X, o: &Ops, pair: bool, imm: bool, acc: i64, mode: Option<&str>)
     }
 }
 
+/// The special registers by number (pi32v2-isa's `sr` fields and masks).
+const SR: [&str; 16] = ["reti", "rete", "retx", "rets", "sr4", "psr", "cnum", "uspn", "sspn", "icfgn", "icfgs", "icfg",
+    "usp", "ssp", "sp", "pc"];
+const SR_RETI: u32 = 0;
+const SR_PSR: u32 = 5;
+
+/// Special register n as an instruction reads it: the core's own (`sreg_get_named`); pc the instruction's
+/// address; uspn, icfgn and icfgs read 0 on an FM-1 (pi32v2-isa k2.py), which fm1-emu does not otherwise keep.
+fn sr_value(cpu: &Cpu, n: usize) -> u32 {
+    match SR[n & 15] {
+        "pc" => cpu.pc,
+        "uspn" | "icfgn" | "icfgs" => 0,
+        name => crate::sreg_get_named(cpu, name),
+    }
+}
+
+/// Special register n written as an instruction writes it (v4.py): the return registers keep bits 26..1,
+/// psr its flags; icfg, usp, ssp and sp through the core's own setters. sr4, cnum, the n / s banks and
+/// pc keep nothing (they read 0 after a write; a write to pc fell through).
+fn sr_write(cpu: &mut Cpu, n: usize, v: u32) {
+    match SR[n & 15] {
+        name @ ("reti" | "rete" | "retx" | "rets") => cpu.set_sreg_named(name, v & crate::RETS_MASK),
+        "psr" => cpu.set_sreg_named("psr", v & 0xf),
+        name @ ("icfg" | "usp" | "ssp" | "sp") => cpu.set_sreg_named(name, v),
+        _ => {}
+    }
+}
+
+/// Push words, the first at the lowest address (sp ends at it).
+fn push_words<B: Bus>(cpu: &mut Cpu, bus: &mut B, vals: &[u32]) {
+    let sp = cpu.sp.wrapping_sub(4 * vals.len() as u32);
+    for (k, &v) in vals.iter().enumerate() {
+        bus.write32(sp.wrapping_add(4 * k as u32), v);
+    }
+    cpu.sp = sp;
+}
+
+/// The `bits`-bit value (carry, x) rotated right by c: (the low bits - 1, the new carry). p.py `_rorc` /
+/// `shift64`'s rorc.
+fn rorc(x: u64, cin: u64, c: u32, bits: u32) -> (u64, u64) {
+    let m: u128 = (1u128 << bits) - 1;
+    let v: u128 = (cin as u128) << (bits - 1) | x as u128;
+    let k = (bits - c % bits) % bits;
+    let v = if k == 0 { v } else { ((v << k) | (v >> (bits - k))) & m };
+    ((v & ((1u128 << (bits - 1)) - 1)) as u64, (v >> (bits - 1)) as u64 & 1)
+}
+
+/// A finite float's bits rounded to binary16, nearest even (s.py `encode` at 5 / 10 bits): past the range
+/// the infinity of its sign.
+fn f32_to_f16(b: u32) -> u16 {
+    let sign = ((b >> 16) & 0x8000) as u16;
+    let (exp, man) = ((b >> 23) & 0xff, b & 0x7f_ffff);
+    if exp == 0 && man == 0 {
+        return sign;
+    }
+    // the value is m * 2^e
+    let (m, e) = if exp == 0 { (man as u64, -149i32) } else { ((man | 0x80_0000) as u64, exp as i32 - 150) };
+    let exponent = 63 - m.leading_zeros() as i32 + e; // floor(log2)
+    let shift = exponent.max(-14) - 10;
+    let mut n = if e >= shift {
+        m << (e - shift)
+    } else {
+        // (m < 2^24: a shift of 64 or more leaves less than half the last place, 0)
+        let k = (shift - e) as u32;
+        if k >= 64 {
+            0
+        } else {
+            let (q, rem, half) = (m >> k, m & ((1u64 << k) - 1), 1u64 << (k - 1));
+            if rem > half || (rem == half && q & 1 != 0) { q + 1 } else { q }
+        }
+    };
+    let mut ex = exponent;
+    if n >= 1 << 11 {
+        n >>= 1;
+        ex += 1;
+    }
+    let expbits = if n >= 1 << 10 { (ex + 15).max(1) } else { 0 };
+    if expbits >= 31 {
+        return sign | 0x7c00;
+    }
+    sign | (expbits as u16) << 10 | (n & 0x3ff) as u16
+}
+
+/// A finite binary16's bits as a float's (exact).
+fn f16_to_f32(h: u16) -> u32 {
+    let sign = ((h >> 15) as u32) << 31;
+    let (exp, man) = (((h >> 10) & 0x1f) as u32, (h & 0x3ff) as u32);
+    if exp == 0 {
+        // (a subnormal: man * 2^-24, exact in a float)
+        sign | (man as f32 * f32::powi(2.0, -24)).to_bits()
+    } else {
+        sign | (exp + 112) << 23 | man << 13
+    }
+}
+
 /// 0, 1 or -1 for a mul / madd / msub id.
 fn acc_of(id: &str) -> i64 {
     if id.starts_with("madd") { 1 } else if id.starts_with("msub") { -1 } else { 0 }
@@ -278,7 +375,6 @@ fn mode_of(suffix: &str) -> String {
 
 /// One form's semantics; None: not one fm1-core runs.
 fn exec<B: Bus>(cpu: &mut Cpu, bus: &mut B, base: usize, o: &Ops, next_pc: u32) -> Option<Result<Done, CoreError>> {
-    let _ = (&bus, next_pc);
     let mut x = X { r: cpu.regs, f: cpu.flags, cpu };
     let fid = FORMS[base].id;
     match base {
@@ -627,6 +723,337 @@ fn exec<B: Bus>(cpu: &mut Cpu, bus: &mut B, base: usize, o: &Ops, next_pc: u32) 
                 _ => { x.w(o.r("r"), y as u32); let f = nz(shifted, y, 32); x.flags(f); }
             }
         }
+        // ==== d2.py: multiplies of loaded operands, with post-increments ====
+        // (`hh.i`: these encodings reset the FM-1, nothing to model; `hh.rh` runs as `hw.rh`, its
+        // second load 32 bits)
+        _ if (fid.contains(".mem1.") || fid.contains(".mem2.")) && !fid.contains(".hh.i.") => {
+            let p: Vec<&str> = fid.split('.').collect();
+            let (op, kind, size, addr, sign) = (p[0], p[1], p[2], p[3], p[4]);
+            let w0 = if size.starts_with('h') { 16 } else { 32 };
+            let rd = |bus: &mut B, a: u32, bits: u32| if bits == 16 { bus.read16(a) as u64 } else { bus.read32(a) as u64 };
+            let s = o.r("s");
+            let a = rd(bus, x.r[s], w0);
+            let b;
+            if kind == "mem1" {
+                let (bv, inc) = if addr == "i" { (x.r[o.r("t")], o.v("n") as u32) } else { (x.r[o.r("u")], x.r[o.r("t")]) };
+                b = bv as u64;
+                x.w(s, x.r[s].wrapping_add(inc));
+            } else {
+                let (second, inc_a, inc_b) = if addr == "i" {
+                    (o.r("t"), o.v("n") as u32, o.v("m") as u32)
+                } else {
+                    let t = x.r[o.r("t")];
+                    (o.r("u"), sx((t >> 16) as u64, 16) as u32, sx(t as u64, 16) as u32)
+                };
+                b = rd(bus, x.r[second], 32);
+                // (shared bases keep the first operand's increment)
+                x.w(second, x.r[second].wrapping_add(inc_b));
+                x.w(s, x.r[s].wrapping_add(inc_a));
+            }
+            let (a, b) = if sign == "s" { (sx(a, w0), sx(b, 32)) } else { (a as i64, b as i64) };
+            let product = (a as i128 * b as i128) as u64;
+            let d = o.r("r");
+            let acc = match op { "madd" => 1, "msub" => -1, _ => 0 };
+            let result = if acc == 0 {
+                product
+            } else {
+                let old = x.pair(d);
+                let (r, carry) = if acc > 0 { old.overflowing_add(product) } else { (old.wrapping_sub(product), old >= product) };
+                let f = (x.f & !F_C) | if carry { F_C } else { 0 };
+                x.flags(f);
+                r
+            };
+            // (the pair result wins over a coincident base update)
+            x.wp(d, result);
+        }
+        // ==== m2.py: memory forms ====
+        id::RMW_AND_INVR | id::RMW_SHL3_I | id::RMW_SHL3_R => {
+            let addr = x.r[o.r("r")].wrapping_add(o.v("n") as u32);
+            let old = bus.read32(addr);
+            let new = if base == id::RMW_AND_INVR {
+                old & !x.r[o.r("s")]
+            } else {
+                // (the count's low 8 bits, 32 and up as 32; signed saturating)
+                let c = (if base == id::RMW_SHL3_I { o.v("m") as u32 } else { x.r[o.r("s")] } & 0xff).min(32);
+                ((old as i32 as i64) << c).clamp(i32::MIN as i64, i32::MAX as i64) as u32
+            };
+            bus.write32(addr, new);
+        }
+        id::ST_H_HI_IDX | id::ST_H_HI_IDXS => {
+            let i = x.r[o.r("s")];
+            let addr = x.r[o.r("r")].wrapping_add(if base == id::ST_H_HI_IDXS { i << 1 } else { i });
+            bus.write16(addr, (x.r[o.r("t")] >> 16) as u16);
+        }
+        // npc: the instruction's address + 4 rounded up to a word (a 6-byte `ld.w.npc` at 2 mod 4 reads
+        // pc + 6; followup5-m-npc.jsonl)
+        id::LD_W_NPC | id::LD_W_NPC_R => {
+            let npc = x.cpu.pc.wrapping_add(7) & !3;
+            let off = if base == id::LD_W_NPC { o.v("n") as u32 } else { x.r[o.r("s")] };
+            let v = bus.read32(npc.wrapping_add(off));
+            x.w(o.r("r"), v);
+        }
+        // ==== b2.py: branches on the flags, on r0's bit 0, and the 6-byte call (none touches the flags) ====
+        _ if fid.starts_with("bc.") => {
+            let f = x.f;
+            let (n, z, c, v) = (f & F_N != 0, f & F_Z != 0, f & F_C != 0, f & F_V != 0);
+            let taken = match &fid[3..] {
+                "eq" => z, "ne" => !z, "cs" => c, "cc" => !c, "hi" => c && !z, "ls" => !c || z,
+                "ge" => n == v, "lt" => n != v, "gt" => !z && n == v, _ => z || n != v,
+            };
+            if taken {
+                return Some(Ok(Done::Jump(next_pc.wrapping_add(o.v("n") as u32))));
+            }
+        }
+        // (r0's bit 0: `.c` taken when it is clear, `.s` when it is set)
+        id::IFS2NS_C | id::IFS2NS_S => {
+            if (x.r[0] & 1 != 0) == (base == id::IFS2NS_S) {
+                return Some(Ok(Done::Jump(next_pc.wrapping_add(o.v("n") as u32))));
+            }
+        }
+        id::CALL_XL => {
+            x.cpu.rets = next_pc;
+            return Some(Ok(Done::Jump(next_pc.wrapping_add(o.v("n") as u32))));
+        }
+        // ==== k2.py: special registers, register-mask pushes, bit fields by a register ====
+        id::MOV_R_SR => {
+            let v = sr_value(x.cpu, o.raw("s") as usize);
+            x.w(o.r("r"), v);
+        }
+        id::PUSH_SRL | id::PUSH_SRMASK | id::PUSH_SRMASK_C => {
+            let mask = o.raw(if base == id::PUSH_SRMASK_C { "n" } else { "m" });
+            let vals: Vec<u32> = (0..16).filter(|i| mask >> i & 1 != 0).map(|i| sr_value(x.cpu, i)).collect();
+            push_words(x.cpu, bus, &vals);
+            // pushing psr clears N Z C V; pushing reti opens nesting, as `Fast::PushSregs`
+            if mask >> SR_PSR & 1 != 0 {
+                x.flags(0);
+            }
+            if mask >> SR_RETI & 1 != 0 {
+                x.cpu.nest_ok = true;
+                bus.irq_window();
+            }
+        }
+        id::PUSH_RMASK_C | id::PUSH_RETS_RMASK_C => {
+            let mask = o.raw("n");
+            let mut vals: Vec<u32> = (0..16).filter(|i| mask >> i & 1 != 0).map(|i| x.r[i]).collect();
+            if base == id::PUSH_RETS_RMASK_C {
+                vals.push(x.cpu.rets);
+            }
+            push_words(x.cpu, bus, &vals);
+        }
+        // the field's position and width from a register: p = t[12:8], l = t[4:0]; N and Z
+        id::INSERT_RRRIIRII | id::UEXTRA_RRRIIRII | id::SEXTRA_RRRIIRII => {
+            let t = x.r[o.r("t")];
+            let (p, l) = (t >> 8 & 31, t & 31);
+            let src = x.r[o.r("s")];
+            let d = o.r("r");
+            let v = match base {
+                id::INSERT_RRRIIRII => crate::bit_insert(x.r[d], src, p, l),
+                id::UEXTRA_RRRIIRII => crate::bit_extract(src, p, l, false),
+                _ => crate::bit_extract(src, p, l, true),
+            };
+            x.w(d, v);
+            let f = nz(x.f, v as u64, 32);
+            x.flags(f);
+        }
+        // ==== p.py: rotates through the carry, rounding pair shifts, signed-count shift, zcmp, halves ====
+        id::ROR_RRR => {
+            let v = x.r[o.r("s")].rotate_right(x.r[o.r("t")] & 31);
+            x.w(o.r("r"), v);
+            let f = nz(x.f, v as u64, 32);
+            x.flags(f);
+        }
+        // the 33-bit (carry, rs) rotated right by c (0..32); N Z, C the bit rotated into it, V kept
+        id::CYCC_RRI | id::CYCC_RRR => {
+            let c = if base == id::CYCC_RRI { o.v("n") as u32 } else { (x.r[o.r("t")] & 0xff).min(32) };
+            let (v, cy) = rorc(x.r[o.r("s")] as u64, (x.f >> 1 & 1) as u64, c, 33);
+            x.w(o.r("r"), v as u32);
+            let f = (x.f & F_V) | if cy != 0 { F_C } else { 0 } | nz(0, v, 32);
+            x.flags(f);
+        }
+        // the 65-bit (carry, pair) rotated right by c (a count of 0 changes nothing, 64 and up as 64); only C
+        id::CYCC_PI | id::CYCC_PR => {
+            let c = if base == id::CYCC_PI { o.v("n") as u32 } else { x.r[o.r("s")] & 0xff };
+            let d = o.r("r");
+            // (a count of 0 still writes the pair, unchanged: as a pair's head it wins, cycc.pr.p)
+            if c == 0 {
+                let v = x.pair(d);
+                x.wp(d, v);
+            } else {
+                let (v, cy) = rorc(x.pair(d), (x.f >> 1 & 1) as u64, c.min(64), 65);
+                x.wp(d, v);
+                let f = (x.f & !F_C) | if cy != 0 { F_C } else { 0 };
+                x.flags(f);
+            }
+        }
+        // a signed 6-bit count in rt's low bits: left for a positive one, right (zero fill) for a negative one
+        id::XCHG_RRR => {
+            let v = x.r[o.r("s")];
+            let c = (x.r[o.r("t")] & 63) as i32;
+            let c = if c >= 32 { c - 64 } else { c };
+            let mut cy = x.f >> 1 & 1;
+            let r = if c > 0 {
+                cy = v >> (32 - c) & 1;
+                v << c
+            } else if c < 0 {
+                cy = v >> (-c - 1) & 1;
+                v.checked_shr((-c) as u32).unwrap_or(0)
+            } else {
+                v
+            };
+            x.w(o.r("r"), r);
+            let f = (x.f & F_V) | cy << 1 | nz(0, r as u64, 32);
+            x.flags(f);
+        }
+        // a pair shifted right by 0..64, rounded to the nearest (ties by the mode: up, to even, away from
+        // zero, toward zero), saturated to 32 bits (unsigned for >>, signed for >>>); N Z, C the rounding bit
+        id::SHIFTR_RPI_MODE | id::SHIFTR_RPR_MODE => {
+            let imm = base == id::SHIFTR_RPI_MODE;
+            let xx = x.pair(o.r("s"));
+            let c = (if imm { o.v("m") as u32 } else { x.r[o.r("t")] & 0xff }).min(64);
+            let mode = o.raw(if imm { "p" } else { "m" });
+            let arith = o.raw("n") != 0;
+            let xv: i128 = if arith { xx as i64 as i128 } else { xx as i128 };
+            let mut q = xv >> c;
+            let rem2 = 2 * (xv - (q << c));
+            let unit = 1i128 << c;
+            if c > 0 && rem2 > unit {
+                q += 1;
+            } else if c > 0 && rem2 == unit {
+                q += [1, q & 1, (xv >= 0) as i128, (xv < 0) as i128][mode as usize & 3];
+            }
+            let r = if arith { q.clamp(i32::MIN as i128, i32::MAX as i128) as i64 as u32 } else { q.min(u32::MAX as i128) as u32 };
+            let cy = if c > 0 { (xx >> (c - 1)) & 1 } else { 0 };
+            x.w(o.r("r"), r);
+            let f = (x.f & F_V) | (cy as u32) << 1 | nz(0, r as u64, 32);
+            x.flags(f);
+        }
+        // each byte shifted right by 0..7 on its own; no flags
+        id::LSR_RRI_VB => {
+            let (v, n) = (x.r[o.r("s")], o.v("n") as u32);
+            let r = (0..4).fold(0u32, |a, i| a | (((v >> (8 * i)) & 0xff) >> n) << (8 * i));
+            x.w(o.r("r"), r);
+        }
+        // each halfword of the pair shifted right (sign fill) by 0..7, rounded (a tie up); no flags
+        id::ASR_PPI_RND_VH => {
+            let n = o.v("n") as u32;
+            let (s, d) = (o.r("s"), o.r("r"));
+            for k in 0..2 {
+                let v = x.r[s + k];
+                let mut r = 0u32;
+                for i in 0..2 {
+                    let h = ((v >> (16 * i)) & 0xffff) as u16 as i16 as i64;
+                    let h = if n == 0 { h } else { (h + (1i64 << (n - 1))) >> n };
+                    r |= ((h as u32) & 0xffff) << (16 * i);
+                }
+                x.w(d + k, r);
+            }
+        }
+        // (this chip does not count bits: the pair form copies the low half of the pair's low register)
+        id::POPCNT_R_PAIR => {
+            let v = x.r[o.r("s")] & 0xffff;
+            x.wh(o.r("r"), ".l", v);
+        }
+        // zcmp: 0, 1 or -1 by the sign; N and Z
+        id::SGN_RR => {
+            let v = x.r[o.r("s")];
+            let r = if v == 0 { 0 } else if (v as i32) < 0 { u32::MAX } else { 1 };
+            x.w(o.r("r"), r);
+            let f = nz(x.f, r as u64, 32);
+            x.flags(f);
+        }
+        id::MOV_HALF => {
+            let s = x.r[o.r("s")];
+            let src = if o.raw("m") != 0 { s >> 16 } else { s & 0xffff };
+            x.wh(o.r("r"), if o.raw("n") != 0 { ".h" } else { ".l" }, src);
+        }
+        // ==== s.py: the float compare and the half-precision conversions ====
+        id::FCMP_RR => {
+            let f = crate::fcmp_flags(x.r[o.r("r")], x.r[o.r("s")]);
+            x.flags(f);
+        }
+        // rD.l = the float rounded to binary16 (nearest even); a NaN keeps its sign and class, not its payload
+        id::FTOF_HALF_RR => {
+            let b = x.r[o.r("s")];
+            let sign = ((b >> 16) & 0x8000) as u16;
+            let h = if (b >> 23) & 0xff != 0xff {
+                f32_to_f16(b)
+            } else if b & 0x7f_ffff == 0 {
+                sign | 0x7c00
+            } else if b & 0x40_0000 != 0 {
+                sign | 0x7e00
+            } else {
+                sign | 0x7c01
+            };
+            x.wh(o.r("r"), ".l", h as u32);
+        }
+        // rD = rS.l as a float (exact); a NaN as above
+        id::FTOF_FULL_RR => {
+            let h = x.r[o.r("s")] & 0xffff;
+            let sign = (h >> 15) << 31;
+            let v = if (h >> 10) & 0x1f != 0x1f {
+                f16_to_f32(h as u16)
+            } else if h & 0x3ff == 0 {
+                sign | 0x7f80_0000
+            } else if h & 0x200 != 0 {
+                sign | 0x7fc0_0000
+            } else {
+                sign | 0x7f80_0001
+            };
+            x.w(o.r("r"), v);
+        }
+        // ==== v4.py: special-register writes and pops, the stack banks, returns, events ====
+        // (the models describe what an FM-1 showed in its ROM's download context, not mode changes, interrupt
+        // delivery or events: the returns jump to their register, the event and software-interrupt forms do
+        // nothing visible, bkpt took its handler's return, popping pc)
+        id::MOV_SR_R => {
+            let v = x.r[o.r("r")];
+            sr_write(x.cpu, o.raw("s") as usize, v);
+        }
+        id::LI_SR_U32 => sr_write(x.cpu, o.raw("s") as usize, o.v("n") as u32),
+        id::POP_SRL | id::POP_SRMASK => {
+            let mask = o.raw(if base == id::POP_SRL { "m" } else { "n" });
+            let mut addr = x.cpu.sp;
+            x.cpu.sp = addr.wrapping_add(4 * mask.count_ones());
+            let mut jump = None;
+            for n in 0..16usize {
+                if mask >> n & 1 != 0 {
+                    let v = bus.read32(addr);
+                    if n == 15 {
+                        jump = Some(v & crate::RETS_MASK);
+                    } else {
+                        sr_write(x.cpu, n, v);
+                    }
+                    addr = addr.wrapping_add(4);
+                }
+            }
+            // (reti popped: back in an outer handler, as fm1-emu's own pops)
+            if mask >> SR_RETI & 1 != 0 {
+                x.cpu.nest_ok = false;
+            }
+            if let Some(t) = jump {
+                return Some(Ok(Done::Jump(t)));
+            }
+        }
+        // (uspn / sspn read as usp / ssp there)
+        id::MOV_SP_USPN => x.cpu.sp = x.cpu.get_usp(),
+        id::MOV_USPN_SP => {
+            let sp = x.cpu.sp;
+            x.cpu.set_usp(sp);
+        }
+        id::GOTOSS_XL => {
+            x.cpu.rets = next_pc;
+            return Some(Ok(Done::Jump(next_pc.wrapping_add(o.v("n") as u32))));
+        }
+        id::RTNS | id::RTE | id::RTX | id::RTHW | id::RTSS => {
+            let name = match base { id::RTNS => "reti", id::RTE => "rete", id::RTSS => "rets", _ => "retx" };
+            return Some(Ok(Done::Jump(crate::sreg_get_named(x.cpu, name))));
+        }
+        id::BKPT => {
+            let t = bus.read32(x.cpu.sp);
+            x.cpu.sp = x.cpu.sp.wrapping_add(4);
+            return Some(Ok(Done::Jump(t)));
+        }
+        id::SEVL | id::SEVG | id::WFE | id::SWI => {}
         _ => return None,
     }
     Some(Ok(Done::Next))
@@ -642,10 +1069,14 @@ fn table() -> &'static [Option<usize>] {
             .iter()
             .map(|f| {
                 let base = pt::by_id(f.base_id())?;
+                // (a twin must have every field of its base)
+                if FORMS[base].fields.iter().any(|b| field_as(f, &FORMS[base], b.name).is_none()) {
+                    return None;
+                }
                 // (each form once on a scratch core: the arms are the list of what is run)
                 let mut cpu = Cpu::new(0);
                 let mut bus = Scratch;
-                let o = Ops { win: f.value, form: f };
+                let o = Ops { win: f.value, form: f, base: &FORMS[base] };
                 exec(&mut cpu, &mut bus, base, &o, 0).map(|_| base)
             })
             .collect()
@@ -671,7 +1102,7 @@ pub(crate) fn decode(win: u64) -> Option<usize> {
 pub(crate) fn run<B: Bus>(cpu: &mut Cpu, bus: &mut B, k: usize, win: u64, next_pc: u32) -> Option<Result<Done, CoreError>> {
     let base = (*table().get(k)?)?;
     cpu.pi_wrote = [0; 16];
-    exec(cpu, bus, base, &Ops { win, form: &FORMS[k] }, next_pc)
+    exec(cpu, bus, base, &Ops { win, form: &FORMS[k], base: &FORMS[base] }, next_pc)
 }
 
 /// Does form k read the flags (for `flags_read_later`): the flag branches, the carry rotates and the

@@ -4856,7 +4856,8 @@ mod tests {
             assert_eq!(st(&ca), st(&cb), "{s} ({raw:#x}): state");
             assert_eq!(a.mem, b.mem, "{s} ({raw:#x}): memory");
         }
-        let shapes = ["[--sp] = {R*2}", "{R*2} = [sp++]", "[--sp] = {R*1}", "{R*1} = [sp++]", "rti", "R = R + R + c", "R = R - R - !c", "flushinv [R]", "iflush [R]", "[R+#i] &= ~R"];
+        // (`[R+#i] &= ~R` is pi32v2-isa's rmw.and.invr now, run by pi32v2_exec)
+        let shapes = ["[--sp] = {R*2}", "{R*2} = [sp++]", "[--sp] = {R*1}", "{R*1} = [sp++]", "rti", "R = R + R + c", "R = R - R - !c", "flushinv [R]", "iflush [R]"];
         let mut seen = std::collections::BTreeMap::<&str, u32>::new();
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
         for e in fm1_isa::ISA {
@@ -4889,8 +4890,7 @@ mod tests {
         for s in shapes {
             assert!(seen.contains_key(s), "{s}: no encoding decoded ({seen:?})");
         }
-        assert!(seen.keys().any(|s| s.starts_with("[--sp] = {psr")), "a special-register push: {seen:?}");
-        assert!(seen.keys().any(|s| s.ends_with("} = [sp++]") && s.contains("reti")), "a special-register pop: {seen:?}");
+        // (the special-register pushes and pops are pi32v2-isa's push.srl / pop.srl now, run by pi32v2_exec)
     }
     struct FlatRam {
         mem: Vec<u8>,
@@ -5055,12 +5055,12 @@ mod tests {
     }
     #[test]
     fn unsupported_class_halts() {
-        // `a0 00` = swi 0 — no semantics yet; must halt, not nop-slide
-        let mut ram = FlatRam::new(vec![0xa0, 0x00, 0, 0, 0, 0, 0, 0]);
+        // `21 00` = syscall — no semantics (pi32v2-isa has no model of it either); must halt, not nop-slide
+        let mut ram = FlatRam::new(vec![0x21, 0x00, 0, 0, 0, 0, 0, 0]);
         let mut cpu = Cpu::new(0);
         match cpu.step(&mut ram) {
             Err(CoreError::Unsupported { name, .. }) => {
-                assert_eq!(name, "swi_i");
+                assert_eq!(name, "syscall");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
@@ -5446,7 +5446,8 @@ mod tests {
         for _ in 0..3 {
             cpu.step(&mut ram).unwrap();
         }
-        assert_eq!(cpu.regs[2], 0x0201_2345, "r2 = reti");
+        // (reti keeps bits 26..1 of what is written to it, as an FM-1)
+        assert_eq!(cpu.regs[2], 0x0201_2344, "r2 = reti");
         assert_eq!(cpu.rets, 0x0200_0abc, "rets = r1");
     }
 
@@ -6154,9 +6155,14 @@ mod tests {
         assert_eq!(run_regs(&[0xde, 0xe1, 0x6d, 0x39], &[(7, 0x8000_0000), (6, 0)]).regs[3], i32::MIN as u32);
         // `de e1 01 02` r0 = r1_r0 >> 33 (u)
         assert_eq!(run_regs(&[0xde, 0xe1, 0x01, 0x02], &[(1, 0xffff_fffe), (0, 5)]).regs[0], 0x7fff_ffff);
-        // `d4 f1 05 eb` r15_r14 <c>= #i (a carry rotate, bit 27) is not the plain pair rotate: it halts
+        // `d4 f1 05 eb` r15_r14 <c>= 53 # (a carry rotate, bit 27) is not the plain pair rotate: pi32v2-isa's
+        // cycc.pi.p (pi32v2_exec), the 65-bit (C, r15_r14) rotated right (the value its model gives)
         let mut ram = FlatRam::new([0xd4, 0xf1, 0x05, 0xeb].iter().copied().chain([0; 0x3ffc]).collect());
-        assert!(Cpu::new(0).step(&mut ram).is_err());
+        let mut cpu = Cpu::new(0);
+        (cpu.regs[14], cpu.regs[15], cpu.flags) = (0x41, 0, F_C);
+        cpu.step(&mut ram).unwrap();
+        cpu.step(&mut ram).unwrap();
+        assert_eq!((cpu.regs[14], cpu.regs[15], cpu.flags), (0x0004_1800, 0, 0), "r15_r14 <c>= 53");
         // `39 e4 20 13` r1 = r2 + r3 (ssat), `39 e4 28 13` r1 = r2 - r3 (ssat)
         assert_eq!(run_regs(&[0x39, 0xe4, 0x20, 0x13], &[(2, 0x7fff_fff0), (3, 0x100)]).regs[1], 0x7fff_ffff);
         assert_eq!(run_regs(&[0x39, 0xe4, 0x20, 0x13], &[(2, 5), (3, -7i32 as u32)]).regs[1], -2i32 as u32);

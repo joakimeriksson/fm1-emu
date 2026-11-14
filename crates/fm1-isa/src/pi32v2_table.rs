@@ -124,6 +124,23 @@ impl Form {
     }
 }
 
+/// The field names a syntax uses, in order (`{x}`; `{{` and `}}` are literal braces).
+pub fn placeholders(syntax: &str) -> Vec<&str> {
+    let (b, mut out, mut k) = (syntax.as_bytes(), Vec::new(), 0);
+    while k < b.len() {
+        if b[k] == b'{' && b.get(k + 1) == Some(&b'{') {
+            k += 2;
+        } else if b[k] == b'{' {
+            let end = syntax[k..].find('}').map_or(b.len(), |e| k + e);
+            out.push(&syntax[k + 1..end]);
+            k = end + 1;
+        } else {
+            k += 1;
+        }
+    }
+    out
+}
+
 /// A 12-bit modified immediate: 8 bits repeated in a pattern, or rotated (as in ARM Thumb-2).
 pub fn modimm(raw: u32) -> u32 {
     if raw >> 10 == 0 {
