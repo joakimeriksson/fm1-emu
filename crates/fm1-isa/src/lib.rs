@@ -212,6 +212,19 @@ impl std::fmt::Debug for DecodeError {
     }
 }
 
+/// Classes whose corpus-mined mask is wider than the instructions it stands for: the words they
+/// really cover. The rest of the mask decodes as nothing in the vendor objdump (20260730.1, -mcpu=r3)
+/// and in pi32v2-isa's table, and on an FM-1 (2026-11) runs as something else.
+fn covers(e: &IsaEntry, win: u64) -> bool {
+    match e.name {
+        // `R = #i`: `rN = 0..255` for r0..r7 (`001i iiii 01jj jrrr`) and `rN = 0` for r8..r15
+        // (`0001 0100 1100 0rrr`). The other words of c040/0040, e.g. `45 00`..`48 00`, change nothing
+        // on an FM-1.
+        "r_mov_i_l2" => win & 0xe0c0 == 0x2040 || win & 0xfff8 == 0x14c0,
+        _ => true,
+    }
+}
+
 /// Decode from a zero-extended little-endian window of up to 6 bytes.
 pub fn decode_win(win: u64, addr: u32) -> Result<Instruction, DecodeError> {
     // the FPU first: its encodings never appear in the objdump corpora, and the float
@@ -223,7 +236,7 @@ pub fn decode_win(win: u64, addr: u32) -> Result<Instruction, DecodeError> {
     }
     let mut best: Option<&'static IsaEntry> = None;
     for e in generated_isa::ISA {
-        if (win & e.mask) == e.match_ {
+        if (win & e.mask) == e.match_ && covers(e, win) {
             // Sample tiebreak compares only the entries own length bytes
             // (samples are stored as len-byte little-endian integers, the
             // window is always a 6-byte fetch).
