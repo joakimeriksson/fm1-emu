@@ -6,6 +6,9 @@
 export function jitImports(exports, stats) {
   let next;
   return {
+    // the emulated WiFi's NAT asking for a URL (fm1_oss_wifi with the internet): only the
+    // page's worklet answers it; everywhere else the import is a stub
+    fm1_net_fetch() {},
     fm1_jit_compile(ptr, len, hRead, hWrite, hOp) {
       const start = performance.now();
       try {

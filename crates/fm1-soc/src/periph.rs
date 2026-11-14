@@ -241,8 +241,12 @@ pub struct Periph {
     /// USB frames (usb.rs): the next, and cycles per millisecond; MAX = no cable.
     pub(crate) usb_next: u64,
     pub(crate) usb_period: u64,
+    /// The network's next tick, every 10 ms (`arm_net_tick`: the WiFi chip or a USB network
+    /// adapter is on); MAX = no link.
+    pub(crate) net_next: u64,
     usb_sof_irq: bool,
     usb_ctrl_irq: bool,
+    pub(crate) usb_packet_next: u64,
     /// The cycle the watchdog runs out at (p33.rs; MAX: stopped).
     pub(crate) wdt_at: u64,
     tmr: [Tmr; 4],
@@ -393,8 +397,10 @@ impl Default for Periph {
             spi2_next: u64::MAX,
             usb_next: u64::MAX,
             usb_period: 0,
+            net_next: u64::MAX,
             usb_sof_irq: false,
             usb_ctrl_irq: false,
+            usb_packet_next: u64::MAX,
             wdt_at: u64::MAX,
             tmr: [Tmr { next: u64::MAX, ..Default::default() }; 4],
             uart: Uart { next: u64::MAX, ot_next: u64::MAX, ..Default::default() },
@@ -438,8 +444,11 @@ pub struct Due {
     pub uart_rx: Option<(u32, u8)>,
     /// A USB frame is due (the SoC runs the host's millisecond: usb.rs).
     pub usb_frame: bool,
+    pub usb_packet: bool,
     /// The watchdog ran out (the SoC resets the chip).
     pub wdt: bool,
+    /// The WiFi chip's tick (--oss-wifi): the virtual AP's beacons, the NAT's sockets.
+    pub net_tick: bool,
     pub actions: Vec<Action>,
 }
 
@@ -450,6 +459,12 @@ impl Periph {
 
     pub fn cycle_of_ms(&self, ms: u64) -> u64 {
         ms * self.hz / 1000
+    }
+
+    /// The network (the WiFi chip, the NAT) ticks every 10 ms from now on, the first time at once.
+    pub(crate) fn arm_net_tick(&mut self) {
+        self.net_next = self.cycles;
+        self.next_due = 0;
     }
 
     /// I2S frames the DAC clock has counted since boot: 24 MHz / 544 a second whatever the CPU
@@ -501,7 +516,7 @@ impl Periph {
     /// The next cycle at which something timed happens.
     fn next_event(&self) -> u64 {
         let mut n = self.t5_next.min(self.alnk_next).min(self.tick_next).min(self.spi2_next).min(self.adc_next).min(self.spi1_irq_at);
-        n = n.min(self.uart.next).min(self.uart.ot_next).min(self.usb_next).min(self.wdt_at);
+        n = n.min(self.uart.next).min(self.uart.ot_next).min(self.usb_next).min(self.usb_packet_next).min(self.wdt_at).min(self.net_next);
         for t in &self.tmr {
             n = n.min(t.next);
         }
@@ -590,6 +605,15 @@ impl Periph {
                 self.usb_next = self.cycles + self.usb_period;
             }
         }
+        if self.cycles >= self.net_next {
+            due.net_tick = true;
+            // (from the clock as it is now: the runner sets `hz` after the chip is made)
+            self.net_next = self.cycles + (self.hz / 100).max(1);
+        }
+        if self.cycles >= self.usb_packet_next {
+            due.usb_packet = true;
+            self.usb_packet_next = u64::MAX;
+        }
         if self.cycles >= self.wdt_at {
             self.wdt_at = u64::MAX;
             due.wdt = true;
@@ -644,6 +668,7 @@ impl Periph {
             adc_value: old.adc_value,
             usb_next: old.usb_next,
             usb_period: old.usb_period,
+            net_next: old.net_next,
             uart,
             sr_shift: old.sr_shift,
             sr_latched: old.sr_latched,

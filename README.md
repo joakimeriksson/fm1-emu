@@ -109,6 +109,26 @@ some units, to test a firmware's fallback to one core ([docs/stock-firmware.md](
 `fm1-live --flash FILE` keeps the flash chip (saved presets, samples) in FILE between runs: read
 at the start if it is there, written back at the end. `FM1_FLASH_CUT=N` cuts the power half way
 through the Nth erase or page program, to see what a firmware makes of a half-written save.
+`fm1-live --wifi oss` gives a clean-room WiFi driver (modd's) the chip as it sees it: the WDMA
+engine, the BBP port and the MAC registers at 0x30000, and a virtual AP "Home" (WPA2, password
+"fm1pass"; `--wifi-ssid NAME --wifi-password PASS` for another, which a driver then has to have to
+join) with a subnet behind it (DHCP, DNS, SNTP). Without it the window stays unknown, as a unit
+with no radio. `fm1-live --wifi jieli` (plain `--wifi` is the same) is the vendor stack's view
+instead: the `plat_wifi_*` mailbox at 0x30000 that an fm1-base firmware built with
+`wifi_stack = "emu"` (`tools/build.py APP --wifi-emu`) talks to, with the same two APs and the
+subnet; the firmware's WiFi screens scan, join and forget as on the device. JieLi's binary driver
+itself is not emulated: a firmware linking it, as shipped, finds no chip. `fm1-live --usb ethernet`
+plugs a USB Ethernet adapter into the host port instead: a plain CDC-ECM device (the class modd's
+usbnet_ecm drives: the MAC as a string descriptor, SetEthernetPacketFilter, raw frames over a bulk
+pair), with the same subnet behind it; the firmware must switch the port to host mode itself.
+`--net internet` puts the real network behind the subnet: a user-mode NAT over this
+computer's sockets, names resolved for real, each host connection on its own thread so a far host
+never stalls the audio. It reaches public addresses only; `--net lan` adds this computer's own
+addresses and its LAN. `FM1_NET_TRACE=1` says what the subnet and the NAT do. The page does the
+same with `?wifi=oss&net=internet`, `?wifi=jieli&net=internet` and `?usb=ethernet&net=internet`
+(`&wifi-ssid=&wifi-password=` for the AP), the network being the page's `fetch()`: HTTP only, and
+from an https page only the hosts that have https. (`--oss-wifi`, `--internet`, `--allow-lan`,
+`?oss-wifi=1`, `?internet=1` are the older spellings and still work.)
 `fm1-live --usb` plugs in a USB cable: the FM-1's USB controller answers (without it, it stays
 silent, as on a unit with no cable), a host enumerates it, and a USB-MIDI firmware shows up on the
 computer (macOS and Linux; on Windows the bus runs, but no MIDI device appears) as a MIDI device

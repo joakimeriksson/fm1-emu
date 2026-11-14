@@ -252,6 +252,79 @@ pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u
     }
 }
 
+/// The WiFi chip as a clean-room driver sees it (fm1_soc::wifi_hw): after a boot, before the
+/// first render. `internet` != 0: the page's fetch() behind the virtual AP (HTTP only), the
+/// page asked through its `fm1_net_fetch` import and answering with `fm1_net_response`.
+#[no_mangle]
+pub extern "C" fn fm1_oss_wifi(internet: u32) {
+    if let Some(m) = machine() {
+        m.soc.enable_oss_wifi();
+        if internet != 0 {
+            m.soc.enable_internet(false);
+        }
+    }
+}
+
+/// The virtual access point's name and passphrase (?wifi-ssid=, ?wifi-password=), UTF-8 from
+/// fm1_alloc, before or after fm1_oss_wifi / fm1_vendor_wifi. 1 when they would not do for WPA2.
+#[no_mangle]
+pub extern "C" fn fm1_wifi_ap(ssid: *mut u8, ssid_len: u32, pass: *mut u8, pass_len: u32) -> u32 {
+    // SAFETY: as fm1_bench_script: fm1_alloc allocations JS filled, consumed exactly once.
+    let ssid = unsafe { Vec::from_raw_parts(ssid, ssid_len as usize, ssid_len as usize) };
+    let pass = unsafe { Vec::from_raw_parts(pass, pass_len as usize, pass_len as usize) };
+    let (Ok(ssid), Ok(pass)) = (String::from_utf8(ssid), String::from_utf8(pass)) else { return 1 };
+    if fm1_soc::net::Ap::check(&ssid, &pass).is_err() { return 1; }
+    let Some(m) = machine() else { return 1 };
+    m.soc.set_wifi_ap(fm1_soc::net::Ap { ssid, password: pass });
+    0
+}
+
+/// The vendor WiFi stack's view (fm1_soc::wifi_mailbox): for an fm1-base firmware built with
+/// wifi_stack = "emu"; after a boot, before the first render. `internet` as for fm1_oss_wifi.
+#[no_mangle]
+pub extern "C" fn fm1_vendor_wifi(internet: u32) {
+    if let Some(m) = machine() {
+        m.soc.enable_vendor_wifi();
+        if internet != 0 {
+            m.soc.enable_internet(false);
+        }
+    }
+}
+
+/// A USB Ethernet adapter (CDC-ECM) on the FM-1's host port (fm1_soc::usb::ethernet), the
+/// virtual subnet behind it: after a boot, before the first render. `internet` as for fm1_oss_wifi.
+#[no_mangle]
+pub extern "C" fn fm1_usb_ethernet(internet: u32) {
+    if let Some(m) = machine() {
+        m.soc.usb_ethernet();
+        if internet != 0 {
+            m.soc.enable_internet(false);
+        }
+    }
+}
+
+/// The wall clock (unix seconds) the virtual subnet's SNTP answers from; after fm1_oss_wifi
+/// or fm1_usb_ethernet.
+#[no_mangle]
+pub extern "C" fn fm1_set_epoch(unix_secs: u32) {
+    if let Some(net) = machine().and_then(|m| m.soc.net.as_mut()) {
+        net.epoch_hint = Some(unix_secs as u64);
+    }
+}
+
+/// The page's answer to a fetch the NAT asked for: `status` 0 is a network error, else the
+/// HTTP status; the body at `ptr` and the content type at `ctype`, both from fm1_alloc.
+#[no_mangle]
+pub extern "C" fn fm1_net_response(id: u32, status: u32, ptr: *mut u8, len: u32, ctype: *mut u8, ctype_len: u32) {
+    // SAFETY: as fm1_boot: fm1_alloc allocations JS filled, consumed here.
+    let body = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
+    let ctype = unsafe { Vec::from_raw_parts(ctype, ctype_len as usize, ctype_len as usize) };
+    #[cfg(target_arch = "wasm32")]
+    fm1_soc::nat::wasm::deliver(id, status as u16, &String::from_utf8_lossy(&ctype), body);
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (id, status, body, ctype);
+}
+
 /// Flash persistence. Pointers are borrowed until the instance is replaced. Restores and
 /// bank imports consume fm1_alloc allocations and are only accepted before the first render.
 #[no_mangle]

@@ -41,6 +41,10 @@
 //! SPDX-License-Identifier: MIT
 
 use std::collections::VecDeque;
+mod ethernet;
+mod hub;
+use ethernet::EthDevice;
+use hub::HubDevice;
 
 pub const USB_LO: u32 = 0x11800;
 pub const USB_HI: u32 = 0x1183f;
@@ -63,6 +67,7 @@ const S_INTRUSBE: u32 = 11;
 const S_FRAME1: u32 = 12;
 const S_FRAME2: u32 = 13;
 const S_INDEX: u32 = 14;
+const S_DEVCTL: u32 = 15;
 const S_TXMAXP: u32 = 16;
 const S_CSR0: u32 = 17; // = TXCSR1 for EP1..
 const S_TXCSR2: u32 = 18;
@@ -71,6 +76,10 @@ const S_RXCSR1: u32 = 20;
 const S_RXCSR2: u32 = 21;
 const S_COUNT0: u32 = 22; // = RXCOUNT1 for EP1..
 const S_RXCOUNT2: u32 = 23;
+const S_TXTYPE: u32 = 24;
+const S_TXINTERVAL: u32 = 25;
+const S_RXTYPE: u32 = 26;
+const S_RXINTERVAL: u32 = 27;
 
 const NEP: usize = 5;
 const SOFIE: u32 = 1 << 10;
@@ -81,6 +90,12 @@ const SIE_PND: u32 = 1 << 14;
 
 #[derive(Clone, Copy, Default, Debug)]
 struct Ep {
+    host_tx: u8,
+    host_rx: u8,
+    txtype: u8,
+    rxtype: u8,
+    txinterval: u8,
+    rxinterval: u8,
     txmaxp: u8,
     rxmaxp: u8,
     txcsr2: u8,
@@ -116,6 +131,21 @@ enum Reply {
 pub trait Dma {
     fn dma_read8(&mut self, addr: u32) -> u8;
     fn dma_write8(&mut self, addr: u32, v: u8);
+}
+
+/// One queued token. INDEX, target and DMA descriptors cannot be retargeted
+/// after submission. DMA data is sampled only when the emulated packet completes.
+#[derive(Clone, Copy)]
+struct Packet {
+    at: u64,
+    address: u8,
+    target: u8,
+    dma: u32,
+    len: usize,
+    dma_enabled: bool,
+    setup: bool,
+    status: bool,
+    bulk: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -225,6 +255,14 @@ pub enum UsbEvent {
 pub struct Usb {
     /// A cable to a host: without it the SIE never answers and nothing happens on the bus.
     pub cable: bool,
+    /// An attached peripheral is distinct from the virtual computer (`cable`).
+    peer: Option<Peer>,
+    devctl: u8,
+    /// MUSB's per-endpoint hub routing (TXFUNCADDR.. at 0x80 + 8 * ep): kept for the driver to
+    /// read back; the hub model routes by address.
+    hub_route: [[u8; 8]; 8],
+    packets: [Option<Packet>; NEP * 2],
+    packet_cycles: u64,
     /// CPU cycles per SIE round trip.
     pub sie_cycles: u64,
     regs: [u32; 16],
@@ -279,13 +317,142 @@ pub struct Usb {
     pub in_packets: u64,
 }
 
+/// What to plug into the FM-1's host port (`Usb::attach_devices`): one device sits on the cable
+/// itself, two or more behind a hub, as on the dock.
+pub enum Attachment {
+    Ethernet,
+}
+
+/// What hangs off the FM-1's host port.
+enum Peer {
+    Ethernet(EthDevice),
+    Hub(HubDevice),
+}
+
+impl Peer {
+    fn address(&self) -> u8 {
+        match self { Peer::Ethernet(e) => e.address, Peer::Hub(h) => h.address }
+    }
+    fn reset(&mut self) {
+        match self { Peer::Ethernet(e) => e.reset(), Peer::Hub(h) => h.reset() }
+    }
+    fn setup(&mut self, packet: &[u8]) -> Reply {
+        match self { Peer::Ethernet(e) => e.setup(packet), Peer::Hub(h) => h.setup(packet) }
+    }
+    fn control_in(&mut self, status: bool) -> Reply {
+        match self { Peer::Ethernet(e) => e.control_in(status), Peer::Hub(h) => h.control_in(status) }
+    }
+    fn control_out(&mut self, data: &[u8], status: bool) -> Reply {
+        match self {
+            Peer::Ethernet(e) => e.control_out(data, status),
+            Peer::Hub(h) => h.control_out(data, status),
+        }
+    }
+    fn bulk_in(&mut self, ep: u8) -> Reply {
+        match self { Peer::Ethernet(e) => e.bulk_in(ep), Peer::Hub(h) => h.bulk_in(ep) }
+    }
+    fn bulk_out(&mut self, ep: u8, data: &[u8]) -> Reply {
+        match self { Peer::Ethernet(e) => e.bulk_out(ep, data), Peer::Hub(h) => h.bulk_out(ep, data) }
+    }
+    /// Configured with its link ready (a hub: any of its devices).
+    fn up(&self) -> bool {
+        match self {
+            Peer::Ethernet(e) => e.up(),
+            Peer::Hub(h) => h.children.iter().any(Peer::up),
+        }
+    }
+    /// The network adapter in here, if any.
+    fn ethernet_mut(&mut self) -> Option<&mut EthDevice> {
+        match self {
+            Peer::Ethernet(e) => Some(e),
+            Peer::Hub(h) => h.children.iter_mut().find_map(Peer::ethernet_mut),
+        }
+    }
+    /// What was plugged in, to plug in again.
+    fn into_attachments(self) -> Vec<Attachment> {
+        match self {
+            Peer::Ethernet(_) => vec![Attachment::Ethernet],
+            Peer::Hub(h) => h.children.into_iter().flat_map(Peer::into_attachments).collect(),
+        }
+    }
+    /// Whom a transaction to `address` reaches in here.
+    fn route(&mut self, address: u8) -> Option<&mut Peer> {
+        let mine = match &*self {
+            Peer::Hub(h) => h.is_me(address),
+            p => p.address() == address,
+        };
+        if mine {
+            return Some(self);
+        }
+        match self {
+            Peer::Hub(h) => h.route(address),
+            _ => None,
+        }
+    }
+}
+
 impl Usb {
     /// The cable in, to a host, with the CPU at `hz`.
     pub fn plug(&mut self, hz: u64) {
+        self.peer = None;
         let ns = std::env::var("FM1_USB_SIE_NS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000);
         self.cable = true;
         self.sie_cycles = (hz * ns / 1_000_000_000).max(1);
+        self.packet_cycles = (hz / 10_000).max(1); // 100 us, separate from SIE access latency
         self.trace = std::env::var_os("FM1_USB_TRACE").is_some();
+    }
+
+    /// Attach a USB Ethernet adapter (usb/ethernet.rs), likewise.
+    pub fn attach_ethernet(&mut self, hz: u64) {
+        self.attach_devices(vec![Attachment::Ethernet], hz);
+    }
+
+    /// Plug `devices` into the host port: one on the cable itself, two or more behind a hub
+    /// (usb/hub.rs), as on the dock. Nothing: the port is empty.
+    pub fn attach_devices(&mut self, devices: Vec<Attachment>, hz: u64) {
+        self.plug(hz); // common clock/trace configuration
+        self.cable = false;
+        let mut peers: Vec<Peer> = devices.into_iter().map(|d| match d {
+            Attachment::Ethernet => Peer::Ethernet(EthDevice::new()),
+        }).collect();
+        self.peer = match peers.len() {
+            0 => None,
+            1 => peers.pop(),
+            _ => Some(Peer::Hub(HubDevice::new(peers))),
+        };
+        self.sie_reset();
+    }
+
+    /// The network adapter on the host port (on the cable or behind the hub), if any: the SoC
+    /// pumps its frames to and from the virtual subnet.
+    pub(crate) fn ethernet_mut(&mut self) -> Option<&mut dyn crate::net::Link> {
+        self.peer.as_mut().and_then(Peer::ethernet_mut).map(|e| e as &mut dyn crate::net::Link)
+    }
+
+    /// Is a USB Ethernet adapter on the host port?
+    pub fn has_ethernet(&self) -> bool {
+        fn find(p: &Peer) -> bool {
+            match p { Peer::Ethernet(_) => true, Peer::Hub(h) => h.children.iter().any(find) }
+        }
+        self.peer.as_ref().is_some_and(find)
+    }
+
+    /// Is a peer on the host port, and is it configured with its link or medium ready?
+    pub fn peer_up(&self) -> Option<bool> {
+        self.peer.as_ref().map(Peer::up)
+    }
+
+    fn host_session(&self) -> bool {
+        self.peer.is_some() && self.devctl & 1 != 0 && self.sie_on()
+    }
+
+    /// Retain the configured peer (and a disk's open storage) across a chip reset.
+    pub fn keep_attachment(&mut self, old: &mut Usb, hz: u64) {
+        match old.peer.take() {
+            Some(peer) => self.attach_devices(peer.into_attachments(), hz),
+            None if old.cable => self.plug(hz),
+            None => {}
+        }
     }
 
     /// After a chip reset (a fresh `Usb`, plugged again if `self` was): the recording goes on
@@ -308,7 +475,7 @@ impl Usb {
     }
 
     fn sie_on(&self) -> bool {
-        self.cable && self.con0() & 4 != 0
+        (self.cable || self.peer.is_some()) && self.con0() & 4 != 0
     }
 
     fn sie_pending(&self) -> bool {
@@ -328,12 +495,16 @@ impl Usb {
 
     /// CON0's pending flags and CON1's done bit can change as USB runs.
     pub fn pure(&self, addr: u32) -> bool {
-        !self.cable || !matches!(addr - USB_LO, 0 | 4)
+        !(self.cable || self.peer.is_some()) || !matches!(addr - USB_LO, 0 | 4)
     }
 
     pub fn read(&mut self, addr: u32, now: u64) -> u32 {
         let i = ((addr - USB_LO) / 4) as usize;
         match i {
+            0 if self.peer.is_some() => {
+                let line = self.host_session() && self.power & 8 == 0;
+                (self.regs[0] & !(3 << 16)) | (u32::from(line) << 16)
+            }
             0 => self.con0() | if self.sie_pending() { SIE_PND } else { 0 },
             1 => {
                 let done = self.sie_on() && now >= self.sie_done_at;
@@ -359,20 +530,23 @@ impl Usb {
                     return;
                 }
                 self.sie_accesses += 1;
-                let r = (v >> 8) & 0x3f;
+                self.sie_done_at = now.saturating_add(self.sie_cycles);
+                // the register: bits 8..23 but the read flag (modd's hub routing registers sit at 0x80..)
+                let r = ((v >> 8) & 0xffff) & !0x40;
                 if v & 0x4000 != 0 {
                     self.sie_data = self.sie_read(r);
                 } else {
                     self.sie_write(r, (v & 0xff) as u8);
                     self.sie_data = 0;
                 }
-                self.sie_done_at = now + self.sie_cycles;
             }
             _ => self.regs[i] = v,
         }
     }
 
     fn sie_reset(&mut self) {
+        self.reset_peer_bus();
+        self.devctl = 0;
         self.faddr = 0;
         self.power = 0;
         self.intrtx = 0;
@@ -380,6 +554,124 @@ impl Usb {
         self.intrusb = 0;
         self.index = 0;
         self.ep = [Ep::default(); NEP];
+    }
+
+    fn reset_peer_bus(&mut self) {
+        self.packets.fill(None);
+        if let Some(d) = &mut self.peer { d.reset(); }
+        self.ep = [Ep::default(); NEP];
+        self.intrtx = 0;
+        self.intrrx = 0;
+    }
+
+    pub(crate) fn packet_deadline(&self) -> u64 {
+        self.packets.iter().flatten().map(|p| p.at).min().unwrap_or(u64::MAX)
+    }
+
+    fn queue_packet(&mut self, n: usize, input: bool, setup: bool, status: bool) {
+        let slot = 2 * n + usize::from(input);
+        if self.packets[slot].is_some() { return; }
+        let kind = if input { self.ep[n].rxtype } else { self.ep[n].txtype };
+        self.packets[slot] = Some(Packet {
+            at: self.sie_done_at.saturating_add(self.packet_cycles), address: self.faddr,
+            target: if n == 0 { 0 } else { kind & 15 },
+            dma: if input { self.radr(n) } else { self.tadr(n) },
+            len: if status { 0 } else { self.cnt(n) },
+            dma_enabled: self.ep_dma(n), setup, status, bulk: n == 0 || kind & 0x30 == 0x20,
+        });
+    }
+
+    /// Run at packet deadlines, never at a SIE read or on the millisecond SOF.
+    pub(crate) fn complete_packets(&mut self, dma: &mut dyn Dma, now: u64) {
+        for slot in 0..self.packets.len() {
+            let Some(p) = self.packets[slot].filter(|p| p.at <= now) else { continue; };
+            self.packets[slot] = None;
+            let n = slot / 2;
+            let input = slot % 2 != 0;
+            let enabled = self.host_session() && self.power & 8 == 0 && p.dma_enabled && self.ep_dma(n);
+            let reply = if !enabled || !p.bulk || (!input && p.len > 64) {
+                Reply::Silent
+            } else if let Some(d) = self.peer.as_mut().and_then(|peer| peer.route(p.address)) {
+                if input {
+                    if n == 0 { d.control_in(p.status) } else { d.bulk_in(p.target) }
+                } else {
+                    let bytes: Vec<u8> = (0..p.len).map(|i| dma.dma_read8(p.dma.wrapping_add(i as u32))).collect();
+                    if p.setup { d.setup(&bytes) }
+                    else if n == 0 { d.control_out(&bytes, p.status) }
+                    else { d.bulk_out(p.target, &bytes) }
+                }
+            } else { Reply::Silent };
+            if self.trace { eprintln!("usb host: ep{n} {} addr={} target={} setup={} status={} -> {reply:?}",
+                if input { "IN" } else { "OUT" }, p.address, p.target, p.setup, p.status); }
+            let e = &mut self.ep[n];
+            if n == 0 {
+                e.host_tx &= if input { !0x20 } else { !2 };
+                match reply {
+                    Reply::Data(ref bytes) => {
+                        for (i, &b) in bytes.iter().enumerate() { dma.dma_write8(p.dma.wrapping_add(i as u32), b); }
+                        e.rx_count = bytes.len() as u16;
+                        e.host_tx |= 1;
+                    }
+                    Reply::Ack => {},
+                    Reply::Stall => e.host_tx |= 4,
+                    Reply::Nak => e.host_tx |= 0x80,
+                    Reply::Silent => e.host_tx |= 0x10,
+                }
+                self.intrtx |= 1;
+            } else if input {
+                e.host_rx &= !0x20;
+                match reply {
+                    Reply::Data(ref bytes) => {
+                        for (i, &b) in bytes.iter().enumerate() { dma.dma_write8(p.dma.wrapping_add(i as u32), b); }
+                        e.rx_count = bytes.len() as u16;
+                        e.host_rx |= 1;
+                    }
+                    Reply::Stall => e.host_rx |= 0x40,
+                    Reply::Nak => e.host_rx |= 8,
+                    _ => e.host_rx |= 4,
+                }
+                self.intrrx |= 1 << n;
+            } else {
+                e.host_tx &= !1;
+                e.host_tx |= match reply { Reply::Ack => 0, Reply::Stall => 0x20, Reply::Nak => 0x80, _ => 4 };
+                self.intrtx |= 1 << n;
+            }
+        }
+    }
+
+    fn host_csr_write(&mut self, n: usize, r: u32, v: u8) {
+        let tx = 2 * n;
+        if n == 0 && r == S_CSR0 {
+            if v & 8 != 0 { // a new SETUP aborts both pending EP0 directions
+                self.packets[tx] = None;
+                self.packets[tx + 1] = None;
+            }
+            self.ep[n].host_tx = v & 0xb7;
+            if v & 2 == 0 { self.packets[tx] = None; }
+            if v & 0x20 == 0 { self.packets[tx + 1] = None; }
+            if v & 2 != 0 { self.queue_packet(n, false, v & 8 != 0, v & 0x40 != 0); }
+            if v & 0x20 != 0 { self.queue_packet(n, true, false, v & 0x40 != 0); }
+        } else if n == 0 && r == S_TXCSR2 {
+            if v & 1 != 0 {
+                self.packets[tx] = None;
+                self.packets[tx + 1] = None;
+                self.ep[n].host_tx = 0;
+                self.ep[n].rx_count = 0;
+            }
+        } else if r == S_CSR0 {
+            self.ep[n].host_tx = v & 0xa5;
+            if v & 8 != 0 || v & 1 == 0 {
+                self.packets[tx] = None;
+                self.ep[n].host_tx &= !1;
+            } else { self.queue_packet(n, false, false, false); }
+        } else if r == S_RXCSR1 {
+            self.ep[n].host_rx = v & 0x6d;
+            if v & 0x10 != 0 || v & 0x20 == 0 {
+                self.packets[tx + 1] = None;
+                self.ep[n].host_rx &= !0x20;
+                if v & 0x10 != 0 { self.ep[n].host_rx &= !1; self.ep[n].rx_count = 0; }
+            } else if v & 1 == 0 { self.queue_packet(n, true, false, false); }
+        }
     }
 
     /// Endpoint `n`'s DMA is on (CON0 bit 19 + n cleared).
@@ -413,6 +705,8 @@ impl Usb {
     fn sie_read(&mut self, r: u32) -> u8 {
         let e = &self.ep[self.index as usize % NEP];
         match r {
+            S_CSR0 if self.host_session() => e.host_tx,
+            S_RXCSR1 if self.host_session() => e.host_rx,
             S_FADDR => self.faddr,
             S_POWER => self.power,
             // the interrupt flags clear when read
@@ -445,6 +739,10 @@ impl Usb {
             S_FRAME1 => self.frame as u8,
             S_FRAME2 => (self.frame >> 8) as u8 & 7,
             S_INDEX => self.index,
+            S_DEVCTL => {
+                if self.cable { 0x18 }
+                else { self.devctl | if self.host_session() { 0x44 } else { 0 } }
+            }
             S_TXMAXP => e.txmaxp,
             S_CSR0 if self.index == 0 => {
                 e.rx_rdy as u8 | (e.tx_rdy as u8) << 1 | (e.sent_stall as u8) << 2 | (e.setup_end as u8) << 4
@@ -456,21 +754,39 @@ impl Usb {
             S_RXCSR2 => e.rxcsr2,
             S_COUNT0 => e.rx_count as u8,
             S_RXCOUNT2 => (e.rx_count >> 8) as u8,
+            S_TXTYPE => e.txtype,
+            S_RXTYPE => e.rxtype,
+            S_TXINTERVAL => e.txinterval,
+            S_RXINTERVAL => e.rxinterval,
+            0x80..=0xbf => self.hub_route[((r - 0x80) / 8) as usize][(r % 8) as usize],
             _ => 0,
         }
     }
 
     fn sie_write(&mut self, r: u32, v: u8) {
         let n = self.index as usize % NEP;
+        if self.host_session() && (r == S_CSR0 || r == S_RXCSR1 || (n == 0 && r == S_TXCSR2)) {
+            self.host_csr_write(n, r, v);
+            return;
+        }
         match r {
             S_FADDR => self.faddr = v & 0x7f,
-            S_POWER => self.power = v,
+            S_POWER => {
+                if self.peer.is_some() && v & 8 != 0 && self.power & 8 == 0 { self.reset_peer_bus(); }
+                self.power = v;
+            }
             S_INTRTX1E => self.intrtxe = (self.intrtxe & 0xff00) | v as u16,
             S_INTRTX2E => self.intrtxe = (self.intrtxe & 0xff) | (v as u16) << 8,
             S_INTRRX1E => self.intrrxe = (self.intrrxe & 0xff00) | v as u16,
             S_INTRRX2E => self.intrrxe = (self.intrrxe & 0xff) | (v as u16) << 8,
             S_INTRUSBE => self.intrusbe = v,
             S_INDEX => self.index = v & 0xf,
+            S_DEVCTL => {
+                self.devctl = v & 3;
+                if self.devctl & 1 == 0 && self.peer.is_some() {
+                    self.reset_peer_bus();
+                }
+            }
             S_TXMAXP => self.ep[n].txmaxp = v,
             S_CSR0 if n == 0 => {
                 let e = &mut self.ep[0];
@@ -522,6 +838,11 @@ impl Usb {
                 }
             }
             S_RXCSR2 => self.ep[n].rxcsr2 = v,
+            S_TXTYPE => self.ep[n].txtype = v,
+            S_RXTYPE => self.ep[n].rxtype = v,
+            S_TXINTERVAL => self.ep[n].txinterval = v,
+            S_RXINTERVAL => self.ep[n].rxinterval = v,
+            0x80..=0xbf => self.hub_route[((r - 0x80) / 8) as usize][(r % 8) as usize] = v,
             _ => {}
         }
     }
@@ -721,6 +1042,13 @@ impl Usb {
 
     /// One millisecond on the bus. `pullup`: USB_IO_CON0 bit 6.
     pub fn frame(&mut self, dma: &mut dyn Dma, pullup: bool) {
+        if self.peer.is_some() {
+            if self.host_session() && self.power & 8 == 0 {
+                self.frame = (self.frame + 1) & 0x7ff;
+                self.regs[0] |= 1 << 13;
+            }
+            return;
+        }
         self.frames += 1;
         let present = self.cable && pullup && self.con0() & 1 != 0;
         if !present {
@@ -1144,6 +1472,332 @@ pub fn midi_from_packet(p: &[u8; 4], sysex: &mut Vec<u8>, out: &mut Vec<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devctl_reports_external_vbus_for_computer() {
+        let mut usb = Usb::default();
+        usb.plug(240_000_000);
+        usb.write(USB_LO, 5, 0);
+        usb.write(USB_LO + 4, (15 << 8) | 0x4000, 0);
+        assert_eq!(usb.read(USB_LO + 4, usb.sie_cycles) & 0x18, 0x18);
+    }
+
+    #[test]
+    fn ethernet_attachment_waits_for_guest_session_and_survives_chip_reset() {
+        let mut usb = Usb::default();
+        usb.attach_ethernet(240_000_000);
+        usb.write(USB_LO, 5, 0);
+        assert!(usb.sie_on());
+        assert!(!usb.pure(USB_LO + 4));
+        assert_eq!(usb.sie_read(S_DEVCTL), 0);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 0);
+        let mut ram = Ram(vec![0xa5; 4096]);
+        for _ in 0..200 { usb.frame(&mut ram, true); }
+        assert_eq!(usb.host, HostState::Detached);
+        assert_eq!(usb.frame, 0);
+        assert_eq!(usb.intrusb, 0);
+        assert!(ram.0.iter().all(|&v| v == 0xa5));
+        usb.sie_write(S_DEVCTL, 3);
+        assert_eq!(usb.sie_read(S_DEVCTL), 0x47);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 1 << 16);
+        usb.frame(&mut ram, true);
+        assert_eq!(usb.frame, 1);
+        usb.sie_write(S_POWER, 8);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 0);
+        usb.frame(&mut ram, true);
+        assert_eq!(usb.frame, 1);
+        usb.sie_write(S_POWER, 0);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 1 << 16);
+        usb.sie_write(S_DEVCTL, 0);
+        assert!(!usb.host_session());
+        usb.sie_write(S_DEVCTL, 3);
+        usb.write(USB_LO, 0, 0);
+        assert_eq!(usb.devctl, 0);
+        assert!(usb.peer.is_some());
+        let mut reset = Usb::default();
+        reset.keep_attachment(&mut usb, 240_000_000);
+        reset.write(USB_LO, 5, 0);
+        assert!(reset.sie_on());
+        assert!(!reset.cable);
+        assert_eq!(reset.sie_read(S_DEVCTL), 0);
+        assert!(matches!(reset.peer, Some(Peer::Ethernet(_))));
+    }
+
+    /// A USB Ethernet adapter on the host port, enumerated and configured as modd's usbnet_ecm
+    /// does it; a DHCP DISCOVER over its bulk OUT reaches the virtual subnet (through `Link`),
+    /// and the OFFER comes back over bulk IN, packet by packet.
+    #[test]
+    fn ethernet_adapter_links_the_host_port_to_the_subnet() {
+        use crate::net::{Link, VirtualNet};
+        let mut usb = Usb::default();
+        usb.attach_ethernet(240_000_000);
+        assert_eq!(usb.peer_up(), Some(false));
+        assert!(!usb.cable && usb.ethernet_mut().is_some());
+        usb.write(USB_LO, 5, 0);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 0, "no session yet");
+        usb.sie_write(S_DEVCTL, 3);
+        assert_eq!(usb.read(USB_LO, 0) & (3 << 16), 1 << 16, "the line is up with a peer and a session");
+        let Some(Peer::Ethernet(e)) = usb.peer.as_mut() else { panic!("no adapter") };
+        ethernet::tests::enumerate(e);
+        assert_eq!(usb.peer_up(), Some(true));
+        let Some(Peer::Ethernet(e)) = usb.peer.as_mut() else { panic!("no adapter") };
+        // a DHCP DISCOVER from the station, as lwIP sends it: 342 bytes, 5 full packets and 22
+        let mut discover = vec![0xff; 6];
+        discover.extend(ethernet::MAC);
+        discover.extend([8, 0, 0x45, 0, 0x01, 0x48, 0, 0, 0, 0, 0x40, 0x11, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255]);
+        discover.extend([0, 68, 0, 67, 0x01, 0x34, 0, 0]);
+        discover.extend([1, 1, 6, 0, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0]);
+        discover.extend([0; 16]);
+        discover.extend(ethernet::MAC);
+        discover.extend([0; 10 + 192]);
+        discover.extend([0x63, 0x82, 0x53, 0x63, 53, 1, 1, 255]);
+        discover.resize(342, 0);
+        for chunk in discover.chunks(64) {
+            assert_eq!(e.bulk_out(2, chunk), Reply::Ack);
+        }
+        let mut net = VirtualNet::new();
+        let sent = e.drain_tx();
+        assert_eq!(sent, vec![discover.clone()]);
+        for f in &sent {
+            for r in net.handle(f) {
+                e.push_rx(r);
+            }
+        }
+        assert_eq!(net.stats.dhcp_acks, 1, "the subnet answered the DISCOVER");
+        let mut offer = Vec::new();
+        loop {
+            match e.bulk_in(1) {
+                Reply::Data(p) => {
+                    let short = p.len() < 64;
+                    offer.extend(p);
+                    if short { break; }
+                }
+                other => panic!("{other:?} with {} bytes read", offer.len()),
+            }
+        }
+        let eth = &offer[..];
+        assert_eq!(&eth[..6], &ethernet::MAC, "to the station");
+        assert_eq!(&eth[12..14], &[8, 0]);
+        assert_eq!(&eth[14 + 20 + 8 + 16..14 + 20 + 8 + 20], &[10, 0, 2, 15], "yiaddr");
+        assert_eq!(e.bulk_in(1), Reply::Nak, "nothing more");
+        assert_eq!((e.frames_out, e.frames_in), (1, 1));
+        // a chip reset keeps the adapter (its session is the firmware's to start again)
+        let mut reset = Usb::default();
+        reset.keep_attachment(&mut usb, 240_000_000);
+        assert_eq!(reset.peer_up(), Some(false));
+        assert!(usb.peer.is_none());
+    }
+
+    /// Two devices on the host port sit behind a hub: the hub answers at the default address
+    /// first; a port reset puts its device there until the host addresses it; then both
+    /// adapters answer at their own addresses, and a chip reset keeps them.
+    #[test]
+    fn two_devices_on_the_host_port_sit_behind_a_hub() {
+        use crate::net::Link;
+        let mut usb = Usb::default();
+        usb.attach_devices(vec![Attachment::Ethernet, Attachment::Ethernet], 240_000_000);
+        assert!(matches!(usb.peer, Some(Peer::Hub(_))));
+        assert!(usb.has_ethernet() && usb.ethernet_mut().is_some());
+        assert_eq!(usb.peer_up(), Some(false));
+        let setup_status = |peer: &mut Peer, setup: [u8; 8]| {
+            assert_eq!(peer.setup(&setup), Reply::Ack, "{setup:?}");
+            assert_eq!(peer.control_in(true), Reply::Data(vec![]), "{setup:?}");
+        };
+        let peer = usb.peer.as_mut().unwrap();
+        // the hub at 0: addressed 1, configured, its two ports powered and port 1 reset
+        assert!(peer.route(0).is_some() && peer.route(1).is_none());
+        let hub = peer.route(0).unwrap();
+        assert!(matches!(hub, Peer::Hub(_)));
+        setup_status(hub, [0, 5, 1, 0, 0, 0, 0, 0]);
+        let hub = peer.route(1).expect("the hub at 1");
+        setup_status(hub, [0, 9, 1, 0, 0, 0, 0, 0]);
+        setup_status(hub, [0x23, 3, 8, 0, 1, 0, 0, 0]);
+        setup_status(hub, [0x23, 3, 8, 0, 2, 0, 0, 0]);
+        assert!(peer.route(0).is_none(), "nothing at the default address before a reset");
+        let hub = peer.route(1).unwrap();
+        setup_status(hub, [0x23, 3, 4, 0, 1, 0, 0, 0]);
+        // port 1's adapter at 0: addressed 2
+        let eth1 = peer.route(0).expect("the adapter at the default address");
+        assert!(matches!(eth1, Peer::Ethernet(_)));
+        setup_status(eth1, [0, 5, 2, 0, 0, 0, 0, 0]);
+        assert!(peer.route(0).is_none() && matches!(peer.route(2), Some(Peer::Ethernet(_))));
+        // port 2's adapter at 0: addressed 3, configured, its link up
+        let hub = peer.route(1).unwrap();
+        setup_status(hub, [0x23, 3, 4, 0, 2, 0, 0, 0]);
+        let eth2 = peer.route(0).expect("the second adapter at the default address");
+        assert!(matches!(eth2, Peer::Ethernet(_)));
+        setup_status(eth2, [0, 5, 3, 0, 0, 0, 0, 0]);
+        let eth2 = peer.route(3).unwrap();
+        setup_status(eth2, [0, 9, 1, 0, 0, 0, 0, 0]);
+        setup_status(eth2, [1, 11, 1, 0, 1, 0, 0, 0]);
+        setup_status(eth2, [0x21, 0x43, 0x0d, 0, 0, 0, 0, 0]);
+        assert_eq!(usb.peer_up(), Some(true));
+        // a frame for the station reaches the configured adapter (child 1) behind the hub
+        let mut to_us = ethernet::MAC.to_vec();
+        to_us.extend([0; 54]);
+        let Some(Peer::Hub(h)) = usb.peer.as_mut() else { panic!() };
+        let Peer::Ethernet(e) = &mut h.children[1] else { panic!() };
+        e.push_rx(to_us.clone());
+        assert_eq!(e.bulk_in(1), Reply::Data(to_us));
+        // the chip reset: the same two devices behind a hub again, unaddressed
+        let mut reset = Usb::default();
+        reset.keep_attachment(&mut usb, 240_000_000);
+        let Some(Peer::Hub(h)) = reset.peer.as_ref() else { panic!("the hub went") };
+        assert_eq!(h.children.len(), 2);
+        assert!(h.children.iter().all(|c| c.address() == 0));
+        assert!(reset.has_ethernet());
+    }
+
+    fn host_eth() -> (Usb, Ram) {
+        let mut usb = Usb::default();
+        usb.attach_ethernet(240_000_000);
+        usb.write(USB_LO, 5, 0);
+        usb.write(USB_LO + 0x18, EP0_BUF, 0);
+        usb.write(USB_LO + 8, 8, 0);
+        usb.sie_write(S_DEVCTL, 3);
+        let mut ram = Ram(vec![0xa5; 4096]);
+        ram.0[EP0_BUF as usize..EP0_BUF as usize + 8].copy_from_slice(&[0x80, 6, 0, 1, 0, 0, 18, 0]);
+        (usb, ram)
+    }
+
+    #[test]
+    fn host_packet_deadline_is_separate_from_sie_and_snapshots_index_dma_address() {
+        let (mut u, mut ram) = host_eth();
+        u.write(USB_LO + 4, S_CSR0 << 8 | 0x0a, 100);
+        let deadline = u.packet_deadline();
+        assert_eq!(deadline, 100 + u.sie_cycles + u.packet_cycles);
+        assert_eq!(u.read(USB_LO + 4, 100 + u.sie_cycles - 1) & 0x8000, 0);
+        assert_ne!(u.read(USB_LO + 4, 100 + u.sie_cycles) & 0x8000, 0);
+        u.frame(&mut ram, true);
+        assert_eq!(u.sie_read(S_CSR0) & 2, 2);
+        u.complete_packets(&mut ram, deadline - 1);
+        assert_eq!(u.sie_read(S_CSR0) & 2, 2);
+        // Later changes cannot change the setup's DMA descriptor or addressed device.
+        u.write(USB_LO + 0x18, EP1_RX, 200);
+        u.write(USB_LO + 8, 0, 200);
+        u.sie_write(S_INDEX, 4);
+        u.sie_write(S_FADDR, 7);
+        u.complete_packets(&mut ram, deadline);
+        assert_eq!(u.intrtx, 1);
+        assert_eq!(u.ep[0].host_tx & 0x16, 0);
+        assert_eq!(u.ep[4].host_tx, 0);
+        u.sie_write(S_INDEX, 0);
+        u.sie_write(S_FADDR, 0);
+        u.write(USB_LO + 0x18, EP0_BUF, deadline);
+        u.write(USB_LO + 4, S_CSR0 << 8 | 0x20, deadline);
+        let receive = u.packet_deadline();
+        u.write(USB_LO + 0x18, EP1_RX, deadline);
+        u.complete_packets(&mut ram, receive - 1);
+        assert_eq!(u.ep[0].host_tx & 1, 0);
+        u.complete_packets(&mut ram, receive);
+        assert_eq!(u.ep[0].rx_count, 18);
+        assert_eq!(u.ep[0].host_tx & 0x21, 1);
+        assert_eq!(&ram.0[EP0_BUF as usize..EP0_BUF as usize + 8], &[18, 1, 0, 2, 2, 0, 0, 64]);
+        assert!(ram.0[EP1_RX as usize..EP1_RX as usize + 64].iter().all(|&b| b == 0xa5));
+    }
+
+    #[test]
+    fn host_flush_reset_and_disabled_dma_cannot_write_stale_ram() {
+        for reset in 0..6 {
+            let (mut u, mut ram) = host_eth();
+            u.sie_write(S_CSR0, 0x0a);
+            u.complete_packets(&mut ram, u.packet_deadline());
+            u.sie_write(S_CSR0, 0x20);
+            let deadline = u.packet_deadline();
+            let before = ram.0.clone();
+            match reset {
+                0 => u.sie_write(S_TXCSR2, 1), // EP0 FlushFIFO
+                1 => u.sie_write(S_POWER, 8), // bus reset retains session
+                2 => u.sie_write(S_DEVCTL, 0),
+                3 => u.write(USB_LO, 0, 0), // controller reset
+                4 => { // chip reset: new controller with retained medium
+                    let mut fresh = Usb::default();
+                    fresh.keep_attachment(&mut u, 240_000_000);
+                    u = fresh;
+                }
+                _ => u.write(USB_LO, 5 | (1 << 19), 0),
+            }
+            u.complete_packets(&mut ram, deadline);
+            assert_eq!(ram.0, before);
+            assert_eq!(u.packet_deadline(), u64::MAX);
+            assert_eq!(u.ep[0].host_tx & 1, 0);
+            if reset == 1 { assert!(u.host_session()); }
+            // A full controller reinitialization starts a fresh descriptor transfer (after a
+            // chip reset the firmware programs the EP0 buffer and count again, as at the start).
+            u.write(USB_LO, 0, deadline);
+            u.write(USB_LO, 5, deadline);
+            u.write(USB_LO + 0x18, EP0_BUF, deadline);
+            u.write(USB_LO + 8, 8, deadline);
+            u.sie_write(S_DEVCTL, 3);
+            u.sie_write(S_CSR0, 0x0a);
+            u.complete_packets(&mut ram, u.packet_deadline());
+            assert_eq!(u.ep[0].host_tx & 0x16, 0);
+        }
+        let (mut u, mut ram) = host_eth();
+        u.write(USB_LO, 5 | 1 << 19, 0);
+        u.sie_write(S_CSR0, 0x0a);
+        u.write(USB_LO, 5, 0); // enabling after submission must not revive disabled DMA
+        u.complete_packets(&mut ram, u.packet_deadline());
+        assert_ne!(u.ep[0].host_tx & 0x10, 0);
+    }
+
+    #[test]
+    fn host_bulk_target_errors_and_flush_are_direction_specific() {
+        let (mut u, mut ram) = host_eth();
+        let Some(Peer::Ethernet(e)) = u.peer.as_mut() else { panic!("no adapter") };
+        assert_eq!(e.setup(&[0, 5, 1, 0, 0, 0, 0, 0]), Reply::Ack);
+        e.control_in(true);
+        e.setup(&[0, 9, 1, 0, 0, 0, 0, 0]);
+        e.control_in(true);
+        e.setup(&[1, 11, 1, 0, 1, 0, 0, 0]);
+        e.control_in(true);
+        e.setup(&[0x21, 0x43, 0x0d, 0, 0, 0, 0, 0]);
+        e.control_in(true);
+        u.sie_write(S_FADDR, 1);
+        u.sie_write(S_INDEX, 1);
+        u.sie_write(S_RXTYPE, 0x21);
+        u.sie_write(S_RXCSR1, 0x10); // flush, not IN
+        assert_eq!(u.packet_deadline(), u64::MAX);
+        u.sie_write(S_RXCSR1, 0x20);
+        u.sie_write(S_RXTYPE, 0x22); // snapshot still targets IN endpoint 1, currently NAK
+        u.sie_write(S_INDEX, 4);
+        u.complete_packets(&mut ram, u.packet_deadline());
+        assert_eq!(u.ep[1].host_rx, 8);
+        assert_eq!(u.ep[4].host_rx, 0);
+        assert_eq!(u.intrrx, 2);
+        u.sie_write(S_INDEX, 1);
+        u.sie_write(S_RXCSR1, 0x20); // wrong IN endpoint 2 stalls
+        u.complete_packets(&mut ram, u.packet_deadline());
+        assert_eq!(u.sie_read(S_RXCSR1), 0x40);
+        u.sie_write(S_RXCSR1, 0x20);
+        u.sie_write(S_RXCSR1, 0x10);
+        assert_eq!(u.packet_deadline(), u64::MAX);
+        assert_eq!(u.sie_read(S_RXCSR1), 0);
+    }
+
+    #[test]
+    fn host_packet_deadline_wakes_soc_before_the_next_frame() {
+        use fm1_core::Bus;
+        let mut soc = crate::Soc::new(1 << 20, vec![]);
+        soc.usb_ethernet();
+        let buffer = crate::RAM_BASE + 0x100;
+        soc.write32(USB_LO, 5);
+        soc.write32(USB_LO + 0x18, buffer);
+        soc.write32(USB_LO + 8, 8);
+        soc.write32(buffer, 0x01000680);
+        soc.write32(buffer + 4, 18 << 16);
+        soc.write32(USB_LO + 4, S_DEVCTL << 8 | 3);
+        soc.write32(USB_LO + 4, S_CSR0 << 8 | 0x0a);
+        let deadline = soc.periph.usb_packet_next;
+        assert!(deadline < soc.periph.usb_next);
+        soc.advance(deadline - 1);
+        assert_eq!(soc.usb.ep[0].host_tx & 2, 2);
+        assert_eq!(soc.periph.next_due, deadline);
+        soc.advance(1);
+        assert_eq!(soc.usb.ep[0].host_tx & 2, 0);
+        assert_eq!(soc.usb.intrtx, 1);
+        assert_eq!(soc.periph.usb_packet_next, u64::MAX);
+    }
 
     #[test]
     fn midi_packets_round_trip() {

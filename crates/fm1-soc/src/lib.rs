@@ -40,6 +40,10 @@ mod ram;
 pub mod smk;
 mod spiflash;
 pub mod usb;
+pub mod nat;
+pub mod net;
+pub mod wifi_hw;
+pub mod wifi_mailbox;
 
 pub use lcd::{write_bmp, Lcd};
 pub use periph::{Action, Periph, CPU_HZ, VEC_BASE};
@@ -381,6 +385,19 @@ pub struct Soc {
     pub hwsrc: hwsrc::HwSrc,
     /// USB0 and, with a cable (`usb_plug`), a host on the other end (usb.rs).
     pub usb: usb::Usb,
+    /// Hardware-level WiFi emulation for clean-room drivers (wifi_hw.rs): the WDMA
+    /// engine, the BBP port and MAC registers at 0x30000, a virtual AP and the virtual
+    /// subnet behind it. `enable_oss_wifi` turns it on; None = no WiFi chip.
+    pub wifi_hw: Option<wifi_hw::WifiHw>,
+    /// The virtual subnet (net.rs: DHCP, DNS, SNTP, the NAT behind `enable_internet`) every
+    /// link reaches: the WiFi chip, a USB network adapter (`usb_ethernet`). None = no network.
+    pub net: Option<net::VirtualNet>,
+    /// The vendor WiFi stack's view (wifi_mailbox.rs): fm1-base's plat_wifi_* mailbox at
+    /// 0x30000..=0x3011f, for firmware built with `wifi_stack = "emu"`. `enable_vendor_wifi`
+    /// turns it on; None = no mailbox.
+    pub wifi_mailbox: Option<wifi_mailbox::WifiMailbox>,
+    /// The virtual access point either WiFi flavour offers (`set_wifi_ap`).
+    pub wifi_ap: net::Ap,
     /// Exact skipping of cpu0's polling loops (`machine::run_blocks`).
     pub loop_skip: machine::LoopSkip,
     /// Chip resets so far (the watchdog's, PR_PWR's: p33.rs), and the cause of one to come
@@ -555,6 +572,10 @@ impl Soc {
             hweq: hweq::HwEq::new(),
             hwsrc: Default::default(),
             usb: Default::default(),
+            wifi_hw: None,
+            net: None,
+            wifi_mailbox: None,
+            wifi_ap: net::Ap::default(),
             // (FM1_TRACE: a trace shows every instruction as it runs, not a probe's)
             loop_skip: machine::LoopSkip::new(std::env::var_os("FM1_NO_LOOPSKIP").is_none() && std::env::var_os("FM1_TRACE").is_none()),
             resets: 0,
@@ -612,9 +633,7 @@ impl Soc {
         self.periph.chip_reset();
         self.p33.chip_reset(cause);
         let mut old = std::mem::take(&mut self.usb);
-        if old.cable {
-            self.usb.plug(self.periph.hz);
-        }
+        self.usb.keep_attachment(&mut old, self.periph.hz);
         self.usb.keep_recording(&mut old); // (a computer's recording goes on across the reset)
         (self.paused, self.lock_owner, self.cpu1_release, self.cpu1_released_once, self.crc) = ([false; 2], None, false, false, 0);
         (self.cpu1_idle, self.cpu1_fault) = (false, None);
@@ -731,6 +750,85 @@ impl Soc {
         }
     }
 
+    /// Hardware-level WiFi emulation (--oss-wifi): the WDMA engine, the BBP port and MAC
+    /// registers, and a virtual 802.11 AP bridged to the virtual subnet (wifi_hw.rs).
+    pub fn enable_oss_wifi(&mut self) {
+        let mut hw = wifi_hw::WifiHw::new();
+        hw.ap = self.wifi_ap.clone();
+        self.wifi_hw = Some(hw);
+        self.enable_net();
+    }
+
+    /// The virtual access point's name and passphrase (--wifi-ssid, --wifi-password), for
+    /// either WiFi flavour, before or after it is enabled; the default is "Home" / "fm1pass".
+    pub fn set_wifi_ap(&mut self, ap: net::Ap) {
+        if let Some(hw) = self.wifi_hw.as_mut() {
+            hw.ap = ap.clone();
+        }
+        if let Some(mb) = self.wifi_mailbox.as_mut() {
+            mb.set_ap(&ap);
+        }
+        self.wifi_ap = ap;
+    }
+
+    /// The vendor WiFi stack's view (--wifi jieli): the plat_wifi_* mailbox fm1-base's
+    /// `wifi_stack = "emu"` build talks to, two virtual APs, the virtual subnet behind it.
+    pub fn enable_vendor_wifi(&mut self) {
+        self.wifi_mailbox = Some(wifi_mailbox::WifiMailbox::with_ap(&self.wifi_ap));
+        self.enable_net();
+    }
+
+    /// The virtual subnet behind a link, and the network's tick.
+    fn enable_net(&mut self) {
+        self.net.get_or_insert_with(net::VirtualNet::new);
+        self.periph.arm_net_tick();
+    }
+
+    /// The real network behind the virtual subnet (--internet; after `enable_oss_wifi` or
+    /// `usb_ethernet`). Off by default: a firmware reaches nothing outside the emulator.
+    /// `allow_lan`: this computer's own addresses and its LAN too.
+    pub fn enable_internet(&mut self, allow_lan: bool) {
+        if let Some(net) = self.net.as_mut() {
+            net.enable_nat(allow_lan);
+        }
+    }
+
+    /// Ethernet frames between the links and the virtual subnet: what the station sent gets
+    /// its answers at once; on the network's tick (`tick`) the NAT's sockets are polled too.
+    /// Then the WiFi chip's RX ring takes what waits for the station.
+    fn net_pump(&mut self, tick: bool) {
+        let Some(net) = self.net.as_mut() else { return };
+        let ms = self.periph.ms();
+        let mut links: Vec<&mut dyn net::Link> = Vec::with_capacity(2);
+        if let Some(hw) = self.wifi_hw.as_mut() {
+            links.push(hw);
+        }
+        if let Some(eth) = self.usb.ethernet_mut() {
+            links.push(eth);
+        }
+        if let Some(mb) = self.wifi_mailbox.as_mut() {
+            links.push(mb);
+        }
+        for link in links.iter_mut() {
+            for f in link.drain_tx() {
+                for r in net.handle(&f) {
+                    link.push_rx(r);
+                }
+            }
+        }
+        if tick {
+            // (one link is up at a time; the NAT's answers go to whichever it is)
+            for r in net.poll(ms) {
+                for link in links.iter_mut() {
+                    link.push_rx(r.clone());
+                }
+            }
+        }
+        if let Some(hw) = self.wifi_hw.as_mut() {
+            hw.dma_deliver_rx(&mut self.ram);
+        }
+    }
+
     /// Wire the chip into `board`'s panel (and its flash chip's id: the SMK-37 Pro's own part,
     /// the FM-1's `flash_part`).
     pub fn set_board(&mut self, board: Board) {
@@ -754,8 +852,26 @@ impl Soc {
         if due.wdt {
             self.reset_req.get_or_insert(p33::P33::RST_WDT);
         }
+        if due.net_tick {
+            // the network's 10 ms: the WiFi chip's beacons on the air, the NAT's sockets,
+            // frames into RAM
+            let ms = self.periph.ms();
+            if let Some(hw) = self.wifi_hw.as_mut() {
+                hw.tick(ms, &mut self.ram);
+            }
+            self.net_pump(true);
+        }
         if let Some((at, b)) = due.uart_rx {
             self.write8(at, b);
+        }
+        if due.usb_packet {
+            let mut u = std::mem::take(&mut self.usb);
+            let now = self.periph.cycles;
+            u.complete_packets(self, now);
+            self.periph.usb_packet_next = u.packet_deadline();
+            self.usb = u;
+            self.periph.next_due = 0;
+            self.net_pump(false);
         }
         if due.usb_frame {
             let pullup = self.sfr_get(usb::USB_IO_CON0) & 0x40 != 0;
@@ -781,6 +897,23 @@ impl Soc {
         self.periph.usb_period = (self.periph.hz / 1000).max(1);
         self.periph.usb_next = self.periph.cycles + self.periph.usb_period;
         self.periph.next_due = 0;
+    }
+
+    /// Plug a USB Ethernet adapter (CDC-ECM) into the host port (--usb ethernet): the virtual subnet
+    /// behind it; the firmware must initiate its host session.
+    pub fn usb_ethernet(&mut self) {
+        self.usb_attach(vec![usb::Attachment::Ethernet]);
+    }
+
+    /// Plug `devices` into the host port: one on the cable, two or more behind a hub.
+    /// An adapter among them brings the virtual subnet.
+    pub fn usb_attach(&mut self, devices: Vec<usb::Attachment>) {
+        self.usb.attach_devices(devices, self.periph.hz);
+        self.periph.usb_period = (self.periph.hz / 1000).max(1);
+        self.periph.usb_next = self.periph.cycles + self.periph.usb_period;
+        if self.usb.has_ethernet() {
+            self.enable_net();
+        }
     }
 
     /// The highest-priority enabled pending interrupt: (irq, prio).
@@ -1281,6 +1414,24 @@ impl Bus for Soc {
 impl Soc {
     #[inline(never)]
     fn read32_slow(&mut self, addr: u32) -> u32 {
+        // --wifi jieli: the plat_wifi_* mailbox (narrow: the rest of the block stays unknown)
+        if let (Some(mb), 0x30000..=0x3011f) = (self.wifi_mailbox.as_mut(), addr) {
+            return match mb.read(addr - 0x30000) {
+                Some(v) => v,
+                None => { self.log_unknown(addr, 4, false, 0); 0 }
+            };
+        }
+        // --oss-wifi: the WiFi DMA, the wireless control block, the BBP port and the MAC
+        // registers (everything else at 0x30000+ stays unknown)
+        if let Some(hw) = self.wifi_hw.as_mut() {
+            match addr {
+                0x40200..=0x4029C => return hw.dma_read(addr - 0x40000),
+                0x14028..=0x1405C => return hw.wl_ctrl_read(addr),
+                0x3101C => return hw.bbp_read(addr - 0x30000),
+                0x30120..=0x3ffff => return hw.mac_read(addr - 0x30000),
+                _ => {}
+            }
+        }
         match self.region(addr) {
             Region::Xip => {
                 let o = (addr - XIP_BASE) as usize;
@@ -1320,7 +1471,19 @@ impl Soc {
             // (a trim only nudges the DAC's DC offset).
             Region::Ana => {
                 let v = self.sfr_get(addr);
-                if addr == 0x11978 { (v & !0xff00) | 0x4_0000 | 0x8000 | 0x20 } else { v }
+                if addr == 0x11978 {
+                    // --oss-wifi: the driver's VCO scan sets CAL_START (0x11968 bit 28) and
+                    // reads the comparator here; "locked" (neither bit 17 nor 18) ends its
+                    // binary search at once
+                    if self.wifi_hw.is_some() && self.sfr_get(0x11968) & (1 << 28) != 0 {
+                        let cal = self.sfr_get(0x11968) & !(1 << 28);
+                        self.sfr_set(0x11968, cal);
+                        return 0;
+                    }
+                    (v & !0xff00) | 0x4_0000 | 0x8000 | 0x20
+                } else {
+                    v
+                }
             }
             // the Bluetooth baseband (bsfr 0x20000; no radio here): reads 0, writes are
             // dropped (self-clearing requests like bt_clkn_compare_arm's capture at 0x2001C
@@ -1412,6 +1575,30 @@ impl Soc {
 
     #[inline(never)]
     fn write32_slow(&mut self, addr: u32, value: u32) {
+        // --wifi jieli: the mailbox; a frame the firmware sent gets the subnet's answers at once
+        if let (Some(mb), 0x30000..=0x3011f) = (self.wifi_mailbox.as_mut(), addr) {
+            if mb.write(addr - 0x30000, value) {
+                self.net_pump(false);
+            } else {
+                self.log_unknown(addr, 4, true, value);
+            }
+            return;
+        }
+        // --oss-wifi: as read32_slow; a frame the station sent gets the subnet's answers at once
+        if let Some(hw) = self.wifi_hw.as_mut() {
+            let taken = match addr {
+                // (the DMA reads descriptors and frames out of RAM)
+                0x40200..=0x4029C => { hw.dma_write(addr - 0x40000, value, &mut self.ram); true }
+                0x14028..=0x1405C => { hw.wl_ctrl_write(addr, value); true }
+                0x3101C => { hw.bbp_write(addr - 0x30000, value); true }
+                0x30120..=0x3ffff => { hw.mac_write(addr - 0x30000, value, &mut self.ram); true }
+                _ => false,
+            };
+            if taken {
+                self.net_pump(false);
+                return;
+            }
+        }
         match self.region(addr) {
             Region::Xip | Region::XipFlash => self.log_unknown(addr, 4, true, value), // flash writes go via the ROM
             Region::Ram => self.ram.write32(addr - RAM_BASE, value),
@@ -1492,6 +1679,8 @@ impl Soc {
             }
             Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => {
                 self.usb.write(addr, value, self.periph.cycles);
+                self.periph.usb_packet_next = self.usb.packet_deadline();
+                self.periph.next_due = 0;
                 self.periph.set_usb_irqs(self.usb.irq_lines());
             }
             Region::Usb => {
@@ -1882,6 +2071,30 @@ mod tests {
         assert_eq!(soc.periph.pending_irq(), None);
     }
 
+    /// `usb_ethernet` and `enable_oss_wifi` each bring the virtual subnet with them (one
+    /// `net`, whichever came first), the network tick with it; `enable_internet` goes to it.
+    #[test]
+    fn links_share_one_virtual_subnet() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        assert!(soc.net.is_none());
+        soc.enable_internet(false);
+        assert!(soc.net.is_none(), "nothing to put the network behind");
+        soc.usb_ethernet();
+        assert!(soc.net.is_some() && soc.wifi_hw.is_none());
+        assert_eq!(soc.usb.peer_up(), Some(false));
+        assert!(soc.net.as_ref().unwrap().nat.is_none());
+        soc.enable_internet(false);
+        assert!(soc.net.as_ref().unwrap().nat.is_some());
+        soc.net.as_mut().unwrap().epoch_hint = Some(7);
+        soc.enable_oss_wifi();
+        assert!(soc.wifi_hw.is_some());
+        assert_eq!(soc.net.as_ref().unwrap().epoch_hint, Some(7), "the same subnet");
+        // the network ticks: `advance` reaches the pump without a panic, and the tick is armed
+        let step = soc.periph.cycle_of_ms(10).max(1);
+        soc.advance(step);
+        soc.advance(step);
+    }
+
     #[test]
     fn usb_frame_and_bus_reset_interrupts_are_acknowledged_independently() {
         const CON0: u32 = usb::USB_LO;
@@ -1973,6 +2186,36 @@ mod tests {
         soc.write32(0x11d0c, RAM_BASE);
         soc.write32(0x11d10, 0x800);
         assert_eq!(soc.read32(0x11d00) & 0x8000, 0, "the DMA is still on the wire");
+    }
+
+    #[test]
+    fn oss_wifi_wireless_ctrl_roundtrip() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.enable_oss_wifi();
+        soc.write32(0x14040, 0x01);
+        assert_eq!(soc.read32(0x14040), 0x01);
+        soc.write32(0x1405C, 0x01);
+        assert_eq!(soc.read32(0x1405C), 0x01);
+    }
+
+    #[test]
+    fn oss_wifi_mac_registers() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.enable_oss_wifi();
+        // MAC configuration registers (0x30120 and up) round-trip
+        soc.write32(0x30308, 0xDEAD);
+        assert_eq!(soc.read32(0x30308), 0xDEAD);
+        soc.write32(0x30F00, 0xBEEF);
+        assert_eq!(soc.read32(0x30F00), 0xBEEF);
+    }
+
+    #[test]
+    fn wifi_window_is_unknown_without_oss_wifi() {
+        // no WiFi chip: the whole 0x30000 window is an unknown access, logged, reading 0
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        soc.write32(0x30308, 0xDEAD);
+        assert_eq!(soc.read32(0x30308), 0);
+        assert!(soc.unknown_log.iter().any(|u| u.addr == 0x30308));
     }
 }
 

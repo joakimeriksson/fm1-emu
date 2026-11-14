@@ -89,6 +89,16 @@ class Fm1 extends AudioWorkletProcessor {
           this.flushSnapshots();
         } else if (m.type === "cancel-snapshot") this.snapshots = this.snapshots.filter(r => r.request !== m.request);
         else if (m.type === "resume") this.paused = false;
+        else if (m.type === "fetch-result") {
+          // the page's answer to fm1_net_fetch: the body and its content type into the machine
+          const body = new Uint8Array(m.body);
+          const ctype = Uint8Array.from(m.contentType || "", (c) => c.charCodeAt(0) & 0xff);
+          const p = this.x.fm1_alloc(body.byteLength);
+          new Uint8Array(this.x.memory.buffer, p, body.byteLength).set(body);
+          const c = this.x.fm1_alloc(ctype.byteLength);
+          new Uint8Array(this.x.memory.buffer, c, ctype.byteLength).set(ctype);
+          this.x.fm1_net_response?.(m.id, m.status, p, body.byteLength, c, ctype.byteLength);
+        }
         else if (m.type === "key") this.x.fm1_key(m.id, m.down ? 1 : 0);
         else if (m.type === "enc") this.x.fm1_enc(m.enc, m.clicks);
         else if (m.type === "pot") this.x.fm1_pot(m.value);
@@ -106,7 +116,15 @@ class Fm1 extends AudioWorkletProcessor {
     if (!this.module) this.module = await WebAssembly.compile(m.wasm);
     let x;
     this.jit = { regions: 0, failed: 0, error: "", bytes: 0, tableSlots: 0, compileMs: 0, compileMaxMs: 0 };
-    x = (await WebAssembly.instantiate(this.module, { env: jitImports(() => x, this.jit) })).exports;
+    const env = jitImports(() => x, this.jit);
+    // the emulated WiFi's NAT asks for a URL (fm1_oss_wifi with the internet): the page
+    // fetches it; its answer comes back as a "fetch-result" message, into fm1_net_response
+    env.fm1_net_fetch = (id, ptr, len) => {
+      // (no TextDecoder in an AudioWorklet: a URL is ASCII)
+      const url = String.fromCharCode.apply(null, new Uint8Array(x.memory.buffer, ptr, len));
+      this.port.postMessage({ type: "fetch", id, url });
+    };
+    x = (await WebAssembly.instantiate(this.module, { env })).exports;
     if (token !== this.bootToken) return;
     // hot code compiled to WebAssembly, a few blocks per quantum at most (?jit=0: interpreter only)
     x.fm1_jit(m.jit === false ? 0 : 1, 16);
@@ -133,6 +151,27 @@ class Fm1 extends AudioWorkletProcessor {
     // a try-out's input script (web/tryout.js): UTF-8 bytes, played on the emulated clock from now
     if (m.script?.byteLength && (!x.fm1_bench_script || x.fm1_bench_script(copy(m.script), m.script.byteLength) !== 0)) {
       throw new Error("the input script did not load");
+    }
+    // ?wifi=oss: the WiFi chip for a clean-room driver; ?usb=ethernet: a USB network adapter;
+    // &internet=1: the page's fetch() behind the virtual subnet
+    if ((m.wifiSsid || m.wifiPassword) && x.fm1_wifi_ap) {
+      const enc = new TextEncoder();
+      const ssid = enc.encode(m.wifiSsid || "Home"), pass = enc.encode(m.wifiPassword || "fm1pass");
+      if (x.fm1_wifi_ap(copy(ssid.buffer), ssid.byteLength, copy(pass.buffer), pass.byteLength) !== 0) {
+        throw new Error("wifi-ssid / wifi-password: the SSID is 1 to 32 bytes, the passphrase 1 to 63");
+      }
+    }
+    if (m.ossWifi && x.fm1_oss_wifi) {
+      x.fm1_oss_wifi(m.internet ? 1 : 0);
+    }
+    if (m.vendorWifi && x.fm1_vendor_wifi) {
+      x.fm1_vendor_wifi(m.internet ? 1 : 0);
+    }
+    if (m.usbEthernet && x.fm1_usb_ethernet) {
+      x.fm1_usb_ethernet(m.internet ? 1 : 0);
+    }
+    if (m.ossWifi || m.vendorWifi || m.usbEthernet) {
+      x.fm1_set_epoch?.(Math.floor(Date.now() / 1000));
     }
     this.x = x;                         // (a reboot replaces the whole instance)
     this.mhz = m.mhz;
