@@ -2492,7 +2492,7 @@ impl Cpu {
             }
             "R <<= R" | "R >>= R" | "R >>>= R" | "R <<= #i" | "R >>= #i" | "R >>>= #i" => {
                 let d = r(self, 0)?;
-                let n = if s.ends_with('R') { self.regs[r(self, 1)?] & 31 } else { v(self, 1)? };
+                let n = if s.ends_with('R') { self.regs[r(self, 1)?] & 0xff } else { v(self, 1)? };
                 let kind = s[2..].split('=').next().unwrap_or("<<");
                 let x = self.regs[d];
                 self.regs[d] = match kind {
@@ -2722,7 +2722,7 @@ impl Cpu {
                 let a = self.regs[r(self, 1)?];
                 // an immediate count is 1..32, 32 encoded as 0 (the vendor assembler's range;
                 // `c0 e1 d0 40` is r4 = r13 << 32, work/probe/mm.S)
-                let n = if s.ends_with('R') { self.regs[r(self, 2)?] & 31 } else { match v(self, 2)? { 0 => 32, n => n } };
+                let n = if s.ends_with('R') { self.regs[r(self, 2)?] & 0xff } else { match v(self, 2)? { 0 => 32, n => n } };
                 // the operator starts at index 6 of "R = R << #i"; index 8 was
                 // the space, which made every 4-byte `rX = rY << n` an
                 // arithmetic right shift (Felucca's Huffman LUT came out empty)
@@ -2733,7 +2733,7 @@ impl Cpu {
             // vendor assembler, work/probe/fam.S)
             "R <<<= R" if insn.entry.len == 2 => {
                 let (d, src) = ((insn.raw & 7) as usize, ((insn.raw >> 4) & 0xf) as usize);
-                self.regs[d] = qasl(self.regs[d], self.regs[src] & 31);
+                self.regs[d] = qasl(self.regs[d], self.regs[src] & 0xff);
             }
             "R = -R" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].wrapping_neg(); }
             "R = ~R" => { let d = r(self, 0)?; self.regs[d] = !self.regs[r(self, 1)?]; }
@@ -2892,9 +2892,7 @@ impl Cpu {
                     Op::And => x & rhs,
                     Op::AndNot => x & !rhs,
                     Op::Mul => x.wrapping_mul(rhs),
-                    Op::Shl => x.wrapping_shl(rhs & 31),
-                    Op::Shr => x.wrapping_shr(rhs & 31),
-                    Op::Sar => ((x as i32) >> (rhs & 31)) as u32,
+                    Op::Shl | Op::Shr | Op::Sar => shift32(a.op, x, rhs & 0xff),
                 };
                 match a.dst {
                     Dst::Reg(d) => self.regs[d] = if matches!(a.op, Op::Add | Op::Sub | Op::RSub) { self.alu_f(a.op, lhs, rhs) } else { apply(lhs) },
@@ -3475,9 +3473,13 @@ impl Cpu {
                     0xdf => {
                         let q = ((raw >> 21) & 7) as usize;
                         let x = (self.regs[2 * q + 1] as u64) << 32 | self.regs[2 * q] as u64;
-                        let n = self.regs[((raw >> 24) & 0xf) as usize] & 63;
+                        // the count is the register's low 8 bits; 64 and up shift everything out
+                        // (pi32v2-isa hw/fm1-2026-10-24, lsr.u.rpr: 0x6b gave 0)
+                        let n = self.regs[((raw >> 24) & 0xf) as usize] & 0xff;
                         self.regs[((raw >> 28) & 0xf) as usize] = if raw & 0x1_0000 != 0 {
-                            ((x as i64) >> n).clamp(i32::MIN as i64, i32::MAX as i64) as u32
+                            ((x as i64) >> n.min(63)).clamp(i32::MIN as i64, i32::MAX as i64) as u32
+                        } else if n >= 64 {
+                            0
                         } else {
                             (x >> n).min(u32::MAX as u64) as u32
                         };
@@ -3496,14 +3498,22 @@ impl Cpu {
                     }
                     0xd0 | 0xd8 => {
                         let by_reg = raw & 0xff == 0xd8;
-                        let n = if by_reg { self.regs[((raw >> 24) & 0xf) as usize] & 63 }
-                            else { (((raw >> 16) & 0xf) | (((raw >> 24) & 3) << 4)) as u32 };
+                        // a register count is its low 8 bits, an immediate's 0 is 64; counts of 64
+                        // and up shift everything out. op 1 is `<<<=`, the signed saturating shift
+                        // (pi32v2-isa hw/fm1-2026-10-24, lsl.pair.r and shl3.pair.i)
+                        let n = if by_reg { self.regs[((raw >> 24) & 0xf) as usize] & 0xff }
+                            else { match (((raw >> 16) & 0xf) | (((raw >> 24) & 3) << 4)) as u32 { 0 => 64, n => n } };
                         let op = if by_reg { (raw >> 16) & 3 } else { (raw >> 26) & 3 };
                         let x = (self.regs[hi] as u64) << 32 | self.regs[lo] as u64;
                         let y = match op {
-                            0 | 1 => x.wrapping_shl(n),
-                            2 => x.wrapping_shr(n),
-                            _ => ((x as i64).wrapping_shr(n)) as u64,
+                            0 => if n >= 64 { 0 } else { x << n },
+                            1 => {
+                                let x = x as i64;
+                                let lim = if x < 0 { i64::MIN } else { i64::MAX };
+                                if x == 0 { 0 } else if n >= 64 || (x << n) >> n != x { lim as u64 } else { (x << n) as u64 }
+                            }
+                            2 => if n >= 64 { 0 } else { x >> n },
+                            _ => ((x as i64) >> n.min(63)) as u64,
                         };
                         self.regs[lo] = y as u32;
                         self.regs[hi] = (y >> 32) as u32;
@@ -3561,7 +3571,7 @@ impl Cpu {
                 let (d, a, b) = (((raw >> 28) & 0xf) as usize, ((raw >> 20) & 0xf) as usize, ((raw >> 24) & 0xf) as usize);
                 self.regs[d] = match dsp_raw(raw as u64).unwrap() {
                     Dsp::QaslImm => qasl(self.regs[a], match (((raw >> 16) & 0xf) | ((raw >> 24) & 1) << 4) as u32 { 0 => 32, n => n }),
-                    Dsp::QaslReg => qasl(self.regs[a], self.regs[b] & 31),
+                    Dsp::QaslReg => qasl(self.regs[a], self.regs[b] & 0xff),
                     Dsp::Cls => {
                         let x = self.regs[b];
                         (if (x as i32) < 0 { !x } else { x }).leading_zeros() - 1
@@ -4381,7 +4391,8 @@ fn decode_alu4(raw: u64) -> Option<Alu4> {
         0xe8 if b0 == 0x6c || b0 == 0x6d => {
             // `[R+#i] <<= #n` (6c e8): base bits 28-31, word offset bits
             // 18-23, shift bits 24-27, op bits 16-17 like the e1 shifts;
-            // 6d e8: the same with 16 added to the shift (`6d e8 02 16` [r1+0] >>= 22)
+            // 6d e8: the same with 16 added to the shift (`6d e8 02 16` [r1+0] >>= 22); a count
+            // of 0 is 32 (`6c e8 10 20` [r2+16] <<= 32 gave 0 on an FM-1, pi32v2-isa rmw.lsl.i)
             let op = match (raw >> 16) & 3 {
                 0 => Op::Shl,
                 2 => Op::Shr,
@@ -4392,7 +4403,7 @@ fn decode_alu4(raw: u64) -> Option<Alu4> {
                 dst: Dst::Mem(sext6x4(raw >> 18)),
                 src: s_hi,
                 op,
-                rhs: Rhs::Imm(((raw >> 24) & 0xf) as u32 + 16 * (b0 & 1)),
+                rhs: Rhs::Imm(match ((raw >> 24) & 0xf) as u32 + 16 * (b0 & 1) { 0 => 32, n => n }),
             })
         }
         0xe8 if b0 == 0x66 => {
@@ -4922,6 +4933,19 @@ mod tests {
     }
 
     #[test]
+    fn shift_counts_as_an_fm1_takes_them() {
+        // pi32v2-isa hw/fm1-2026-10-24: the count is the register's low 8 bits; 32 and up shift
+        // everything out (`r7 <<= r7` with 0x7f gave 0, 0x105 shifted by 5)
+        for (op, x, n, want) in [
+            (Op::Shl, 0x7f, 0x7f, 0), (Op::Shl, 1, 0x105, 0x20), (Op::Shl, 1, 32, 0), (Op::Shl, 3, 31, 0x8000_0000),
+            (Op::Shr, 0x8000_0000, 0x20, 0), (Op::Shr, 0x8000_0000, 0xff, 0), (Op::Shr, 0x8000_0000, 0x11f, 1),
+            (Op::Sar, 0x8000_0000, 0x40, 0xffff_ffff), (Op::Sar, 0x7fff_ffff, 0xc0, 0), (Op::Sar, 0x8000_0000, 0x101, 0xc000_0000),
+        ] {
+            assert_eq!(alu(op, x, n), want, "{:?} {:#x} by {:#x}", op, x, n);
+        }
+    }
+
+    #[test]
     fn mem_shift_by_register() {
         // `6e e8 0a 01` [r0+8] >>= r1 (BB1 2.1.1's, the first seen) ; `6e e8 00 05` [r0+0] <<= r5 ;
         // `6e e8 0f 71` [r7+12] >>>= r1 ; `6e e8 01 01` [r0+0] <<<= r1 is not decoded
@@ -4935,11 +4959,13 @@ mod tests {
         cpu.regs[0] = 0x40;
         cpu.regs[7] = 0x50;
         cpu.regs[1] = 4;
-        cpu.regs[5] = 33; // (a shift by a register counts modulo 32)
+        // a register count is its low 8 bits and 32 and up shift everything out (an FM-1:
+        // pi32v2-isa hw/fm1-2026-10-24, rmw.lsl.r); 0x121 counts as 33
+        cpu.regs[5] = 0x121;
         cpu.step(&mut ram).unwrap();
         assert_eq!(ram.read32(0x48), 0x0800_00f0, "[r0+8] >>= r1: logical");
         cpu.step(&mut ram).unwrap();
-        assert_eq!(ram.read32(0x40), 0x0000_0102, "[r0+0] <<= r5");
+        assert_eq!(ram.read32(0x40), 0, "[r0+0] <<= r5");
         cpu.step(&mut ram).unwrap();
         assert_eq!(ram.read32(0x5c), 0xffff_fff0, "[r7+12] >>>= r1: arithmetic");
         assert_eq!(cpu.pc, 12);
@@ -7147,9 +7173,18 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
         Op::Or => a | b,
         Op::Xor => a ^ b,
         Op::Mul => a.wrapping_mul(b),
-        Op::Shl => a.wrapping_shl(b & 31),
-        Op::Shr => a.wrapping_shr(b & 31),
-        Op::Sar => ((a as i32) >> (b & 31)) as u32,
+        Op::Shl | Op::Shr | Op::Sar => shift32(op, a, b & 0xff),
+    }
+}
+
+/// A 32-bit shift by n as an FM-1 runs it: a register count is its low 8 bits (bit 8 and up are
+/// ignored) and counts of 32 and up shift everything out: `<<` and `>>` give 0, `>>>` the sign
+/// (pi32v2-isa hw/fm1-2026-10-24, the `lsl.rr`/`lsr.rrr`/`asr.rrr` notes).
+fn shift32(op: Op, x: u32, n: u32) -> u32 {
+    match op {
+        Op::Shl => if n >= 32 { 0 } else { x << n },
+        Op::Shr => if n >= 32 { 0 } else { x >> n },
+        _ => ((x as i32) >> n.min(31)) as u32,
     }
 }
 

@@ -908,9 +908,22 @@ impl Gen<'_> {
             Op::Or => a.orr(0, 0, 1),
             Op::Xor => a.eor(0, 0, 1),
             Op::Mul => a.mul(0, 0, 1),
-            Op::Shl => a.lslv(0, 0, 1),
-            Op::Shr => a.lsrv(0, 0, 1),
-            Op::Sar => a.asrv(0, 0, 1),
+            // the count is w1's low 8 bits, and 32 and up shift everything out (`shift32`);
+            // lslv/lsrv/asrv take it mod 32, so a larger count gives 0, or for >>> shifts by 31
+            // (w9 clobbered)
+            Op::Shl | Op::Shr => {
+                a.and_mask(1, 1, 8, 0);
+                if matches!(op, Op::Shl) { a.lslv(0, 0, 1) } else { a.lsrv(0, 0, 1) }
+                a.cmp_imm(1, 31);
+                a.csel(0, 0, ZR, AC::Ls);
+            }
+            Op::Sar => {
+                a.and_mask(1, 1, 8, 0);
+                a.movz(9, 31, 0);
+                a.cmp_imm(1, 31);
+                a.csel(1, 1, 9, AC::Ls);
+                a.asrv(0, 0, 1);
+            }
         }
     }
     /// w1 = an A4/BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg`

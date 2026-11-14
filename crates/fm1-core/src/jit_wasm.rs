@@ -796,7 +796,7 @@ impl Gen<'_> {
         self.end();
     }
 
-    /// push alu(op, local a, local b) (wasm shifts take the count mod 32, as `alu`)
+    /// push alu(op, local a, local b)
     fn alu(&mut self, op: Op) {
         match op {
             Op::RSub => {
@@ -813,6 +813,36 @@ impl Gen<'_> {
                 self.op(I32_AND);
                 return;
             }
+            // the count is b's low 8 bits, and 32 and up shift everything out (`shift32`); wasm
+            // takes it mod 32, so a larger count gives 0, or for >>> shifts by 31
+            Op::Shl | Op::Shr => {
+                self.get(L_A);
+                self.get(L_B);
+                self.op(if matches!(op, Op::Shl) { I32_SHL } else { I32_SHR_U });
+                self.i32c(0);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(32);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                return;
+            }
+            Op::Sar => {
+                self.get(L_A);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                self.op(I32_SHR_S);
+                return;
+            }
             _ => {}
         }
         self.get(L_A);
@@ -824,10 +854,7 @@ impl Gen<'_> {
             Op::Or => I32_OR,
             Op::Xor => I32_XOR,
             Op::Mul => I32_MUL,
-            Op::Shl => I32_SHL,
-            Op::Shr => I32_SHR_U,
-            Op::Sar => I32_SHR_S,
-            Op::RSub | Op::AndNot => unreachable!(),
+            Op::RSub | Op::AndNot | Op::Shl | Op::Shr | Op::Sar => unreachable!(),
         });
     }
     /// local b = an A4 / BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg`
