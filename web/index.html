@@ -22,6 +22,7 @@
 <header class="site">
   <div class="wrap">
     <a class="brand" href="./"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span>FM-1 Emulator</a>
+    <!-- release:pill --><a class="ver" href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1" title="Release notes and downloads for 0.5.1">v0.5.1</a><!-- /release:pill -->
     <nav class="devices" aria-label="Device"><span aria-current="page">FM-1</span><a href="smk37/">SMK-37</a></nav>
     <nav class="sitenav" aria-label="Site">
       <a href="#firmwares">Firmwares</a><a href="#guide">Guide</a><a href="#plugin">DAW plugin</a><a href="https://github.com/joakimeriksson/fm1-emu#readme">Docs</a>
@@ -106,6 +107,76 @@
       </section>
     </aside>
   </div>
+
+  <!-- what's new in this release: written by web/release.mjs from Cargo.toml and docs/releases/v<version>.md -->
+  <section id="release" class="release" aria-labelledby="h-release"><!-- release:section -->
+  <div class="rel-top">
+    <div>
+      <p class="eyebrow">Latest release · <a href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1">v0.5.1</a></p>
+      <h2 id="h-release">What's new in 0.5.1</h2>
+      <p class="rel-lead"><b>fm1-live comes for Windows</b>, <b>Polly's band and Melodee's factory sounds</b> play from their packages alone, the emulator can be <b>the newer FM-1 with its other flash chip</b>, and the page lists <b>202 firmwares</b>, refreshed from the Hub.</p>
+    </div>
+    <div class="rel-acts">
+      <button type="button" class="copy" data-copy="rel-text">Copy announcement</button>
+      <a href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1">Full release notes ↗</a>
+    </div>
+  </div>
+  <div class="rel-body">
+    <div class="rel-news">
+      <ul class="rel-list">
+        <li><b>fm1-live for Windows</b>: double-click it and pick a firmware; F4 opens another.</li>
+        <li><b>Lower latency</b>: 12 ms on Windows, with WASAPI exclusive mode.</li>
+        <li><b>Packages install whole</b>: Polly's band plays, and Melodee boots with its factory sounds.</li>
+        <li><b>The newer FM-1's flash chip</b>: <code>?chip=uc25hq80</code> shows which firmwares save on it.</li>
+        <li><b>202 firmwares on the page</b>, refreshed from the FM-1 Firmware Hub.</li>
+        <li><b>A faster panel</b>, drawn three to four times cheaper.</li>
+        <li><b>The FM-1 Sampler over USB</b> in <code>fm1-live --usb</code>.</li>
+      </ul>
+      <p class="rel-thanks">Thanks to bask209, eubide and pcace.</p>
+    </div>
+    <div class="rel-side">
+    <!-- the release film: none yet (a YouTube link in docs/releases/v0.5.1.md shows it here) -->
+    <div class="dl">
+      <h3>Downloads</h3>
+      <div class="dl-group">
+        <p><b>DAW plugin</b> <span>AU, VST3 and CLAP</span></p>
+        <div class="dl-links">
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-plugin-0.5.1-macos-arm64.zip" title="fm1-plugin-0.5.1-macos-arm64.zip"><span>macOS</span><small>Apple silicon</small></a>
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-plugin-0.5.1-windows-x86_64.zip" title="fm1-plugin-0.5.1-windows-x86_64.zip"><span>Windows</span><small>x86-64</small></a>
+        </div>
+      </div>
+      <div class="dl-group">
+        <p><b>fm1-live, standalone</b> <span>a firmware in a window, with audio and MIDI in</span></p>
+        <div class="dl-links">
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-emu-0.5.1-windows-x86_64.zip" title="fm1-emu-0.5.1-windows-x86_64.zip"><span>Windows</span><small>x86-64</small><em>new</em></a>
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-emu-0.5.1-macos-arm64.tar.gz" title="fm1-emu-0.5.1-macos-arm64.tar.gz"><span>macOS</span><small>Apple silicon</small></a>
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-emu-0.5.1-linux-x86_64.tar.gz" title="fm1-emu-0.5.1-linux-x86_64.tar.gz"><span>Linux</span><small>x86-64</small></a>
+          <a class="dl-btn" href="https://github.com/joakimeriksson/fm1-emu/releases/download/v0.5.1/fm1-emu-0.5.1-linux-arm64.tar.gz" title="fm1-emu-0.5.1-linux-arm64.tar.gz"><span>Linux</span><small>ARM64</small></a>
+        </div>
+      </div>
+      <p class="dl-note">The downloads are not signed: <a href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1">the release notes</a> say how to
+        open them on macOS and Windows.</p>
+    </div>
+    </div>
+  </div>
+  <details class="rel-copy">
+    <summary>The announcement as text</summary>
+    <textarea id="rel-text" readonly rows="16" aria-label="Announcement text for 0.5.1">FM-1 Emulator 0.5.1: the M-VAVE FM-1 pocket synth, emulated in the browser, in your DAW and on the desktop.
+
+• fm1-live for Windows: double-click it and pick a firmware; F4 opens another.
+• Lower latency: 12 ms on Windows, with WASAPI exclusive mode.
+• Packages install whole: Polly's band plays, and Melodee boots with its factory sounds.
+• The newer FM-1's flash chip: ?chip=uc25hq80 shows which firmwares save on it.
+• 202 firmwares on the page, refreshed from the FM-1 Firmware Hub.
+• A faster panel, drawn three to four times cheaper.
+• The FM-1 Sampler over USB in fm1-live --usb.
+
+Play it in the browser: https://joakimeriksson.github.io/fm1-emu/
+Downloads and release notes: https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1
+
+Thanks to bask209, eubide and pcace.</textarea>
+  </details>
+  <!-- /release:section --></section>
 
   <section id="firmwares" class="library" aria-labelledby="h-fw">
     <h2 id="h-fw">Firmwares</h2>
@@ -215,13 +286,14 @@
       </section>
 
       <section id="plugin" aria-labelledby="h-plugin">
-        <h2 id="h-plugin">In your DAW: AU and VST3</h2>
+        <h2 id="h-plugin">In your DAW: AU, VST3 and CLAP</h2>
         <p>The emulator is also an instrument plugin: <b>AU</b> for Logic and GarageBand, <b>VST3</b> for Ableton
           Live, Cubase, FL Studio, Reaper, Bitwig and Studio One, and <b>CLAP</b>. Load a firmware in its window
           and play it from the DAW's MIDI or with the mouse on its panel. The song keeps the firmware and the
           patches it saves.</p>
-        <p><a href="https://github.com/joakimeriksson/fm1-emu/releases/latest">Download the plugin</a> for Macs with
-          Apple silicon. The zip's <code>INSTALL.txt</code> says where each file goes. Building it from source:
+        <p>Download the plugin for Macs with Apple silicon (AU, VST3, CLAP) or for Windows (VST3, CLAP) from
+          <a href="#release">the latest release</a>. The zip's <code>INSTALL.txt</code> says where each file goes.
+          Building it from source:
           <a href="https://github.com/joakimeriksson/fm1-emu/tree/master/crates/fm1-plugin">crates/fm1-plugin</a>.</p>
       </section>
 
@@ -330,7 +402,8 @@
     <div class="col">
       <b>Code</b>
       <a href="https://github.com/joakimeriksson/fm1-emu">Source on GitHub ↗</a>
-      <a href="https://github.com/joakimeriksson/fm1-emu/releases/latest">DAW plugin download ↗</a>
+      <a href="#release">Downloads: plugin and fm1-live</a>
+      <a href="https://github.com/joakimeriksson/fm1-emu/releases">All releases ↗</a>
       <a href="https://github.com/joakimeriksson/fm1-emu/issues/new">Report an issue ↗</a>
     </div>
     <div class="col">
@@ -341,6 +414,28 @@
     </div>
   </div>
 </footer>
+<script type="module">
+// the release section: "Copy as text" copies the announcement; the film's picture becomes the
+// player on a click (nothing from YouTube loads before that but the picture)
+for (const b of document.querySelectorAll("button[data-copy]")) {
+  const label = b.textContent;
+  b.addEventListener("click", async () => {
+    const box = document.getElementById(b.dataset.copy);
+    try { await navigator.clipboard.writeText(box.value); }
+    catch { box.closest("details").open = true; box.focus(); box.select(); document.execCommand("copy"); }
+    b.textContent = "Copied";
+    setTimeout(() => { b.textContent = label; }, 2000);
+  });
+}
+for (const a of document.querySelectorAll("a.film[data-yt]")) a.addEventListener("click", (e) => {
+  e.preventDefault();
+  const f = Object.assign(document.createElement("iframe"), {
+    src: `https://www.youtube-nocookie.com/embed/${encodeURIComponent(a.dataset.yt)}?autoplay=1`,
+    title: a.getAttribute("aria-label"), allowFullscreen: true, className: "film" });
+  f.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+  a.replaceWith(f);
+});
+</script>
 <script type="module" src="main.js"></script>
 </body>
 </html>
