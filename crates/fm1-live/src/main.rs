@@ -1414,7 +1414,7 @@ fn open_another() -> Option<Vec<String>> {
 /// new one never loads or overwrites the old one's flash.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn carried_over(args: &[String]) -> Vec<String> {
-    const WITH_VALUE: [&str; 6] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map"];
+    const WITH_VALUE: [&str; 7] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
     const FLAGS: [&str; 3] = ["--usb", "--exclusive", "--midi-log"];
     let mut out = Vec::new();
     let mut i = 0;
@@ -2166,9 +2166,10 @@ mod tests {
     #[test]
     fn f4_carries_over_how_it_runs_not_the_firmware() {
         let a: Vec<String> = ["--fwsc", "a.fwsc", "--flash", "a.bin", "--mhz", "320", "--syx", "b.syx", "--usb",
-                              "--midi", "MPK", "--entry", "0x02000120", "--midi-ch", "2", "--latency", "20"]
+                              "--midi", "MPK", "--entry", "0x02000120", "--midi-ch", "2", "--latency", "20", "--flash-chip", "uc25hq80"]
             .iter().map(|s| s.to_string()).collect();
-        assert_eq!(super::carried_over(&a), ["--mhz", "320", "--usb", "--midi", "MPK", "--midi-ch", "2", "--latency", "20"]);
+        assert_eq!(super::carried_over(&a), ["--mhz", "320", "--usb", "--midi", "MPK", "--midi-ch", "2", "--latency", "20",
+                                              "--flash-chip", "uc25hq80"]);
     }
     use super::*;
 
