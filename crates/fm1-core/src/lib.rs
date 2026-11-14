@@ -212,11 +212,13 @@ pub struct Cpu {
     /// (then_end, else_end, then_start) — reaching then_end jumps over the else-part; a jump
     /// from inside the then-part to before its start leaves the construct (`pred_left_back`).
     pub pred_skips: Vec<(u32, u32, u32)>,
-    /// Arithmetic flags in `psr`'s low bits (F_N | F_C | F_Z | F_V), set by the add / subtract
-    /// forms and read by `+ c`, `- !c` and `psr`: clang's 64-bit add / subtract / compare
-    /// sequences (and so compiler-rt's soft double) need them. Which forms set them on the real
-    /// core is a hardware-probe item; every add / subtract here does, which is what compiled
-    /// code (a producer right before its consumer) needs.
+    /// The flags in `psr`'s low bits (F_N | F_C | F_Z | F_V), read by `+ c`, `- !c`, `ifeq` /
+    /// `ifne` and `psr`: clang's 64-bit add / subtract / compare sequences (and so compiler-rt's
+    /// soft double) need them. The interpreter writes them where an FM-1 does (pi32v2-isa
+    /// hw/fm1-2026-10-24; docs/isa-notes.md "Hardware facts"): add / subtract all four, the logic,
+    /// multiply, extension, bit-field and byte-order forms N and Z, the shifts N, Z and C,
+    /// `testset` and `cc = #i`. Compiled code does not, unless a reader follows
+    /// (`Fast::sets_flags`, `flags_read_later`).
     pub flags: u32,
     /// Plain-storage special registers: icfg, reti, retx, rete, sspn, psr.
     pub sreg_store: [u32; 7],
@@ -587,7 +589,7 @@ impl Cpu {
         let pre = Pre { route, fast, alu4, bittest, pair_head, syntax };
         let fast = fast.map(Fast::specialise);
         // (a predicated block without an else part is a conditional jump: no careful path)
-        let flags_live = fast.is_some() && is_flag_producer(syntax) && flags_read_later(bus, pc + insn.entry.len as u32);
+        let flags_live = fast.is_some_and(|f| f.sets_flags()) && flags_read_later(bus, pc + insn.entry.len as u32);
         let careful = pair_head || matches!(fast, Some(Fast::IfBlk { has_else: true, .. })) || flags_live;
         self.icache[slot] = Line { pc, len: insn.entry.len, pair_head, careful, flags_live, fast };
         self.icache_x[slot] = Some(LineX { win, entry: insn.entry, pre });
@@ -1607,13 +1609,50 @@ impl Cpu {
 
     /// `alu` for the micro-ops, setting the flags on add / subtract.
     #[inline(always)]
+    /// `alu` with the psr flags an FM-1 writes (pi32v2-isa hw/fm1-2026-10-24): add and subtract
+    /// all four; the logic forms and the 32-bit multiply N and Z; the shifts N, Z and C
+    /// (`set_shift_flags`).
     fn alu_f(&mut self, op: Op, a: u32, b: u32) -> u32 {
         match op {
             Op::Add => { let (r, f) = add_flags(a, b, 0); self.flags = f; r }
             Op::Sub => { let (r, f) = add_flags(a, !b, 1); self.flags = f; r }
             Op::RSub => { let (r, f) = add_flags(b, !a, 1); self.flags = f; r }
-            _ => alu(op, a, b),
+            Op::Shl | Op::Shr | Op::Sar => {
+                let r = alu(op, a, b);
+                self.set_shift_flags(op, a, b & 0xff, r);
+                r
+            }
+            _ => {
+                let r = alu(op, a, b);
+                self.set_nz(r);
+                r
+            }
         }
+    }
+
+    /// After `rD = rP >> n (u/s)` (a pair shifted right and saturated to r): N and Z from r, C the
+    /// last bit shifted out (bit 63 for counts of 64 and up, 0 for a count of 0), V kept.
+    fn set_pshr_flags(&mut self, x: u64, n: u32, r: u32) {
+        let c = n != 0 && (x >> (n.min(64) - 1)) & 1 != 0;
+        self.flags = (self.flags & F_V) | if c { F_C } else { 0 } | nz_flags(r);
+    }
+
+    /// N and Z from a 32-bit result, C and V kept (the logic forms, extensions, `clz`, ...).
+    #[inline]
+    fn set_nz(&mut self, r: u32) {
+        self.flags = (self.flags & (F_C | F_V)) | nz_flags(r);
+    }
+
+    /// After a 32-bit shift of x by n (the whole count, 0..255; `Op::Shl` also for `<<<`) to r:
+    /// N and Z from r, C the last bit shifted out (kept for a count of 0), V kept.
+    #[inline]
+    fn set_shift_flags(&mut self, op: Op, x: u32, n: u32, r: u32) {
+        let c = match (n.min(32), op) {
+            (0, _) => self.flags & F_C,
+            (n, Op::Shl) => if (x >> (32 - n)) & 1 != 0 { F_C } else { 0 },
+            (n, _) => if (x >> (n - 1)) & 1 != 0 { F_C } else { 0 },
+        };
+        self.flags = (self.flags & F_V) | c | nz_flags(r);
     }
 
     /// Execute a precomputed micro-op: the same semantics as the matching
@@ -1752,10 +1791,16 @@ impl Cpu {
                 self.regs[(d & 15) as usize] = r;
             }
             Fast::ShlI { d, s, n } => {
-                self.regs[(d & 15) as usize] = self.regs[(s & 15) as usize] << (n & 31);
+                let x = self.regs[(s & 15) as usize];
+                let r = x << (n & 31);
+                self.set_shift_flags(Op::Shl, x, (n & 31) as u32, r);
+                self.regs[(d & 15) as usize] = r;
             }
             Fast::SarI { d, s, n } => {
-                self.regs[(d & 15) as usize] = ((self.regs[(s & 15) as usize] as i32) >> (n & 31)) as u32;
+                let x = self.regs[(s & 15) as usize];
+                let r = ((x as i32) >> (n & 31)) as u32;
+                self.set_shift_flags(Op::Sar, x, (n & 31) as u32, r);
+                self.regs[(d & 15) as usize] = r;
             }
             Fast::PushRet => {
                 self.sp = self.sp.wrapping_sub(4);
@@ -1768,7 +1813,7 @@ impl Cpu {
             }
             Fast::Ext { d, s, part, signed } => {
                 let x = self.regs[(s & 15) as usize];
-                self.regs[(d & 15) as usize] = match (part, signed) {
+                let r = match (part, signed) {
                     (0, false) => x & 0xff,
                     (0, true) => x as u8 as i8 as i32 as u32,
                     (1, false) => x & 0xffff,
@@ -1776,10 +1821,16 @@ impl Cpu {
                     (_, false) => x >> 16,
                     (_, true) => ((x >> 16) as u16 as i16 as i32) as u32,
                 };
+                self.set_nz(r);
+                self.regs[(d & 15) as usize] = r;
             }
             Fast::FOp { d, a, b, op } => {
                 let d = (d & 15) as usize;
-                self.regs[d] = fpu_d(op, self.regs[d], self.regs[(a & 15) as usize], self.regs[(b & 15) as usize])
+                let (x, y) = (self.regs[(a & 15) as usize], self.regs[(b & 15) as usize]);
+                if matches!(op, 5 | 6) {
+                    self.flags = fcmp_flags(x, y);
+                }
+                self.regs[d] = fpu_d(op, self.regs[d], x, y)
             }
             Fast::MemA4 { b, off, op, rk, rv } => {
                 let rhs = match rk { 0 => self.regs[(rv & 15) as usize], 1 => rv, _ => 1u32 << (self.regs[(rv & 15) as usize] & 31) };
@@ -1789,12 +1840,16 @@ impl Cpu {
             }
             Fast::BitExt { d, s, p, l, signed } => {
                 let src = self.regs[(s & 15) as usize];
-                self.regs[(d & 15) as usize] = bit_extract(src, p as u32 & 31, l as u32 & 31, signed);
+                let r = bit_extract(src, p as u32 & 31, l as u32 & 31, signed);
+                self.set_nz(r);
+                self.regs[(d & 15) as usize] = r;
             }
             Fast::BitIns { d, s, p, l } => {
                 let src = self.regs[(s & 15) as usize];
                 let d = (d & 15) as usize;
-                self.regs[d] = bit_insert(self.regs[d], src, p as u32 & 31, l as u32 & 31);
+                let r = bit_insert(self.regs[d], src, p as u32 & 31, l as u32 & 31);
+                self.set_nz(r);
+                self.regs[d] = r;
             }
             Fast::PushRets { n } => {
                 let n = n as i32;
@@ -1888,6 +1943,10 @@ impl Cpu {
                         self.sp = self.sp.wrapping_sub(4);
                         bus.write32(self.sp, val);
                     }
+                }
+                // pushing psr clears its flags (an FM-1, pi32v2-isa push.srl)
+                if mask & SREG_PSR != 0 {
+                    self.flags = 0;
                 }
                 // (nesting may have opened: the run loop looks, as it did after the slow path)
                 bus.irq_window();
@@ -2015,10 +2074,14 @@ impl Cpu {
                     5 => (x as i32).clamp(-32768, 32767) as u32,
                     _ => x.min(65535),
                 };
+                // N and Z, but not for - and abs (not measured / none, an FM-1)
+                if !matches!(k, 1 | 2) {
+                    self.set_nz(self.regs[(d & 15) as usize]);
+                }
             }
             Fast::Div { d, a, b, k } => {
                 let (a, b) = (self.regs[(a & 15) as usize], self.regs[(b & 15) as usize]);
-                self.regs[(d & 15) as usize] = if b == 0 {
+                let r = if b == 0 {
                     0
                 } else {
                     match k {
@@ -2028,6 +2091,11 @@ impl Cpu {
                         _ => a % b,
                     }
                 };
+                // a quotient: N and Z (an FM-1, pi32v2-isa div.s/u.rrr)
+                if k < 2 {
+                    self.set_nz(r);
+                }
+                self.regs[(d & 15) as usize] = r;
             }
             Fast::LdPre { d, b, i, w, signed, inc } => {
                 let b = (b & 15) as usize;
@@ -2114,6 +2182,10 @@ impl Cpu {
                 let val = sreg_get_named(self, name);
                 self.sp = self.sp.wrapping_sub(4);
                 bus.write32(self.sp, val);
+            }
+            // pushing psr clears its flags (an FM-1, pi32v2-isa push.srl)
+            if list[..n].contains(&"psr") {
+                self.flags = 0;
             }
             return Ok(Some(None));
         }
@@ -2415,7 +2487,9 @@ impl Cpu {
             let d = ((raw >> 28) & 0xf) as usize;
             let src = self.regs[((raw >> 20) & 0xf) as usize];
             let n = (((raw >> 16) & 0xf) | (((raw >> 24) & 1) << 4)) as u32;
-            self.regs[d] = src.rotate_right(n);
+            let x = src.rotate_right(n);
+            self.set_nz(x);
+            self.regs[d] = x;
             return Ok(Some(None));
         }
 
@@ -2495,19 +2569,20 @@ impl Cpu {
                 let n = if s.ends_with('R') { self.regs[r(self, 1)?] & 0xff } else { v(self, 1)? };
                 let kind = s[2..].split('=').next().unwrap_or("<<");
                 let x = self.regs[d];
-                self.regs[d] = match kind {
-                    "<<" => if n >= 32 { 0 } else { x << n },
-                    ">>" => if n >= 32 { 0 } else { x >> n },
-                    _ => if n >= 32 { ((x as i32) >> 31) as u32 } else { ((x as i32) >> n) as u32 },
-                };
+                let op = match kind { "<<" => Op::Shl, ">>" => Op::Shr, _ => Op::Sar };
+                let r = shift32(op, x, n);
+                self.set_shift_flags(op, x, n, r);
+                self.regs[d] = r;
                 return Ok(Some(None));
             }
-            "R = R & ~R" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?] & !self.regs[r(self, 2)?]; return Ok(Some(None)); }
+            "R = R & ~R" => { let d = r(self, 0)?; let x = self.regs[r(self, 1)?] & !self.regs[r(self, 2)?]; self.set_nz(x); self.regs[d] = x; return Ok(Some(None)); }
             "R = R & ~(#i << R)" | "R = R | (#i << R)" => {
                 let d = r(self, 0)?;
                 let a = self.regs[r(self, 1)?];
                 let m = v(self, 2)?.wrapping_shl(self.regs[r(self, 3)?] & 31);
-                self.regs[d] = if s.contains('~') { a & !m } else { a | m };
+                let x = if s.contains('~') { a & !m } else { a | m };
+                self.set_nz(x);
+                self.regs[d] = x;
                 return Ok(Some(None));
             }
             "[R+#i] &= ~(#i << R)" | "[R+#i] |= #i << R" | "[R+#i] &= ~R" | "[R+#i] |= R << #i" => {
@@ -2600,7 +2675,7 @@ impl Cpu {
                 return Ok(Some(None));
             }
             "R = abs(R)" => { let d = r(self, 0)?; self.regs[d] = (self.regs[r(self, 1)?] as i32).saturating_abs() as u32; return Ok(Some(None)); }
-            "R = clz(R)" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].leading_zeros(); return Ok(Some(None)); }
+            "R = clz(R)" => { let d = r(self, 0)?; let x = self.regs[r(self, 1)?].leading_zeros(); self.set_nz(x); self.regs[d] = x; return Ok(Some(None)); }
             "R = rev8(R)" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].swap_bytes(); return Ok(Some(None)); }
             "R = R + R + c" => {
                 let d = r(self, 0)?;
@@ -2667,10 +2742,10 @@ impl Cpu {
                 self.regs[d] = match &s[6..7] {
                     "+" => self.alu_f(Op::Add, a, b),
                     "-" => self.alu_f(Op::Sub, a, b),
-                    "&" => a & b,
-                    "|" => a | b,
-                    "^" => a ^ b,
-                    _ => a.wrapping_mul(b),
+                    "&" => self.alu_f(Op::And, a, b),
+                    "|" => self.alu_f(Op::Or, a, b),
+                    "^" => self.alu_f(Op::Xor, a, b),
+                    _ => self.alu_f(Op::Mul, a, b),
                 };
             }
             "R = #h - R" | "R = #i - R" => {
@@ -2686,12 +2761,16 @@ impl Cpu {
                 self.regs[d] = match &s[6..7] {
                     "+" => self.alu_f(Op::Add, a, b),
                     "-" => self.alu_f(Op::Sub, a, b),
-                    "&" => a & b,
-                    "|" => a | b,
-                    "^" => a ^ b,
-                    "*" => a.wrapping_mul(b),
-                    "/" if s.ends_with("(s)") => if b == 0 { 0 } else { (a as i32).wrapping_div(b as i32) as u32 },
-                    "/" => if b == 0 { 0 } else { a / b },
+                    "&" => self.alu_f(Op::And, a, b),
+                    "|" => self.alu_f(Op::Or, a, b),
+                    "^" => self.alu_f(Op::Xor, a, b),
+                    "*" => self.alu_f(Op::Mul, a, b),
+                    // a quotient writes N and Z (an FM-1)
+                    "/" => {
+                        let q = if b == 0 { 0 } else if s.ends_with("(s)") { (a as i32).wrapping_div(b as i32) as u32 } else { a / b };
+                        self.set_nz(q);
+                        q
+                    }
                     _ if s.ends_with("(s)") => if b == 0 { 0 } else { (a as i32).wrapping_rem(b as i32) as u32 },
                     _ => if b == 0 { 0 } else { a % b },
                 };
@@ -2704,10 +2783,10 @@ impl Cpu {
                 self.regs[d] = match &s[2..3] {
                     "+" => self.alu_f(Op::Add, a, b),
                     "-" => self.alu_f(Op::Sub, a, b),
-                    "|" => a | b,
-                    "&" => a & b,
-                    "^" => a ^ b,
-                    _ => a.wrapping_mul(b),
+                    "|" => self.alu_f(Op::Or, a, b),
+                    "&" => self.alu_f(Op::And, a, b),
+                    "^" => self.alu_f(Op::Xor, a, b),
+                    _ => self.alu_f(Op::Mul, a, b),
                 };
             }
             "R = R << #i" | "R = R >> #i" | "R = R >>> #i" | "R = R <<< #i"
@@ -2721,23 +2800,28 @@ impl Cpu {
                 // the space, which made every 4-byte `rX = rY << n` an
                 // arithmetic right shift (Felucca's Huffman LUT came out empty)
                 let kind = s[6..].split(' ').next().unwrap_or("<<");
-                self.regs[d] = sh(a, n, kind);
+                let r = sh(a, n, kind);
+                self.set_shift_flags(match kind { "<<" | "<<<" => Op::Shl, ">>" => Op::Shr, _ => Op::Sar }, a, n, r);
+                self.regs[d] = r;
             }
             // `SD 1a` with bit 3: rD <<<= rS, d = bits(0,2), s = bits(4,7) (the `<<=` layout; the
             // vendor assembler, work/probe/fam.S)
             "R <<<= R" if insn.entry.len == 2 => {
                 let (d, src) = ((insn.raw & 7) as usize, ((insn.raw >> 4) & 0xf) as usize);
-                self.regs[d] = qasl(self.regs[d], self.regs[src] & 0xff);
+                let (x, n) = (self.regs[d], self.regs[src] & 0xff);
+                let r = qasl(x, n);
+                self.set_shift_flags(Op::Shl, x, n, r);
+                self.regs[d] = r;
             }
             "R = -R" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].wrapping_neg(); }
-            "R = ~R" => { let d = r(self, 0)?; self.regs[d] = !self.regs[r(self, 1)?]; }
+            "R = ~R" => { let d = r(self, 0)?; let x = !self.regs[r(self, 1)?]; self.set_nz(x); self.regs[d] = x; }
             "R = R.b0 (u)" | "R = R.b0 (s)" | "R = R.l (u)" | "R = R.l (s)" | "R = R.h (u)"
             | "R = R.h (s)" | "R = R.b1 (u)" | "R = R.b2 (u)" | "R = R.b3 (u)" => {
                 let d = r(self, 0)?;
                 let x = self.regs[r(self, 1)?];
                 let signed = s.ends_with("(s)");
                 // "R = R.b0 (u)": the part name starts at index 6
-                self.regs[d] = match &s[6..8] {
+                let e = match &s[6..8] {
                     "b0" => if signed { x as u8 as i8 as i32 as u32 } else { x & 0xff },
                     "b1" => (x >> 8) & 0xff,
                     "b2" => (x >> 16) & 0xff,
@@ -2745,6 +2829,8 @@ impl Cpu {
                     "l " => if signed { x as u16 as i16 as i32 as u32 } else { x & 0xffff },
                     _ => if signed { ((x >> 16) as u16 as i16 as i32) as u32 } else { x >> 16 },
                 };
+                self.set_nz(e);
+                self.regs[d] = e;
             }
             "goto #i" => jump = Some((next_pc as i64 + self.slot(insn, 0)?) as u32),
             "goto R" => jump = Some(self.regs[r(self, 0)?]),
@@ -2889,7 +2975,7 @@ impl Cpu {
                     Op::Shl | Op::Shr | Op::Sar => shift32(a.op, x, rhs & 0xff),
                 };
                 match a.dst {
-                    Dst::Reg(d) => self.regs[d] = if matches!(a.op, Op::Add | Op::Sub | Op::RSub) { self.alu_f(a.op, lhs, rhs) } else { apply(lhs) },
+                    Dst::Reg(d) => self.regs[d] = self.alu_f(a.op, lhs, rhs),
                     Dst::Mem(off) => {
                         let addr = (self.regs[a.src] as i64 + off as i64) as u32;
                         let cur = bus.read32(addr);
@@ -3291,7 +3377,11 @@ impl Cpu {
 
             ROUTE_FPU => {
                 let (op, d, a, b) = decode_fpu(insn.raw);
-                self.regs[d as usize] = fpu_d(op, self.regs[d as usize], self.regs[a as usize], self.regs[b as usize]);
+                let (x, y) = (self.regs[a as usize], self.regs[b as usize]);
+                if matches!(op, 5 | 6) {
+                    self.flags = fcmp_flags(x, y);
+                }
+                self.regs[d as usize] = fpu_d(op, self.regs[d as usize], x, y);
             }
             ROUTE_SYNTAX => match self.exec_syntax(bus, insn, next_pc) {
                 Ok(Some(j)) => jumped = j,
@@ -3404,9 +3494,12 @@ impl Cpu {
             }
             34 =>
             {
+                // (u) takes the source as unsigned (an FM-1, as `Fast::Un`'s sat16); N and Z
                 let (d, s, signed) = sat16_raw(raw).unwrap();
-                let x = self.regs[s as usize] as i32;
-                self.regs[d as usize] = if signed { x.clamp(-32768, 32767) } else { x.clamp(0, 65535) } as u32;
+                let x = self.regs[s as usize];
+                let r = if signed { (x as i32).clamp(-32768, 32767) as u32 } else { x.min(65535) };
+                self.set_nz(r);
+                self.regs[d as usize] = r;
             }
             33 =>
             {
@@ -3475,13 +3568,15 @@ impl Cpu {
                         // the count is the register's low 8 bits; 64 and up shift everything out
                         // (pi32v2-isa hw/fm1-2026-10-24, lsr.u.rpr: 0x6b gave 0)
                         let n = self.regs[((raw >> 24) & 0xf) as usize] & 0xff;
-                        self.regs[((raw >> 28) & 0xf) as usize] = if raw & 0x1_0000 != 0 {
+                        let r = if raw & 0x1_0000 != 0 {
                             ((x as i64) >> n.min(63)).clamp(i32::MIN as i64, i32::MAX as i64) as u32
                         } else if n >= 64 {
                             0
                         } else {
                             (x >> n).min(u32::MAX as u64) as u32
                         };
+                        self.set_pshr_flags(x, n, r);
+                        self.regs[((raw >> 28) & 0xf) as usize] = r;
                     }
                     0xde => {
                         // saturated: the vendor clang never picks it for a plain C truncation
@@ -3489,11 +3584,13 @@ impl Cpu {
                         let q = ((raw >> 21) & 7) as usize;
                         let x = (self.regs[2 * q + 1] as u64) << 32 | self.regs[2 * q] as u64;
                         let n = ((raw >> 16) & 0xf) | (((raw >> 24) & 3) << 4);
-                        self.regs[((raw >> 28) & 0xf) as usize] = if raw & 0x0800_0000 != 0 {
+                        let r = if raw & 0x0800_0000 != 0 {
                             ((x as i64) >> n).clamp(i32::MIN as i64, i32::MAX as i64) as u32
                         } else {
                             (x >> n).min(u32::MAX as u64) as u32
                         };
+                        self.set_pshr_flags(x, n as u32, r);
+                        self.regs[((raw >> 28) & 0xf) as usize] = r;
                     }
                     0xd0 | 0xd8 => {
                         let by_reg = raw & 0xff == 0xd8;
@@ -3514,6 +3611,12 @@ impl Cpu {
                             2 => if n >= 64 { 0 } else { x >> n },
                             _ => ((x as i64) >> n.min(63)) as u64,
                         };
+                        // only C: the last bit shifted out, kept for a count of 0 (an FM-1, pi32v2-isa
+                        // lsl.pair.r)
+                        if n != 0 {
+                            let c = if op < 2 { x >> (64 - n.min(64)) } else { x >> (n.min(64) - 1) } & 1;
+                            self.flags = (self.flags & !F_C) | if c != 0 { F_C } else { 0 };
+                        }
                         self.regs[lo] = y as u32;
                         self.regs[hi] = (y >> 32) as u32;
                     }
@@ -3522,10 +3625,15 @@ impl Cpu {
                         let b = self.regs[((raw >> 24) & 0xf) as usize];
                         let mut y = if signed { (a as i32 as i64).wrapping_mul(b as i32 as i64) as u64 } else { (a as u64) * (b as u64) };
                         let acc = (self.regs[hi] as u64) << 32 | self.regs[lo] as u64;
-                        match raw & 0xff {
-                            0xfc => y = acc.wrapping_add(y),
-                            0xfe => y = acc.wrapping_sub(y),
-                            _ => {}
+                        // the accumulates write only C, the 64-bit add's carry (no borrow for -=;
+                        // an FM-1, pi32v2-isa madd / msub.s/u.prr)
+                        let c = match raw & 0xff {
+                            0xfc => { let (r, c) = acc.overflowing_add(y); y = r; Some(c) }
+                            0xfe => { let c = acc >= y; y = acc.wrapping_sub(y); Some(c) }
+                            _ => None,
+                        };
+                        if let Some(c) = c {
+                            self.flags = (self.flags & !F_C) | if c { F_C } else { 0 };
                         }
                         self.regs[lo] = y as u32;
                         self.regs[hi] = (y >> 32) as u32;
@@ -3550,12 +3658,17 @@ impl Cpu {
                 // hw/fm1-2026-10-24, popcnt.rr: 19 of 19 cases)
                 let d = ((raw >> 28) & 0xf) as usize;
                 let x = self.regs[((raw >> 24) & 0xf) as usize];
-                self.regs[d] = match (raw >> 22) & 3 {
-                    0 => x.swap_bytes(),
-                    1 => (x & 0x00ff_00ff) << 8 | (x >> 8) & 0x00ff_00ff,
-                    2 => (x as u16).swap_bytes() as i16 as i32 as u32,
-                    _ => self.regs[d],
+                let r = match (raw >> 22) & 3 {
+                    0 => Some(x.swap_bytes()),
+                    1 => Some((x & 0x00ff_00ff) << 8 | (x >> 8) & 0x00ff_00ff),
+                    2 => Some((x as u16).swap_bytes() as i16 as i32 as u32),
+                    _ => None,
                 };
+                // N and Z (popcnt, above, touches nothing)
+                if let Some(r) = r {
+                    self.set_nz(r);
+                    self.regs[d] = r;
+                }
             }
             27 => {
                 // `{rets, rN..rB} = [sp++]` (3n 04): like the pc pops but the
@@ -3570,13 +3683,24 @@ impl Cpu {
             }
             41 => {
                 let (d, a, b) = (((raw >> 28) & 0xf) as usize, ((raw >> 20) & 0xf) as usize, ((raw >> 24) & 0xf) as usize);
-                self.regs[d] = match dsp_raw(raw as u64).unwrap() {
-                    Dsp::QaslImm => qasl(self.regs[a], match (((raw >> 16) & 0xf) | ((raw >> 24) & 1) << 4) as u32 { 0 => 32, n => n }),
-                    Dsp::QaslReg => qasl(self.regs[a], self.regs[b] & 0xff),
+                let dsp = dsp_raw(raw as u64).unwrap();
+                self.regs[d] = match dsp {
+                    Dsp::QaslImm | Dsp::QaslReg => {
+                        let (x, n) = if matches!(dsp, Dsp::QaslImm) {
+                            (self.regs[a], match (((raw >> 16) & 0xf) | ((raw >> 24) & 1) << 4) as u32 { 0 => 32, n => n })
+                        } else {
+                            (self.regs[a], self.regs[b] & 0xff)
+                        };
+                        let r = qasl(x, n);
+                        self.set_shift_flags(Op::Shl, x, n, r);
+                        r
+                    }
                     Dsp::Cls => {
                         // the sign bit counts: cls(0) and cls(-1) are 32 (an FM-1, pi32v2-isa cls.rr)
                         let x = self.regs[b];
-                        (if (x as i32) < 0 { !x } else { x }).leading_zeros()
+                        let r = (if (x as i32) < 0 { !x } else { x }).leading_zeros();
+                        self.set_nz(r);
+                        r
                     }
                     Dsp::MinMax => {
                         let (x, y) = (self.regs[a], self.regs[b]);
@@ -3587,7 +3711,14 @@ impl Cpu {
                             (true, false) => x.min(y),
                         }
                     }
-                    Dsp::BrevAdd => (self.regs[d].reverse_bits().wrapping_add(self.regs[b].reverse_bits())).reverse_bits(),
+                    // the carries run from bit 31 down: N and Z of the result, C and V of the
+                    // reversed add (an FM-1, pi32v2-isa add.brev.rr)
+                    Dsp::BrevAdd => {
+                        let (sum, f) = add_flags(self.regs[d].reverse_bits(), self.regs[b].reverse_bits(), 0);
+                        let r = sum.reverse_bits();
+                        self.flags = (f & (F_C | F_V)) | nz_flags(r);
+                        r
+                    }
                 };
             }
             39 => {
@@ -5028,6 +5159,29 @@ mod tests {
         let mut cpu = Cpu::new(0);
         let slot = cpu.fetch_at(&mut FlatRam::new(mem), 0).unwrap();
         assert!(!cpu.icache[slot].careful, "flags replaced before the reader");
+    }
+
+    /// The flags the other forms write (an FM-1, pi32v2-isa hw/fm1-2026-10-24), and their care:
+    /// a logic op keeps C, so an add's carry read past one is still the add's.
+    #[test]
+    fn flags_of_logic_ops_and_shifts() {
+        // `10 a4` r0 = r1 << 4: N, Z, C the last bit out (bit 28), V kept
+        assert_eq!(run_regs(&[0x10, 0xa4], &[(1, 0x1800_0001)]).flags, F_N | F_C);
+        // `80 19` r0 &= r0: N and Z only
+        assert_eq!(run_regs(&[0x80, 0x19], &[(0, 0)]).flags, F_Z);
+        let fetch = |code: &[u8]| {
+            let mut mem = vec![0u8; 0x100];
+            mem[..code.len()].copy_from_slice(code);
+            let mut cpu = Cpu::new(0);
+            let slot = cpu.fetch_at(&mut FlatRam::new(mem), 0).unwrap();
+            cpu.icache[slot].careful
+        };
+        // `64 e0 00 05` r0 = psr reads the &'s flags: careful
+        assert!(fetch(&[0x80, 0x19, 0x64, 0xe0, 0x00, 0x05]), "a psr read after the &");
+        // `b4 e0 00 00` r0 = r0 + r0, the &, then `b8 e0 10 12` (+ c): the & keeps C, the add stays careful
+        assert!(fetch(&[0xb4, 0xe0, 0x00, 0x00, 0x80, 0x19, 0xb8, 0xe0, 0x10, 0x12]), "the add's carry, read past the &");
+        // with nothing reading them, compiled
+        assert!(!fetch(&[0x80, 0x19, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00]));
     }
 
     /// An add whose flags a `psr` push reads after a jump: the scan follows the jump (compiled
@@ -6569,7 +6723,9 @@ thread_local! {
 
 /// The printed syntax with the sign of `-#i` folded into the slot and the
 /// dual-issue ` #` stripped, memoised per class.
-/// Add / subtract shapes that set the flags (`Cpu::flags`).
+/// Add / subtract shapes: they set all four flags (`Cpu::flags`), so a reader past one reads
+/// its flags, not an earlier op's (`flags_read_later` stops there; the other flag writers keep C
+/// or V and do not end the search).
 fn is_flag_producer(s: &str) -> bool {
     s.starts_with("R = R + ") || s.starts_with("R = R - ") || s.starts_with("R += ") || s.starts_with("R -= ")
         || s.starts_with("R = #h - ") || s.starts_with("R = #i - ")
@@ -6788,29 +6944,34 @@ impl Fast {
             | Fast::Mov2I { .. } | Fast::Un { .. } | Fast::MinMax { .. } | Fast::FOp { .. } | Fast::AddC { .. })
     }
 
-    /// Does this op set the arithmetic flags? (`alu_f`'s add / subtract, `AddRI`; no other
-    /// micro-op touches them, but `Raw` and `Swap` may; neither is ever swapped). Every op is
-    /// listed, so a new one has to say: `swappable_with` is only sound if this is right.
+    /// Does this op set psr flags in the interpreter? The ALU ops (add / subtract all four, the
+    /// logic ops and multiply N and Z, the shifts N, Z and C: `alu_f`), the extensions,
+    /// bit-fields, `clz` / rev8 / `~` / sat16, quotients, fmin / fmax and a push of psr (which
+    /// clears them), as an FM-1 does; `Raw` and `Swap` may. The JITs do not model the flags:
+    /// `flags_live` keeps one whose flags are read on the careful path. Every op is listed, so a
+    /// new one has to say: `swappable_with` is only sound if this is right.
     fn sets_flags(&self) -> bool {
         match *self {
-            Fast::Alu3 { op, .. } | Fast::Alu3I { op, .. } | Fast::Alu2 { op, .. } | Fast::Alu2I { op, .. } | Fast::A4 { op, .. } => {
-                matches!(op, Op::Add | Op::Sub | Op::RSub)
-            }
+            Fast::Alu3 { .. } | Fast::Alu3I { .. } | Fast::Alu2 { .. } | Fast::Alu2I { .. } | Fast::A4 { .. }
+            | Fast::ShlI { .. } | Fast::SarI { .. } | Fast::Ext { .. } | Fast::BitExt { .. } | Fast::BitIns { .. } => true,
             Fast::AddRI { .. } | Fast::Raw { .. } | Fast::Swap { .. } | Fast::AddC { .. } => true,
-            // (psr in the list: its low bits are the flags)
-            Fast::PopSregs { mask } => mask & SREG_PSR != 0,
-            Fast::PushRegs { .. } | Fast::PopRegs { .. } | Fast::PushSregs { .. } | Fast::Rti => false,
+            Fast::Un { k, .. } => !matches!(k, 1 | 2),
+            Fast::Div { k, .. } => k < 2,
+            Fast::FOp { op, .. } => matches!(op, 5 | 6),
+            // (psr in the list: its low bits are the flags; a push clears them)
+            Fast::PopSregs { mask } | Fast::PushSregs { mask } => mask & SREG_PSR != 0,
+            Fast::PushRegs { .. } | Fast::PopRegs { .. } | Fast::Rti => false,
             Fast::Mov { .. } | Fast::MovI { .. } | Fast::Ld { .. } | Fast::St { .. } | Fast::BrI { .. } | Fast::BrR { .. }
-            | Fast::FOp { .. } | Fast::Goto { .. } | Fast::Call { .. } | Fast::Rts | Fast::CallR { .. } | Fast::GotoR { .. }
+            | Fast::Goto { .. } | Fast::Call { .. } | Fast::Rts | Fast::CallR { .. } | Fast::GotoR { .. }
             | Fast::BitBr { .. } | Fast::LdIdx { .. } | Fast::StIdx { .. } | Fast::Rmw { .. } | Fast::LdPost { .. }
-            | Fast::StPost { .. } | Fast::DecBr { .. } | Fast::Ext { .. } | Fast::MemA4 { .. } | Fast::Nop
+            | Fast::StPost { .. } | Fast::DecBr { .. } | Fast::MemA4 { .. } | Fast::Nop
             | Fast::PushRets { .. } | Fast::PopPc { .. } | Fast::PushMask { .. } | Fast::PopMask { .. } | Fast::PushRet
             | Fast::PopRet | Fast::MinMax { .. } | Fast::IfBlk { .. } | Fast::BrIEq { .. } | Fast::BrINe { .. }
             | Fast::LdW { .. } | Fast::LdWSp { .. } | Fast::LdBu { .. } | Fast::StW { .. } | Fast::StWSp { .. }
-            | Fast::ShlI { .. } | Fast::SarI { .. } | Fast::SpAdd { .. } | Fast::SpFromR { .. } | Fast::RFromSp { .. }
-            | Fast::BitExt { .. } | Fast::BitIns { .. } | Fast::SetIe { .. } | Fast::IcfgRd { .. } | Fast::IcfgWr { .. }
+            | Fast::SpAdd { .. } | Fast::SpFromR { .. } | Fast::RFromSp { .. }
+            | Fast::SetIe { .. } | Fast::IcfgRd { .. } | Fast::IcfgWr { .. }
             | Fast::BlockMove { .. } | Fast::PopRets | Fast::Tb { .. } | Fast::Mov2 { .. } | Fast::Mov2I { .. }
-            | Fast::Un { .. } | Fast::Div { .. } | Fast::LdPre { .. } | Fast::StPre { .. } | Fast::LdPostR { .. }
+            | Fast::LdPre { .. } | Fast::StPre { .. } | Fast::LdPostR { .. }
             | Fast::StPostR { .. } | Fast::LdPair { .. } | Fast::StPair { .. } => false,
         }
     }
@@ -6870,8 +7031,8 @@ impl Fast {
             Fast::Alu3I { d, a, v, op: Op::Add } => Fast::AddRI { d, s: a, v },
             Fast::Alu2I { d, v, op: Op::Add } => Fast::AddRI { d, s: d, v },
             Fast::A4 { d, s, op: Op::Add, rk: 1, rv } => Fast::AddRI { d, s, v: rv },
-            Fast::A4 { d, s, op: Op::Shl, rk: 1, rv } => Fast::ShlI { d, s, n: (rv & 31) as u8 },
-            Fast::A4 { d, s, op: Op::Sar, rk: 1, rv } => Fast::SarI { d, s, n: (rv & 31) as u8 },
+            Fast::A4 { d, s, op: Op::Shl, rk: 1, rv } if rv < 32 => Fast::ShlI { d, s, n: rv as u8 },
+            Fast::A4 { d, s, op: Op::Sar, rk: 1, rv } if rv < 32 => Fast::SarI { d, s, n: rv as u8 },
             f => f,
         }
     }
@@ -7279,6 +7440,12 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
 /// pop.rets_rl: 0x5b569643 popped gave 0x03569642); a call's return address always fits.
 const RETS_MASK: u32 = 0x07ff_fffe;
 
+/// The N and Z psr bits of a 32-bit result.
+#[inline]
+fn nz_flags(r: u32) -> u32 {
+    (if r >> 31 != 0 { F_N } else { 0 }) | (if r == 0 { F_Z } else { 0 })
+}
+
 /// A 32-bit shift by n as an FM-1 runs it: a register count is its low 8 bits (bit 8 and up are
 /// ignored) and counts of 32 and up shift everything out: `<<` and `>>` give 0, `>>>` the sign
 /// (pi32v2-isa hw/fm1-2026-10-24, the `lsl.rr`/`lsr.rrr`/`asr.rrr` notes).
@@ -7443,9 +7610,9 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
             let op = if has(insn.entry.name, "lsr") { Op::Shr } else if has(insn.entry.name, "asr") { Op::Sar } else { Op::Shl };
             let (d, s, n) = ((raw & 7) as u8, ((raw >> 4) & 7) as u8, ((raw >> 8) & 0x1f) as u32);
             Some(match (n, op) {
-                // a count of 0 shifts by 32: logical shifts give 0, >>> the sign fill (= >>> 31)
-                (0, Op::Sar) => Fast::A4 { d, s, op, rk: 1, rv: 31 },
-                (0, _) => Fast::MovI { d, v: 0 },
+                // a count of 0 shifts by 32: logical shifts give 0, >>> the sign fill (`shift32`;
+                // the flags as for 32)
+                (0, _) => Fast::A4 { d, s, op, rk: 1, rv: 32 },
                 _ => Fast::A4 { d, s, op, rk: 1, rv: n },
             })
         }
@@ -7605,6 +7772,21 @@ fn fpu(op: u8, a: u32, b: u32) -> u32 {
 /// A float arithmetic result as an FM-1 gives it: every NaN is 0x7f800001.
 fn fnan(x: f32) -> u32 {
     if x.is_nan() { 0x7f80_0001 } else { x.to_bits() }
+}
+
+/// psr bits 3..0 after a float compare (fcmp, fmin / fmax): 8 a < b, 2 a > b, 6 equal (the zeros
+/// too), 3 unordered (an FM-1, pi32v2-isa hw/fm1-2026-10-24 and report-s.md).
+fn fcmp_flags(a: u32, b: u32) -> u32 {
+    let (x, y) = (f32::from_bits(a), f32::from_bits(b));
+    if x.is_nan() || y.is_nan() {
+        3
+    } else if x < y {
+        8
+    } else if x > y {
+        2
+    } else {
+        6
+    }
 }
 
 /// fmin / fmax as an FM-1 runs them: a NaN loses to a number, of two NaNs b is the result,
