@@ -44,7 +44,8 @@ EOF
 sign "$clap"
 
 # the AU around it
-cmake -S crates/fm1-plugin/wrap -B "$out/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFM1_CLAP="$clap" >/dev/null
+cmake -S crates/fm1-plugin/wrap -B "$out/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFM1_CLAP="$clap" \
+  -DCMAKE_OSX_ARCHITECTURES="$(lipo -archs "$clap/Contents/MacOS/FM-1" | tr ' ' ';')" >/dev/null
 cmake --build "$out/build"
 au=$(find "$out/build" -maxdepth 2 -name "FM-1.component" -type d | head -1)
 rm -rf "$out/FM-1.component"
