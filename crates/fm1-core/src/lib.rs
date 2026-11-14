@@ -1431,7 +1431,8 @@ impl Cpu {
         if head {
             // (route 40 is `R.bN = #i`, a byte of a register)
             let part = if matches!(f, Fast::Raw { route: 40, .. }) { 1 } else { 4 };
-            self.pair_hold(before, Some(f), part);
+            let dest = match f { Fast::Raw { route, raw } => raw_dest(route, raw as u64), _ => NO_DEST };
+            self.pair_hold(before, Some(f), part, dest);
         }
         jumped
     }
@@ -1443,14 +1444,20 @@ impl Cpu {
     /// FM-1 keeps the head's value even where it wrote the old one back (`r5 = r5 #` then a load
     /// into r5 left r5), and only the part it writes (`r2.h = #i #` then a load into r2 kept the
     /// loaded low half; pi32v2-isa hw/fm1-2026-10-24-v3).
-    fn pair_hold(&mut self, before: [u32; 16], f: Option<Fast>, part: u32) {
+    ///
+    /// `dest`: a register (and the bits of it) the head is known to write from its decoding
+    /// (`head_dest`), for a head with no micro-op: written back unchanged, it would not show.
+    fn pair_hold(&mut self, before: [u32; 16], f: Option<Fast>, part: u32, dest: [(usize, u32); 2]) {
         let after = self.regs;
         let exact = f.and_then(|f| f.regs_rw()).map_or(0, |(_, w)| w);
         let piece = if part >= 4 { u32::MAX } else { (1u32 << (8 * part)) - 1 };
         let mut wrote = [0u32; 16];
+        for (r, m) in dest {
+            wrote[r & 15] |= m;
+        }
         for i in 0..16 {
             let ch = before[i] ^ after[i];
-            wrote[i] = if exact >> i & 1 != 0 { !0 } else { 0 };
+            wrote[i] |= if exact >> i & 1 != 0 { !0 } else { 0 };
             for k in (0..32).step_by(8 * part.min(4) as usize) {
                 if ch & piece.wrapping_shl(k) != 0 {
                     wrote[i] |= piece.wrapping_shl(k);
@@ -1546,7 +1553,8 @@ impl Cpu {
             // a head that writes part of a register: `R.bN = ...`, `R.l = ...`, `R.h = ...`
             let s = x.pre.syntax;
             let part = if s.starts_with("R.b") { 1 } else if s.starts_with("R.") { 2 } else { 4 };
-            self.pair_hold(before, l.fast, part);
+            let dest = head_dest(&insn, &x.pre);
+            self.pair_hold(before, l.fast, part, dest);
         }
         res
     }
@@ -6215,6 +6223,24 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.regs[0], 2, "r0 = smin(r13, r5) #; r0 = [r3+8]");
+        // and a head that writes back what a register held: the decoding says what it writes
+        // (`head_dest`): the same smin with r0 = 2 already, and `r2.h = 57889 #` with r2.h already it
+        for (code, regs, word, reg, want) in [
+            (&[0x35u8, 0xf4, 0xd1, 0x05, 0x30, 0x62][..], [(0usize, 2u32), (3, 0x40), (5, 7), (13, 2)], (0x48usize, 0x09b6_0005u32), 0usize, 2u32),
+            (&[0x12, 0xf0, 0x21, 0xe2, 0x12, 0x63][..], [(1, 0x80), (2, 0xe221_4b90), (3, 0), (4, 0)], (0x8c, 0x9001_7ba7), 2, 0xe221_7ba7),
+        ] {
+            let mut mem = vec![0u8; 0x100];
+            mem[..6].copy_from_slice(code);
+            mem[word.0..word.0 + 4].copy_from_slice(&word.1.to_le_bytes());
+            let mut ram = FlatRam::new(mem);
+            let mut cpu = Cpu::new(0);
+            for (r, v) in regs {
+                cpu.regs[r] = v;
+            }
+            cpu.step(&mut ram).unwrap();
+            cpu.step(&mut ram).unwrap();
+            assert_eq!(cpu.regs[reg], want, "{code:02x?}");
+        }
     }
 
     #[test]
@@ -7495,6 +7521,54 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
 /// rets holds bits 26..1 of a word popped or moved into it (an FM-1: pi32v2-isa hw/fm1-2026-10-24,
 /// pop.rets_rl: 0x5b569643 popped gave 0x03569642); a call's return address always fits.
 const RETS_MASK: u32 = 0x07ff_fffe;
+
+/// No register known written (`head_dest`).
+const NO_DEST: [(usize, u32); 2] = [(0, 0); 2];
+
+/// The registers (and the bits of them; mask 0: none) an instruction with no micro-op writes,
+/// where its decoding says (`Cpu::pair_hold`): slot 0 of a syntax whose destination is one
+/// register (`R`, `R.l`, `R.h`, `R.bN` before an `=`, `op=` or `<=`), else `raw_dest` by route,
+/// else a 4-byte ALU word's register destination.
+fn head_dest(insn: &Instruction, pre: &Pre) -> [(usize, u32); 2] {
+    let mut words = pre.syntax.split(' ');
+    let (tok, op) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    let mask = match tok {
+        "R" => u32::MAX,
+        "R.l" => 0xffff,
+        "R.h" => 0xffff_0000,
+        "R.b0" | "R.b1" | "R.b2" | "R.b3" => 0xff << (8 * (tok.as_bytes()[3] - b'0') as u32),
+        _ => 0,
+    };
+    if mask != 0 && op.ends_with('=') && !op.ends_with("==") {
+        if let Some(sl) = insn.entry.slots.first().filter(|sl| matches!(sl.kind, fm1_isa::SlotKind::Imm)) {
+            return [((sl.value(insn.raw) & 15) as usize, mask), (0, 0)];
+        }
+    }
+    match (raw_dest(pre.route as u8, insn.raw), pre.alu4) {
+        (NO_DEST, Some(Alu4 { dst: Dst::Reg(d), .. })) => [(d, u32::MAX), (0, 0)],
+        (d, _) => d,
+    }
+}
+
+/// The registers a raw route's 4-byte word writes: bits 28..31 for 22 rev8 / rev16 / revs
+/// (popcnt, which writes nothing, excepted), 34 sat16, 39 the saturating add / subtract, 41 the
+/// DSP forms and 40 (one byte of it); for 21, the 64-bit pair ops, the pair at bits 29..31
+/// (`de` / `df`, a pair shifted into one register: bits 28..31).
+fn raw_dest(route: u8, raw: u64) -> [(usize, u32); 2] {
+    let d = ((raw >> 28) & 0xf) as usize;
+    let one = |m: u32| [(d, m), (0, 0)];
+    match route {
+        22 if (raw >> 22) & 3 != 3 => one(u32::MAX),
+        34 | 39 | 41 => one(u32::MAX),
+        40 => one(0xff << (8 * ((raw >> 26) & 3))),
+        21 if matches!(raw & 0xff, 0xde | 0xdf) => one(u32::MAX),
+        21 => {
+            let p = ((raw >> 29) & 7) as usize;
+            [(2 * p, u32::MAX), (2 * p + 1, u32::MAX)]
+        }
+        _ => NO_DEST,
+    }
+}
 
 /// The N and Z psr bits of a 32-bit result.
 #[inline]
