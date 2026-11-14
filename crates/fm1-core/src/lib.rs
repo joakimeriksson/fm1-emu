@@ -7814,6 +7814,9 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
     let raw = insn.raw;
     let next_pc = insn.addr.wrapping_add(insn.entry.len as u32);
     match route {
+        // the pi32v2-isa forms that are one of the micro-ops (`pi32v2_exec::fast`): the JITs and the
+        // polling-loop skip take them as they took fm1-isa's classes
+        ROUTE_PI => pi32v2_exec::fast(fm1_isa::pi32v2_table::index_of(insn.entry)?, raw, next_pc),
         0 => {
             let t = (*bittest)?;
             let (mk, mv) = rhs_kind(t.mask);

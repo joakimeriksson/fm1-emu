@@ -1105,6 +1105,17 @@ pub(crate) fn run<B: Bus>(cpu: &mut Cpu, bus: &mut B, k: usize, win: u64, next_p
     exec(cpu, bus, base, &Ops { win, form: &FORMS[k], base: &FORMS[base] }, next_pc)
 }
 
+/// The micro-op form k is, where it is one (`fast_raw`): then the JITs compile it and the polling-loop
+/// skip can look through it, as for fm1-isa's own classes. The 6-byte call.
+pub(crate) fn fast(k: usize, win: u64, next_pc: u32) -> Option<crate::Fast> {
+    let base = (*table().get(k)?)?;
+    let o = Ops { win, form: &FORMS[k], base: &FORMS[base] };
+    match base {
+        id::CALL_XL => Some(crate::Fast::Call { target: next_pc.wrapping_add(o.v("n") as u32) }),
+        _ => None,
+    }
+}
+
 /// Does form k read the flags (for `flags_read_later`): the flag branches, the carry rotates and the
 /// special-register reads and pushes.
 pub(crate) fn reads_flags(k: usize) -> bool {
