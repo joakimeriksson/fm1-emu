@@ -1431,8 +1431,9 @@ impl Cpu {
         let before = self.regs;
         let jumped = self.exec_fast(bus, f, next_pc);
         if let Some((old, new)) = pending {
+            // the head's results win over the second instruction's (an FM-1, 2026-11)
             for i in 0..16 {
-                if new[i] != old[i] && self.regs[i] == old[i] {
+                if new[i] != old[i] {
                     self.regs[i] = new[i];
                 }
             }
@@ -1514,9 +1515,11 @@ impl Cpu {
         let pending = self.pair_pending.take();
         let res = self.execute(bus, &insn, &x.pre, next_pc);
         if let Some((old, new)) = pending {
-            // commit the pair head's results the second instruction didn't override
+            // commit the pair head's results: where both write a register, the head's value is the
+            // one that stays (an FM-1, pi32v2-isa hw/fm1-2026-10-24-v3: a load as the second
+            // instruction into the head's destination left the head's result in 1079 of 1079 cases)
             for i in 0..16 {
-                if new[i] != old[i] && self.regs[i] == old[i] {
+                if new[i] != old[i] {
                     self.regs[i] = new[i];
                 }
             }
@@ -5892,6 +5895,14 @@ mod tests {
         assert_eq!((c.regs[3], c.regs[0]), (0xffff_8001, 0x1000 + 146));
     }
 
+    /// psr as an FM-1 has it: N bit 3, Z bit 2, C bit 1, V bit 0 (pi32v2-isa hw/fm1-2026-10-24).
+    #[test]
+    fn psr_bits_as_an_fm1_has_them() {
+        assert_eq!(add_flags(0x8000_0000, 0, 0).1, 8, "negative: N, bit 3");
+        assert_eq!(add_flags(0x7fff_ffff, 1, 0).1, 8 | 1, "signed overflow: N and V, bits 3 and 0");
+        assert_eq!(add_flags(0xffff_ffff, 1, 0).1, 4 | 2, "zero with a carry: Z and C");
+    }
+
     /// Memory accesses as an FM-1 runs them (pi32v2-isa hw/fm1-2026-10-24-v2, 2026-11): the scaled
     /// pair index, stores of a high half, a store of the base it updates, a load into it, and a pair
     /// store whose pair holds its base.
@@ -7107,12 +7118,14 @@ fn block_form(s: &str) -> Option<(bool, bool, bool)> {
 #[derive(Clone, Copy, Debug)]
 enum RmwOp { Mov, Or, And, Xor, Add, Sub }
 
-/// `psr` flag bits, as compiled code reads them: `slt` tests N ^ V (bits 0 and 3), `ult` C
-/// (bit 1, set = no borrow, as on ARM); Z (bit 2) is assumed.
-pub const F_N: u32 = 1;
+/// `psr` flag bits as an FM-1 has them (pi32v2-isa hw/fm1-2026-10-24, every add / subtract form
+/// with random flags in and out): N bit 3, Z bit 2, C bit 1 (set = no borrow, as on ARM), V bit 0.
+/// Compiled code's `slt` tests N ^ V (bits 0 and 3, which hid that N and V were the other way
+/// round here), `ult` C.
+pub const F_N: u32 = 8;
 pub const F_C: u32 = 2;
 pub const F_Z: u32 = 4;
-pub const F_V: u32 = 8;
+pub const F_V: u32 = 1;
 
 /// a + b + cin with the flags (subtract: a + !b + 1, with borrow: a + !b + C)
 #[inline]
