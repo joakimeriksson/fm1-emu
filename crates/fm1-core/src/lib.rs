@@ -225,8 +225,8 @@ pub struct Cpu {
     /// Dual-issue pair in flight: an instruction printed with a trailing `#`
     /// executes together with the next one, which still sees the old
     /// register values (`r5 = r3 #; b[r4+6] = r5` stores the old r5). The
-    /// first instruction's register results are held here and committed
-    /// after the second has run, unless the second wrote the same register.
+    /// first instruction's register results are held here, (values, the bits it wrote), and
+    /// committed after the second has run: where both write, the first's value stays.
     pub pair_pending: Option<([u32; 16], [u32; 16])>,
     /// Name of the last class with no semantics (halt reason).
     pub stuck_on: Option<&'static str>,
@@ -1430,20 +1430,43 @@ impl Cpu {
         let pending = self.pair_pending.take();
         let before = self.regs;
         let jumped = self.exec_fast(bus, f, next_pc);
-        if let Some((old, new)) = pending {
-            // the head's results win over the second instruction's (an FM-1, 2026-11)
-            for i in 0..16 {
-                if new[i] != old[i] {
-                    self.regs[i] = new[i];
-                }
-            }
-        }
+        self.pair_commit(pending);
         if head {
-            let after = self.regs;
-            self.regs = before;
-            self.pair_pending = Some((before, after));
+            self.pair_hold(before, Some(f));
         }
         jumped
+    }
+
+    /// A pair head has run (from `before`, the head's micro-op `f` when it has one): hold its
+    /// register results back for `pair_commit`, with the bits it wrote. Those are the registers
+    /// its micro-op writes (`Fast::regs_rw`), and any halfword it changed: an FM-1 keeps the
+    /// head's value even where it wrote the old one back (`r5 = r5 #` then a load into r5 left r5),
+    /// and merges per halfword (`r2.h = #i #` then a load into r2 kept the loaded low half;
+    /// pi32v2-isa hw/fm1-2026-10-24-v3).
+    fn pair_hold(&mut self, before: [u32; 16], f: Option<Fast>) {
+        let after = self.regs;
+        let exact = f.and_then(|f| f.regs_rw()).map_or(0, |(_, w)| w);
+        let mut wrote = [0u32; 16];
+        for i in 0..16 {
+            let ch = before[i] ^ after[i];
+            wrote[i] = if exact >> i & 1 != 0 { !0 } else { 0 }
+                | if ch & 0xffff != 0 { 0xffff } else { 0 }
+                | if ch >> 16 != 0 { 0xffff_0000 } else { 0 };
+        }
+        self.regs = before;
+        self.pair_pending = Some((after, wrote));
+    }
+
+    /// The second instruction of a pair has run: commit the head's held results (`pair_hold`);
+    /// where both wrote, the head's value stays (an FM-1, pi32v2-isa hw/fm1-2026-10-24-v3: a load as
+    /// the second instruction into the head's destination left the head's result in 1079 of 1079
+    /// cases).
+    fn pair_commit(&mut self, pending: Option<([u32; 16], [u32; 16])>) {
+        if let Some((new, wrote)) = pending {
+            for i in 0..16 {
+                self.regs[i] = (self.regs[i] & !wrote[i]) | (new[i] & wrote[i]);
+            }
+        }
     }
 
     /// Code is about to run at `pc` (a block in `run_fast`, an instruction in a runner's reference
@@ -1514,20 +1537,9 @@ impl Cpu {
         let before = self.regs;
         let pending = self.pair_pending.take();
         let res = self.execute(bus, &insn, &x.pre, next_pc);
-        if let Some((old, new)) = pending {
-            // commit the pair head's results: where both write a register, the head's value is the
-            // one that stays (an FM-1, pi32v2-isa hw/fm1-2026-10-24-v3: a load as the second
-            // instruction into the head's destination left the head's result in 1079 of 1079 cases)
-            for i in 0..16 {
-                if new[i] != old[i] {
-                    self.regs[i] = new[i];
-                }
-            }
-        }
+        self.pair_commit(pending);
         if is_pair_head && res.is_ok() {
-            let after = self.regs;
-            self.regs = before;
-            self.pair_pending = Some((before, after));
+            self.pair_hold(before, l.fast);
         }
         res
     }
@@ -5933,6 +5945,27 @@ mod tests {
     /// pair index, stores of a high half, a store of the base it updates, a load into it, and a pair
     /// store whose pair holds its base.
     #[test]
+    fn pair_heads_keep_what_they_wrote_as_an_fm1_does() {
+        // pi32v2-isa hw/fm1-2026-10-24-v3, each with a load into the head's register as the second
+        // instruction: `55 d6` r5 = r5 # then `35 62` r5 = [r3+8] left r5 as it was; `12 f0 21 e2`
+        // r2.h = 57889 # then `12 63` r2 = [r1+12] kept the head's high half and the loaded low one
+        let mut mem = vec![0u8; 0x100];
+        mem[..10].copy_from_slice(&[0x55, 0xd6, 0x35, 0x62, 0x12, 0xf0, 0x21, 0xe2, 0x12, 0x63]);
+        mem[0x48..0x4c].copy_from_slice(&0x484a_3248u32.to_le_bytes());
+        mem[0x8c..0x90].copy_from_slice(&0x9001_7ba7u32.to_le_bytes());
+        let mut ram = FlatRam::new(mem);
+        let mut cpu = Cpu::new(0);
+        (cpu.regs[1], cpu.regs[2], cpu.regs[3], cpu.regs[5]) = (0x80, 0xca70_4b90, 0x40, 0x8ba5_6d34);
+        cpu.step(&mut ram).unwrap();
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.regs[5], 0x8ba5_6d34, "r5 = r5 #; r5 = [r3+8]");
+        cpu.step(&mut ram).unwrap();
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.regs[2], 0xe221_7ba7, "r2.h = 57889 #; r2 = [r1+12]");
+        assert_eq!(cpu.pc, 10);
+    }
+
+    #[test]
     fn memory_accesses_as_an_fm1_runs_them() {
         fn one(bytes: &[u8], regs: &[(usize, u32)], pokes: &[(usize, u32)]) -> (Cpu, FlatRam) {
             let mut mem = vec![0u8; 0x4000];
@@ -6362,7 +6395,7 @@ mod tests {
     /// b[r4+11] = r0 (a swapped pair: the store sees the old r0), `80 07` r0 += 1, nops, `f7 97`
     /// at 0x10, a goto back to the pair. `cut`: at 6 the pair `00 d7` r0 = r0.b0 (u) # `80 07`
     /// r0 += 1, which neither glues nor swaps (careful: the compiled prefix before it ends at 6
-    /// without a jump).
+    /// without a jump); the head's r0 is the one that stays, as on an FM-1.
     #[cfg(native_jit)]
     fn clocked_loop(cut: bool) -> Vec<u8> {
         let mut xip = vec![0u8; 0x1000];
@@ -6439,7 +6472,7 @@ mod tests {
         };
         for setup in CLOCKED_SETUPS {
             let mut inside = 0;
-            for seed in 1..=6u64 {
+            for seed in 1..=12u64 {
                 let (want, got) = (drive_clocked(&xip, false, setup, seed, &before), drive_clocked(&xip, true, setup, seed, &before));
                 inside += got.5;
                 for (i, (w, g)) in want.0.iter().zip(&got.0).enumerate() {
