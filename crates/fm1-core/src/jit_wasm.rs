@@ -1988,7 +1988,7 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
             Fast::PopRets => {
                 g.ld_field(off_sp()); g.set(L_ADDR);
                 g.load(4, false, idx);
-                g.get(L_CPU); g.get(L_VAL); g.mem_op(I32_STORE, 2, off_rets());
+                g.get(L_CPU); g.get(L_VAL); g.i32c(crate::RETS_MASK); g.op(I32_AND); g.mem_op(I32_STORE, 2, off_rets());
                 g.get(L_CPU); g.get(L_ADDR); g.i32c(4); g.op(I32_ADD);
                 g.mem_op(I32_STORE, 2, off_sp());
                 bus_used = true;

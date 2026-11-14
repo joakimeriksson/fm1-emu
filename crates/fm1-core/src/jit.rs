@@ -1629,7 +1629,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.ind_brk(KEEP, count, true);
         }
         Fast::PopRets => {
-            g.a.ldr(0, CPU, off_sp()); g.load(4, false, idx); g.a.str(0, CPU, off_rets());
+            g.a.ldr(0, CPU, off_sp()); g.load(4, false, idx);
+            g.a.mov32(1, crate::RETS_MASK); g.a.and(0, 0, 1); g.a.str(0, CPU, off_rets());
             g.a.ldr(0, CPU, off_sp()); g.a.add_imm(0, 0, 4); g.a.str(0, CPU, off_sp());
             bus_used = true;
         }
@@ -1777,7 +1778,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                 }
                 k += 1;
             }
-            if post {
+            // (a load into its own base keeps the loaded word, as the interpreter)
+            if post && (store || mask >> (base & 15) & 1 == 0) {
                 g.add_imm(0, KEEP, if down { 0 } else { 4 * n });
                 g.st_reg(0, base & 15);
             }

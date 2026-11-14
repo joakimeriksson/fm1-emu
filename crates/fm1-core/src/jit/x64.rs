@@ -833,7 +833,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                 }
                 k += 1;
             }
-            if post {
+            // (a load into its own base keeps the loaded word, as the interpreter)
+            if post && (store || mask >> (base & 15) & 1 == 0) {
                 g.a.ld(RAX, m(RSP, KEEP));
                 if !down {
                     g.add_imm(RAX, 4 * n);
@@ -942,6 +943,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::PopRets => {
             g.ld_sp(RAX);
             g.load(4, false, idx);
+            g.a.alu_ri(Alu::And, RAX, crate::RETS_MASK);
             g.a.st(m(CPU, off_rets() as i32), RAX);
             g.ld_sp(RAX);
             g.a.alu_ri(Alu::Add, RAX, 4);

@@ -212,8 +212,6 @@ pub struct Cpu {
     /// (then_end, else_end, then_start) — reaching then_end jumps over the else-part; a jump
     /// from inside the then-part to before its start leaves the construct (`pred_left_back`).
     pub pred_skips: Vec<(u32, u32, u32)>,
-    /// Condition flag set by `testset` (see its arm for the assumed sense).
-    pub cc: bool,
     /// Arithmetic flags in `psr`'s low bits (F_N | F_C | F_Z | F_V), set by the add / subtract
     /// forms and read by `+ c`, `- !c` and `psr`: clang's 64-bit add / subtract / compare
     /// sequences (and so compiler-rt's soft double) need them. Which forms set them on the real
@@ -355,7 +353,6 @@ pub struct PlainState {
     rep_start: u32,
     rep_reg: Option<usize>,
     rep_count: u32,
-    cc: bool,
     flags: u32,
     sreg_store: [u32; 7],
     ie: bool,
@@ -409,7 +406,6 @@ impl Cpu {
             rep_start: self.rep_start,
             rep_reg: self.rep_reg,
             rep_count: self.rep_count,
-            cc: self.cc,
             flags: self.flags,
             sreg_store: self.sreg_store,
             ie: self.ie,
@@ -435,7 +431,6 @@ impl Cpu {
         self.rep_reg = s.rep_reg;
         self.rep_count = s.rep_count;
         self.pred_skips.clear();
-        self.cc = s.cc;
         self.flags = s.flags;
         self.sreg_store = s.sreg_store;
         self.pair_pending = None;
@@ -1546,7 +1541,7 @@ impl Cpu {
 
     fn set_sreg_named(&mut self, n: &str, v: u32) {
         match n {
-            "rets" => self.rets = v,
+            "rets" => self.rets = v & RETS_MASK,
             "sp" => self.sp = v,
             "ssp" => self.set_ssp(v),
             "usp" => self.set_usp(v),
@@ -1951,7 +1946,9 @@ impl Cpu {
                         addr = addr.wrapping_add(4);
                     }
                 }
-                if post {
+                // a load into its own base keeps the loaded word (an FM-1: pi32v2-isa ldm.post2 /
+                // ldm.pre2)
+                if post && (store || mask >> base & 1 == 0) {
                     self.regs[base] = if down { start } else { addr };
                 }
             }
@@ -1987,7 +1984,7 @@ impl Cpu {
             }
             Fast::Raw { route, raw } => self.exec_raw(bus, route, raw),
             Fast::PopRets => {
-                self.rets = bus.read32(self.sp);
+                self.rets = bus.read32(self.sp) & RETS_MASK;
                 self.sp = self.sp.wrapping_add(4);
             }
             Fast::Tb { r, half } => {
@@ -2463,7 +2460,8 @@ impl Cpu {
                 return Ok(Some(None));
             }
             "ssync" | "btbclr" | "iflush [R]" | "flush [R]" | "flushinv [R]" => return Ok(Some(None)),
-            "cc = #i" => { self.cc = v(self, 0)? != 0; return Ok(Some(None)); }
+            // the carry, psr bit 1 (pi32v2-isa cc.set: only C changes)
+            "cc = #i" => { self.flags = (self.flags & !F_C) | if v(self, 0)? != 0 { F_C } else { 0 }; return Ok(Some(None)); }
             "callns R" => { self.rets = next_pc; return Ok(Some(Some(self.regs[r(self, 0)?]))); }
             "rti" => {
                 // back to the mode the interrupt came from; with none in progress, user mode
@@ -2556,7 +2554,7 @@ impl Cpu {
                     else if rhs.starts_with('#') { v(self, 0)? }
                     else { sreg_get(self, rhs).unwrap() };
                 match lhs {
-                    "rets" => self.rets = val,
+                    "rets" => self.rets = val & RETS_MASK,
                     "sp" => self.sp = val,
                     "ssp" => self.set_ssp(val),
                     "usp" => self.set_usp(val),
@@ -2754,7 +2752,7 @@ impl Cpu {
             "call R" => { self.rets = next_pc; jump = Some(self.regs[r(self, 0)?]); }
             "rts" => jump = Some(self.rets),
             "pc = [sp++]" => { jump = Some(bus.read32(self.sp)); self.sp = self.sp.wrapping_add(4); }
-            "rets = [sp++]" => { self.rets = bus.read32(self.sp); self.sp = self.sp.wrapping_add(4); }
+            "rets = [sp++]" => { self.rets = bus.read32(self.sp) & RETS_MASK; self.sp = self.sp.wrapping_add(4); }
             _ => return Ok(None),
         }
         Ok(Some(jump))
@@ -3161,27 +3159,28 @@ impl Cpu {
                 }
             }
             23 => {
-                // `testset b[rN]` (bx 00): atomic test-and-set of a byte.
-                // Assumed: cc = (old != 0) ("locked"), byte |= 0x80 — the
-                // SDK spins with `testset; ifeq goto retry`, so "eq" must mean
-                // "was already taken". Single-core emulation: always acquired.
+                // `testset b[rN]` (bx 00): atomic test-and-set of a byte. The byte becomes
+                // 0xff and psr bits 3..0 (N Z C V) the old byte's bits 3..0 (an FM-1: pi32v2-isa
+                // hw/fm1-2026-10-24-v2 and followup5-m, old bytes 0x00, 0xff and every low
+                // nibble). The SDK spins with `testset; ifeq goto retry`: a lock byte of 0xff
+                // leaves Z, eq, taken; 0 leaves no flags.
                 let addr = self.regs[(insn.raw & 0xf) as usize];
                 let old = bus.read8(addr);
-                self.cc = old != 0;
-                bus.write8(addr, old | 0x80);
+                self.flags = (old & 0xf) as u32;
+                bus.write8(addr, 0xff);
                 // taken, with `ifeq goto` back to it next (`40 e8 fd ff`: the SDK's byte
                 // spinlock): the core spins on this byte. A try-lock, or a claim-a-job byte
                 // that is often set, takes no such loop and records no wait.
-                if old != 0 && bus.fetch32(next_pc) == 0xfffd_e840 {
+                if self.flags & F_Z != 0 && bus.fetch32(next_pc) == 0xfffd_e840 {
                     bus.spin(self.core_id, addr);
                 }
             }
             24 => {
-                // `ifeq/ifne goto #off` (40/41 e8): off = 2*sext16(bits(16,31))
+                // `ifeq/ifne goto #off` (40/41 e8): off = 2*sext16(bits(16,31)); eq is psr's Z
                 let raw = insn.raw;
                 let off = 2 * ((raw >> 16) as u16 as i16 as i64);
                 let want = raw & 1 == 0;
-                if self.cc == want {
+                if (self.flags & F_Z != 0) == want {
                     jumped = Some((next_pc as i64 + off) as u32);
                 }
             }
@@ -3562,7 +3561,7 @@ impl Cpu {
                     self.regs[r as usize] = bus.read32(self.sp);
                     self.sp = self.sp.wrapping_add(4);
                 }
-                self.rets = bus.read32(self.sp);
+                self.rets = bus.read32(self.sp) & RETS_MASK;
                 self.sp = self.sp.wrapping_add(4);
             }
             41 => {
@@ -3607,7 +3606,7 @@ impl Cpu {
                         self.sp = self.sp.wrapping_add(4);
                     }
                 }
-                self.rets = bus.read32(self.sp);
+                self.rets = bus.read32(self.sp) & RETS_MASK;
                 self.sp = self.sp.wrapping_add(4);
             }
             _ => unreachable!("exec_raw route"),
@@ -5892,6 +5891,26 @@ mod tests {
     }
 
     #[test]
+    fn flags_and_stack_words_as_an_fm1_has_them() {
+        // pi32v2-isa hw/fm1-2026-10-24(-v2): `b1 00` testset b[r1] makes the byte 0xff and psr bits
+        // 3..0 the old byte's (0x04: Z alone), `40 e8 fd ff` ifeq goto back takes eq as Z
+        let (c, mut m) = run1(&[0xb1, 0x00, 0x40, 0xe8, 0xfd, 0xff], &[(0x1100, 0x0000_0004)]);
+        assert_eq!((m.read8(0x1100), c.flags), (0xff, F_Z));
+        let mut c = c;
+        c.step(&mut m).unwrap();
+        assert_eq!(c.pc, 0, "ifeq goto back: Z set");
+        // `01 14` cc = 1 sets the carry alone
+        let (c, _) = run1(&[0x01, 0x14], &[]);
+        assert_eq!(c.flags, F_C);
+        // `15 eb 20 00` {r5} = [r5++]: the loaded word stays in r5, no base update
+        let (c, _) = run1(&[0x15, 0xeb, 0x20, 0x00], &[(0x1500, 0x1234_5679)]);
+        assert_eq!(c.regs[5], 0x1234_5679);
+        // `30 04` {rets, r3-r0} = [sp++]: rets keeps bits 26..1 of the word
+        let (c, _) = run1(&[0x30, 0x04], &[(0x2010, 0x5b56_9643)]);
+        assert_eq!(c.rets, 0x0356_9642);
+    }
+
+    #[test]
     fn float_nans_as_an_fm1_gives_them() {
         // pi32v2-isa hw/fm1-2026-10-24 (the `.f` forms, hw/report-s.md)
         let (one, inf, ninf, nan, nnan) = (0x3f80_0000u32, 0x7f80_0000u32, 0xff80_0000u32, 0x7fc1_2345u32, 0xffc0_0001u32);
@@ -6560,7 +6579,8 @@ fn flags_read_later<B: Bus>(bus: &mut B, pc: u32) -> bool {
             let win = (bus.fetch32(pc + 4) as u64) << 32 | bus.fetch32(pc) as u64;
             let Ok(i) = decode_any(win, pc) else { break };
             let s = i.entry.syntax;
-            if s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr") {
+            if s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
+                || s.starts_with("ifeq") || s.starts_with("ifne") {
                 return true;
             }
             if is_flag_producer(canon_syntax(i.entry)) {
@@ -7234,6 +7254,10 @@ fn alu(op: Op, a: u32, b: u32) -> u32 {
         Op::Shl | Op::Shr | Op::Sar => shift32(op, a, b & 0xff),
     }
 }
+
+/// rets holds bits 26..1 of a word popped or moved into it (an FM-1: pi32v2-isa hw/fm1-2026-10-24,
+/// pop.rets_rl: 0x5b569643 popped gave 0x03569642); a call's return address always fits.
+const RETS_MASK: u32 = 0x07ff_fffe;
 
 /// A 32-bit shift by n as an FM-1 runs it: a register count is its low 8 bits (bit 8 and up are
 /// ignored) and counts of 32 and up shift everything out: `<<` and `>>` give 0, `>>>` the sign
