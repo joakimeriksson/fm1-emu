@@ -1048,12 +1048,15 @@ fn exec<B: Bus>(cpu: &mut Cpu, bus: &mut B, base: usize, o: &Ops, next_pc: u32) 
             let name = match base { id::RTNS => "reti", id::RTE => "rete", id::RTSS => "rets", _ => "retx" };
             return Some(Ok(Done::Jump(crate::sreg_get_named(x.cpu, name))));
         }
-        id::BKPT => {
-            let t = bus.read32(x.cpu.sp);
-            x.cpu.sp = x.cpu.sp.wrapping_add(4);
-            return Some(Ok(Done::Jump(t)));
+        // (`bkpt` is not run here: it enters the debug exception, vector 0 with rete = the next pc
+        // and rte to return (hw/fm1-2026-10-24-app2), which fm1-core does not have)
+        // `swi n`: IRQ 120 + n, held in the software latch while delivery is gated (app2)
+        id::SWI => {
+            if !bus.swi(o.v("n") as u32) {
+                return None;
+            }
         }
-        id::SEVL | id::SEVG | id::WFE | id::SWI => {}
+        id::SEVL | id::SEVG | id::WFE => {}
         _ => return None,
     }
     Some(Ok(Done::Next))
@@ -1116,6 +1119,20 @@ pub(crate) fn fast(k: usize, win: u64, next_pc: u32) -> Option<crate::Fast> {
     }
 }
 
+/// Where form k may go next when it is a direct jump without a micro-op (for `successors`: the
+/// flag scan follows it): (on to the next instruction, the target).
+pub(crate) fn jump(k: usize, win: u64, next_pc: u32) -> Option<(bool, u32)> {
+    let base = (*table().get(k)?)?;
+    let o = Ops { win, form: &FORMS[k], base: &FORMS[base] };
+    let target = || next_pc.wrapping_add(o.v("n") as u32);
+    match base {
+        id::GOTOSS_XL => Some((false, target())),
+        id::CALL_XL | id::IFS2NS_C | id::IFS2NS_S => Some((true, target())),
+        _ if FORMS[base].id.starts_with("bc.") => Some((true, target())),
+        _ => None,
+    }
+}
+
 /// Does form k read the flags (for `flags_read_later`): the flag branches, the carry rotates and the
 /// special-register reads and pushes.
 pub(crate) fn reads_flags(k: usize) -> bool {
@@ -1134,6 +1151,7 @@ impl Bus for Scratch {
     fn write8(&mut self, _: u32, _: u8) {}
     fn write16(&mut self, _: u32, _: u16) {}
     fn write32(&mut self, _: u32, _: u32) {}
+    fn swi(&mut self, _: u32) -> bool { true }
 }
 
 #[cfg(test)]
@@ -1177,6 +1195,37 @@ mod tests {
         let cpu = run1(&[0x20, 0xe4, 0x04, 0x00], &r, 13);
         assert_eq!((cpu.regs[0], cpu.regs[1], cpu.flags), (1232366366, 4784137, 13));
         assert_eq!(cpu.pc, 4);
+    }
+
+    /// `swi n` raises software interrupt n through the bus (unsupported on one without an interrupt
+    /// controller, as before); `bkpt` is not run here (the debug exception): fm1-isa's class halts.
+    #[test]
+    fn swi_raises_its_interrupt_and_bkpt_halts() {
+        struct Latch(FlatRam, Vec<u32>);
+        impl Bus for Latch {
+            fn read8(&mut self, a: u32) -> u8 { self.0.read8(a) }
+            fn read16(&mut self, a: u32) -> u16 { self.0.read16(a) }
+            fn read32(&mut self, a: u32) -> u32 { self.0.read32(a) }
+            fn write8(&mut self, a: u32, v: u8) { self.0.write8(a, v) }
+            fn write16(&mut self, a: u32, v: u16) { self.0.write16(a, v) }
+            fn write32(&mut self, a: u32, v: u32) { self.0.write32(a, v) }
+            fn swi(&mut self, n: u32) -> bool { self.1.push(n); true }
+        }
+        // `a7 00` swi 7
+        let mut bus = Latch(FlatRam::new(vec![0xa7, 0x00, 0, 0, 0, 0, 0, 0]), vec![]);
+        let mut cpu = Cpu::new(0);
+        cpu.step(&mut bus).unwrap();
+        assert_eq!((bus.1.as_slice(), cpu.pc), (&[7][..], 2));
+        let mut cpu = Cpu::new(0);
+        assert!(matches!(cpu.step(&mut FlatRam::new(vec![0xa7, 0x00, 0, 0, 0, 0, 0, 0])), Err(CoreError::Unsupported { .. })));
+        // `02 00` bkpt, with a word on the stack it once popped as a return address
+        let mut mem = vec![0u8; 0x100];
+        mem[..2].copy_from_slice(&[0x02, 0x00]);
+        mem[0x40..0x44].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+        let mut cpu = Cpu::new(0);
+        cpu.sp = 0x40;
+        assert!(matches!(cpu.step(&mut FlatRam::new(mem)), Err(CoreError::Unsupported { .. })));
+        assert_eq!(cpu.sp, 0x40);
     }
 
     #[test]

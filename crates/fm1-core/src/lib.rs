@@ -99,6 +99,12 @@ pub trait Bus {
     /// Interrupts may have just been unmasked (`sti`, `icfg = R`): with one pending, the run
     /// loop must look before the next instruction, as it does after a slow-path instruction.
     fn irq_window(&mut self) {}
+    /// `swi n`: software interrupt n (0..7) is requested, IRQ 120 + n, pending in the interrupt
+    /// controller's software latch until it is taken and acknowledged. False: the bus has no
+    /// interrupt controller (the instruction is then unsupported).
+    fn swi(&mut self, _n: u32) -> bool {
+        false
+    }
     /// The run loop must look before the next instruction, as it does after an instruction off
     /// the micro-op paths: `rti` (the SoC keeps "in an ISR" for its idle skipping, updated there).
     fn service(&mut self) {}
@@ -5347,6 +5353,30 @@ mod tests {
         assert!(never.is_empty(), "sets_flags says these write the flags, exec_fast never changed them: {never:#?}");
     }
 
+    /// The same through `gotoss` (a pi32v2-isa form with no micro-op): its target is followed too.
+    #[test]
+    fn flags_read_after_a_gotoss_keep_the_add_careful() {
+        let mut mem = vec![0u8; 0x100];
+        mem[..0x12].copy_from_slice(&[
+            0xb4, 0xe0, 0x00, 0x00, // 0x00 r0 = r0 + r0
+            0x80, 0xff, 0x05, 0x00, 0x00, 0x00, // 0x04 gotoss +4 (0x0e)
+            0xb4, 0xe0, 0x00, 0x00, // 0x0a r0 = r0 + r0
+            0x64, 0xe0, 0x00, 0x15, // 0x0e r1 = psr
+        ]);
+        let mut bus = FlatRam::new(mem);
+        assert!(flags_read_later(&mut bus, 0x04), "the psr read at gotoss's target reads them");
+        let mut cpu = Cpu::new(0);
+        let slot = cpu.fetch(&mut bus).unwrap();
+        assert!(cpu.icache[slot].flags_live && cpu.icache[slot].careful, "the add stays on the careful path");
+        // run: r1 = Z, C and V of 0x80000000 + 0x80000000
+        let mut cpu = Cpu::new(0);
+        cpu.regs[0] = 0x8000_0000;
+        for _ in 0..3 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!((cpu.pc, cpu.regs[1] & 15), (0x12, 7));
+    }
+
     #[test]
     fn pair_head_and_not_shifted_runs() {
         // `94 f1 13 13` r1 = r1 & ~(1 << r3) #, then a nop (DUELL 0.2.20, when HOME is pressed):
@@ -7023,6 +7053,13 @@ fn successors(insn: &Instruction) -> (bool, Option<u32>) {
     let bittest = if insn.entry.name.starts_with("if") { decode_bittest(insn.raw, insn.entry.len) } else { None };
     let route = route_of(insn, &alu4, &bittest);
     let fast = if route == ROUTE_SYNTAX { fast_of(insn, canon_syntax(insn.entry)) } else { fast_raw(route, insn, &alu4, &bittest) };
+    // (a pi32v2-isa jump with no micro-op: `gotoss`'s target)
+    if fast.is_none() && route == ROUTE_PI {
+        let next_pc = insn.addr.wrapping_add(insn.entry.len as u32);
+        if let Some((on, t)) = fm1_isa::pi32v2_table::index_of(insn.entry).and_then(|k| pi32v2_exec::jump(k, insn.raw, next_pc)) {
+            return (on, Some(t));
+        }
+    }
     match fast.map(Fast::specialise) {
         Some(Fast::Goto { target }) => (false, Some(target)),
         Some(Fast::Call { target }) => (true, Some(target)),
