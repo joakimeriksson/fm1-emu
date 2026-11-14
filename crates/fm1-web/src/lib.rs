@@ -252,6 +252,44 @@ pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u
     }
 }
 
+/// Attach a disk image (from fm1_alloc) as a USB flash drive. Call after boot, before the
+/// first render. The image is kept in memory and writable by the guest; the page can read
+/// it back through fm1_disk_ptr / fm1_disk_len for persistence or download.
+#[no_mangle]
+pub extern "C" fn fm1_usb_disk(ptr: *mut u8, len: u32) {
+    let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
+    if let Some(m) = machine() {
+        m.soc.usb_disk(Box::new(MemDisk(bytes)));
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn fm1_disk_ptr() -> *const u8 {
+    machine().and_then(|m| m.soc.usb.disk_bytes()).map_or(std::ptr::null(), |b| b.as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn fm1_disk_len() -> u32 {
+    machine().and_then(|m| m.soc.usb.disk_bytes()).map_or(0, |b| b.len() as u32)
+}
+
+struct MemDisk(Vec<u8>);
+
+impl fm1_soc::usb::SectorStorage for MemDisk {
+    fn sectors(&self) -> u32 { (self.0.len() / 512) as u32 }
+    fn read_sector(&mut self, lba: u32, data: &mut [u8; 512]) -> std::io::Result<()> {
+        let off = lba as usize * 512;
+        data.copy_from_slice(&self.0[off..off + 512]);
+        Ok(())
+    }
+    fn write_sector(&mut self, lba: u32, data: &[u8; 512]) -> std::io::Result<()> {
+        let off = lba as usize * 512;
+        self.0[off..off + 512].copy_from_slice(data);
+        Ok(())
+    }
+    fn as_bytes(&self) -> Option<&[u8]> { Some(&self.0) }
+}
+
 /// Flash persistence. Pointers are borrowed until the instance is replaced. Restores and
 /// bank imports consume fm1_alloc allocations and are only accepted before the first render.
 #[no_mangle]
