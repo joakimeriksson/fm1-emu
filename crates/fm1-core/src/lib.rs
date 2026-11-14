@@ -2212,10 +2212,12 @@ impl Cpu {
                     "++R=R" => { let b = r(self, 1)?; self.regs[b] = self.regs[b].wrapping_add(self.regs[r(self, 2)?]); (self.regs[b], None) }
                     _ => return Ok(None),
                 };
-                self.regs[d] = ld(bus, w, signed, addr);
+                // a post-increment load into its own base leaves the loaded value (an FM-1, 2026-11)
+                let x = ld(bus, w, signed, addr);
                 if let Some((b, inc)) = post {
                     self.regs[b] = self.regs[b].wrapping_add(inc);
                 }
+                self.regs[d] = x;
                 return Ok(Some(None));
             }
         }
@@ -2230,6 +2232,9 @@ impl Cpu {
                 // to the dedicated handlers below
                 let known = matches!(addr_txt, "R+#i" | "sp+#i" | "sp" | "R+R" | "R+R<<#i" | "R++=#i" | "R++=R" | "++R=#i" | "++R=R" | "--sp");
                 let known = known && matches!(src, "R" | "#i" | "#h" | "rets");
+                // a pre-increment's new base is written after the source is read: a store of the
+                // base writes its old value (an FM-1, 2026-11)
+                let mut pre: Option<(usize, u32)> = None;
                 let (addr, post): (u32, Option<(usize, u32)>) = if !known { (0, None) } else { match addr_txt {
                     "R+#i" => { n = 2; (self.regs[r(self, 0)?].wrapping_add(v(self, 1)?), None) }
                     "sp+#i" => { n = 1; (self.sp.wrapping_add(v(self, 0)?), None) }
@@ -2238,8 +2243,8 @@ impl Cpu {
                     "R+R<<#i" => { n = 3; (self.regs[r(self, 0)?].wrapping_add(self.regs[r(self, 1)?] << (v(self, 2)? & 31)), None) }
                     "R++=#i" => { n = 2; let b = r(self, 0)?; (self.regs[b], Some((b, v(self, 1)?))) }
                     "R++=R" => { n = 2; let b = r(self, 0)?; (self.regs[b], Some((b, self.regs[r(self, 1)?]))) }
-                    "++R=#i" => { n = 2; let b = r(self, 0)?; self.regs[b] = self.regs[b].wrapping_add(v(self, 1)?); (self.regs[b], None) }
-                    "++R=R" => { n = 2; let b = r(self, 0)?; self.regs[b] = self.regs[b].wrapping_add(self.regs[r(self, 1)?]); (self.regs[b], None) }
+                    "++R=#i" => { n = 2; let b = r(self, 0)?; let a = self.regs[b].wrapping_add(v(self, 1)?); pre = Some((b, a)); (a, None) }
+                    "++R=R" => { n = 2; let b = r(self, 0)?; let a = self.regs[b].wrapping_add(self.regs[r(self, 1)?]); pre = Some((b, a)); (a, None) }
                     _ => { self.sp = self.sp.wrapping_sub(4); (self.sp, None) }
                 } };
                 // shifted-mask sources (`#i << R`, `~(#i << R)`, `~R`, `R << #i`)
@@ -2250,6 +2255,9 @@ impl Cpu {
                     "rets" => Some(self.rets),
                     _ => None,
                 } };
+                if let Some((b, a)) = pre {
+                    self.regs[b] = a;
+                }
                 if let Some(val) = val {
                     let newv = match op {
                         "=" => val,
@@ -3111,7 +3119,9 @@ impl Cpu {
                 };
                 let addr = self.regs[b].wrapping_add(off as u32);
                 if store {
-                    match w { 1 => bus.write8(addr, self.regs[d] as u8), 2 => bus.write16(addr, self.regs[d] as u16), _ => bus.write32(addr, self.regs[d]) }
+                    // a halfword store's bit 2 (a load's sign) is the high half: `h[rB+#i] = rD.h`
+                    let half = if signed { self.regs[d] >> 16 } else { self.regs[d] };
+                    match w { 1 => bus.write8(addr, self.regs[d] as u8), 2 => bus.write16(addr, half as u16), _ => bus.write32(addr, self.regs[d]) }
                 } else {
                     self.regs[d] = match (w, signed) {
                         (1, false) => bus.read8(addr) as u32,
@@ -3314,14 +3324,18 @@ impl Cpu {
                 let m = decode_pair_mem(raw);
                 let (hi, lo) = (2 * m.pair + 1, 2 * m.pair);
                 let base = match m.base { Some(b) => self.regs[b], None => self.sp };
-                let step = match m.index { Some(i) => self.regs[i], None => m.off as u32 };
+                let step = match m.index { Some(i) => self.regs[i] << m.shift, None => m.off as u32 };
                 let addr = if m.post { base } else { base.wrapping_add(step) };
+                // a store is two word stores with the base update between them (an FM-1, 2026-11:
+                // with the base in the pair, the low word is the old base, the high word the new);
+                // a load into the pair wins over the update
+                let vlo = self.regs[lo];
                 // the base update reads the index before a load can overwrite it
                 if let Some(b) = m.base.filter(|_| m.pre || m.post) {
                     self.regs[b] = base.wrapping_add(step);
                 }
                 if m.store {
-                    bus.write32(addr, self.regs[lo]);
+                    bus.write32(addr, vlo);
                     bus.write32(addr.wrapping_add(4), self.regs[hi]);
                 } else {
                     self.regs[lo] = bus.read32(addr);
@@ -3336,16 +3350,17 @@ impl Cpu {
                 let base = self.regs[m.b];
                 let next = base.wrapping_add(m.inc as u32);
                 let a = if m.post { base } else { next };
-                if m.pre {
+                // as on an FM-1: a store writes the register as it was before the base update, a
+                // halfword store with bit 2 (a load's sign) its high half, and a load into the base
+                // leaves the loaded value
+                let v = if m.store && m.w == 2 && m.signed { self.regs[m.d] >> 16 } else { self.regs[m.d] };
+                if m.pre || m.post {
                     self.regs[m.b] = next;
                 }
                 if m.store {
-                    st_w(bus, m.w, a, self.regs[m.d]);
+                    st_w(bus, m.w, a, v);
                 } else {
                     self.regs[m.d] = ld_w(bus, m.w, m.signed, a);
-                }
-                if m.post {
-                    self.regs[m.b] = next;
                 }
             }
             35 =>
@@ -3353,11 +3368,12 @@ impl Cpu {
                 // `5x ed` (see `half_mem`); a pre-increment updates the base first
                 let m = half_mem(raw).unwrap();
                 let a = self.regs[m.b].wrapping_add(m.off as u32);
+                let v = self.regs[m.d] >> if m.flag { 16 } else { 0 };
                 if m.pre {
                     self.regs[m.b] = a;
                 }
                 if m.store {
-                    let v = self.regs[m.d] >> if m.flag { 16 } else { 0 };
+                    // (the register as it was: the old base when it is the base, as on an FM-1)
                     bus.write16(a, v as u16);
                 } else {
                     let v = bus.read16(a);
@@ -3405,19 +3421,19 @@ impl Cpu {
             }
             32 =>
             {
-                // `[++rB=rI]` / `[rB++=rI]` (see `idx_inc`); a load into the base register
-                // leaves the incremented base, as route 19
+                // `[++rB=rI]` / `[rB++=rI]` (see `idx_inc`); as on an FM-1, a load into the base
+                // register leaves the loaded value and a store of it writes the old base
                 let Some(m) = idx_inc(raw) else { return };
                 let base = self.regs[m.b];
                 let next = base.wrapping_add(self.regs[m.i]);
                 let addr = if m.pre { next } else { base };
+                let v = if m.high { self.regs[m.d] >> 16 } else { self.regs[m.d] };
+                self.regs[m.b] = next;
                 if m.store {
-                    let v = if m.high { self.regs[m.d] >> 16 } else { self.regs[m.d] };
                     st_w(bus, m.w, addr, v);
                 } else {
                     self.regs[m.d] = ld_w(bus, m.w, m.signed, addr);
                 }
-                self.regs[m.b] = next;
             }
             21 =>
             {
@@ -4181,7 +4197,7 @@ fn decode_cmp_rr_branch(raw: u64, len: u8) -> Option<(u64, bool, usize, usize, i
 
 /// A 64-bit register-pair access `rH_rL = d[...]` / `d[...] = rH_rL`.
 #[derive(Clone, Copy, Debug)]
-struct PairMem { pair: usize, store: bool, base: Option<usize>, off: i32, index: Option<usize>, pre: bool, post: bool }
+struct PairMem { pair: usize, store: bool, base: Option<usize>, off: i32, index: Option<usize>, shift: u32, pre: bool, post: bool }
 
 /// `5x ec`: pair = bits(29,31) (rH_rL = r2p+1, r2p), store = bit16, base = bits(20,23),
 /// off = 4*sext9(bits(18,19) | bits(24,27)<<2 | bit0<<6 | bit1<<7 | bit2<<8); the mode:
@@ -4200,19 +4216,21 @@ fn decode_pair_mem(raw: u64) -> PairMem {
     let pair = ((raw >> 29) & 7) as usize;
     let store = (raw >> 16) & 1 != 0;
     if (raw >> 8) & 0xff != 0xec {
-        return PairMem { pair, store, base: None, off: (((raw >> 17) & 0x7ff) << 1) as i32, index: None, pre: false, post: false };
+        return PairMem { pair, store, base: None, off: (((raw >> 17) & 0x7ff) << 1) as i32, index: None, shift: 0, pre: false, post: false };
     }
     let base = Some(((raw >> 20) & 0xf) as usize);
     let f = (((raw >> 18) & 3) | (((raw >> 24) & 0xf) << 2) | ((raw & 1) << 6) | (((raw >> 1) & 1) << 7) | (((raw >> 2) & 1) << 8)) as i32;
     let off = 4 * if f & 0x100 != 0 { f - 0x200 } else { f };
     let bit17 = (raw >> 17) & 1 != 0;
     if raw & 8 == 0 {
-        PairMem { pair, store, base, off, index: None, pre: bit17, post: false }
+        PairMem { pair, store, base, off, index: None, shift: 0, pre: bit17, post: false }
     } else if !bit17 {
-        PairMem { pair, store, base, off, index: None, pre: false, post: true }
+        PairMem { pair, store, base, off, index: None, shift: 0, pre: false, post: true }
     } else {
         let index = Some(((raw >> 24) & 0xf) as usize);
-        PairMem { pair, store, base, off: 0, index, pre: raw & 6 == 4, post: raw & 6 == 6 }
+        // bit 19 (second-word bit 3) scales the index by 8: `d[rB+rI<<3]` (an FM-1, 2026-11)
+        let shift = if (raw >> 19) & 1 != 0 { 3 } else { 0 };
+        PairMem { pair, store, base, off: 0, index, shift, pre: raw & 6 == 4, post: raw & 6 == 6 }
     }
 }
 
@@ -5874,6 +5892,49 @@ mod tests {
         assert_eq!((c.regs[3], c.regs[0]), (0xffff_8001, 0x1000 + 146));
     }
 
+    /// Memory accesses as an FM-1 runs them (pi32v2-isa hw/fm1-2026-10-24-v2, 2026-11): the scaled
+    /// pair index, stores of a high half, a store of the base it updates, a load into it, and a pair
+    /// store whose pair holds its base.
+    #[test]
+    fn memory_accesses_as_an_fm1_runs_them() {
+        fn one(bytes: &[u8], regs: &[(usize, u32)], pokes: &[(usize, u32)]) -> (Cpu, FlatRam) {
+            let mut mem = vec![0u8; 0x4000];
+            for a in (0x40..0x4000).step_by(4) {
+                mem[a..a + 4].copy_from_slice(&(a as u32).to_le_bytes());
+            }
+            for &(a, v) in pokes {
+                mem[a..a + 4].copy_from_slice(&v.to_le_bytes());
+            }
+            mem[..bytes.len()].copy_from_slice(bytes);
+            let mut ram = FlatRam::new(mem);
+            let mut cpu = Cpu::new(0);
+            for &(r, v) in regs {
+                cpu.regs[r] = v;
+            }
+            cpu.sp = 0x2000;
+            cpu.step(&mut ram).unwrap();
+            (cpu, ram)
+        }
+        // `58 ec 0a a7` r11_r10 = d[r0+r7<<3]: the index is scaled by 8
+        let (c, _) = one(&[0x58, 0xec, 0x0a, 0xa7], &[(0, 0x1000), (7, 0x10)], &[]);
+        assert_eq!((c.regs[10], c.regs[11]), (0x1080, 0x1084));
+        // `54 ed e5 f2` h[r14+36] = r15.h: the high half
+        let (_, mut m) = one(&[0x54, 0xed, 0xe5, 0xf2], &[(14, 0x1000), (15, 0xabcd_1234)], &[]);
+        assert_eq!(m.read32(0x1024), 0x0000_abcd);
+        // `d7 ed 69 6f` h[r6++=-8] = r6.h: the high half, then the base steps
+        let (c, mut m) = one(&[0xd7, 0xed, 0x69, 0x6f], &[(6, 0x1000)], &[]);
+        assert_eq!((m.read32(0x1000), c.regs[6]), (0x0000_0000, 0xff8));
+        // `d0 ec cb c0` [++r12=8] = r12: the base as it was before the increment
+        let (c, mut m) = one(&[0xd0, 0xec, 0xcb, 0xc0], &[(12, 0x1000)], &[]);
+        assert_eq!((m.read32(0x1008), c.regs[12]), (0x1000, 0x1008));
+        // `66 05` r6 = [r6++=4]: the loaded value stays, not the stepped base
+        let (c, _) = one(&[0x66, 0x05], &[(6, 0x1000)], &[(0x1000, 0xdead_beef)]);
+        assert_eq!(c.regs[6], 0xdead_beef);
+        // `58 ec 99 80` d[r9++=8] = r9_r8: two word stores with the base update between them
+        let (c, mut m) = one(&[0x58, 0xec, 0x99, 0x80], &[(8, 0x1111_1111), (9, 0x1000)], &[]);
+        assert_eq!((m.read32(0x1000), m.read32(0x1004), c.regs[9]), (0x1111_1111, 0x1008, 0x1008));
+    }
+
     /// Routes 18 / 19 / 32 as micro-ops (`inc_mem_fast`, `idx_inc_fast`) against exec_raw's
     /// arm, from random encodings (every width, pre- and post-increments, the base register
     /// the data one, route 32's increment register the base or the data one) and registers
@@ -5910,9 +5971,10 @@ mod tests {
             assert!(ram.mem == ref_ram.mem, "route {route} raw {raw:08x}: {f:?}");
         }
         // (each form came up, and the raw rest: route 19's post-increment load into its base,
-        // route 32's high halves and accesses of its base; route 18 maps whole)
+        // route 32's high halves and accesses of its base, route 18's and 19's high halves and route
+        // 18's pre-increment store of its base)
         let forms: Vec<_> = kinds.keys().map(|(r, k)| format!("{r} {k}")).collect();
-        assert_eq!(forms, ["18 Ld", "18 LdPre", "18 St", "18 StPre", "19 LdPost", "19 Raw", "19 StPost",
+        assert_eq!(forms, ["18 Ld", "18 LdPre", "18 Raw", "18 St", "18 StPre", "19 LdPost", "19 Raw", "19 StPost",
             "32 LdPostR", "32 LdPre", "32 Raw", "32 StPostR", "32 StPre"], "{kinds:?}");
     }
 
@@ -7181,7 +7243,8 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
                 // the step's route match, which has no 35 arm: a panic, found by tools/fuzz_decode.py)
                 (true, _) if m.flag => Some(Fast::Raw { route: 35, raw: raw as u32 }),
                 (true, false) => Some(Fast::St { s: d, b: Base::Reg(b), off: m.off as u32, w: 2 }),
-                (true, true) => Some(Fast::StPre { s: d, b, i: 16, w: 2, inc: m.off as u32 }),
+                (true, true) if d != b => Some(Fast::StPre { s: d, b, i: 16, w: 2, inc: m.off as u32 }),
+                (true, true) => Some(Fast::Raw { route: 35, raw: raw as u32 }),
             }
         }
         36 => Some(Fast::Un { d: ((raw >> 28) & 0xf) as u8, s: ((raw >> 24) & 0xf) as u8, k: 4 }),
@@ -7290,7 +7353,10 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
                 let off = if v & 0x200 != 0 { v as i32 - 0x400 } else { v as i32 };
                 ((raw >> 16) & 1 != 0, off, w == 2 && (raw >> 2) & 1 != 0)
             };
-            Some(if store {
+            Some(if store && signed {
+                // the high half (`h[rB+#i] = rD.h`): half_mem's arm
+                Fast::Raw { route: 35, raw: raw as u32 }
+            } else if store {
                 Fast::St { s: d, b: Base::Reg(b), off: off as u32, w }
             } else {
                 Fast::Ld { d, b: Base::Reg(b), off: off as u32, w, signed }
@@ -7426,8 +7492,10 @@ fn inc_mem_fast(route: u8, raw: u32) -> Fast {
     let m = decode_inc_mem(route, raw as u64);
     let (d, b, inc) = (m.d as u8, m.b as u8, m.inc as u32);
     match (m.store, m.pre, m.post) {
+        // (a high-half store and a pre-increment store of the base itself: the arm)
+        (true, _, _) if m.w == 2 && m.signed => Fast::Raw { route, raw },
         (false, true, _) => Fast::LdPre { d, b, i: 16, w: m.w, signed: m.signed, inc },
-        (true, true, _) => Fast::StPre { s: d, b, i: 16, w: m.w, inc },
+        (true, true, _) if d != b => Fast::StPre { s: d, b, i: 16, w: m.w, inc },
         (true, false, true) => Fast::StPost { s: d, b, w: m.w, inc },
         (false, false, true) if d != b => Fast::LdPost { d, b, w: m.w, signed: m.signed, inc },
         (true, false, false) => Fast::St { s: d, b: Base::Reg(b), off: inc, w: m.w },
@@ -7651,8 +7719,9 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
             else if let Some(x) = rhs.strip_prefix('[') { (4, x) } else { (0, "") };
         if w != 0 {
             return match inner {
-                "R++=#i]" => Some(Fast::LdPost { d: r(0)?, b: r(1)?, w, signed, inc: v(2)? }),
-                "R++=R]" => Some(Fast::LdPostR { d: r(0)?, b: r(1)?, i: r(2)?, w, signed }),
+                // (a post-increment load into its own base: exec_syntax, where the load wins)
+                "R++=#i]" if r(0)? != r(1)? => Some(Fast::LdPost { d: r(0)?, b: r(1)?, w, signed, inc: v(2)? }),
+                "R++=R]" if r(0)? != r(1)? => Some(Fast::LdPostR { d: r(0)?, b: r(1)?, i: r(2)?, w, signed }),
                 "++R=R]" => Some(Fast::LdPre { d: r(0)?, b: r(1)?, i: r(2)?, w, signed, inc: 0 }),
                 "++R=#i]" => Some(Fast::LdPre { d: r(0)?, b: r(1)?, i: 16, w, signed, inc: v(2)? }),
                 "R+R]" => Some(Fast::LdIdx { d: r(0)?, b: r(1)?, i: r(2)?, sh: 0, w, signed }),
@@ -7671,8 +7740,9 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
             let f = match rest {
                 "R++=#i] = R" => Some(Fast::StPost { b: r(0)?, inc: v(1)?, s: r(2)?, w }),
                 "R++=R] = R" => Some(Fast::StPostR { b: r(0)?, i: r(1)?, s: r(2)?, w }),
-                "++R=R] = R" => Some(Fast::StPre { b: r(0)?, i: r(1)?, s: r(2)?, w, inc: 0 }),
-                "++R=#i] = R" => Some(Fast::StPre { b: r(0)?, i: 16, inc: v(1)?, s: r(2)?, w }),
+                // (a pre-increment store of the base itself: exec_syntax, which stores the old base)
+                "++R=R] = R" if r(0)? != r(2)? => Some(Fast::StPre { b: r(0)?, i: r(1)?, s: r(2)?, w, inc: 0 }),
+                "++R=#i] = R" if r(0)? != r(2)? => Some(Fast::StPre { b: r(0)?, i: 16, inc: v(1)?, s: r(2)?, w }),
                 "R+R] = R" => Some(Fast::StIdx { b: r(0)?, i: r(1)?, sh: 0, s: r(2)?, w }),
                 "R+R<<#i] = R" => Some(Fast::StIdx { b: r(0)?, i: r(1)?, sh: (v(2)? & 31) as u8, s: r(3)?, w }),
                 "R+#i] = #i" | "R+#i] = #h" => rmw(RmwOp::Mov),
