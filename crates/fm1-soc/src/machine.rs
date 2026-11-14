@@ -1079,6 +1079,12 @@ mod tests {
         soc.write32(RAM_BASE + 0x106, 0xa1b2_c3d4);
         assert_eq!((soc.read32(RAM_BASE + 0x100), soc.read32(RAM_BASE + 0x104)), (0x1122_3344, 0xa1b2_c3d4));
         assert_eq!(soc.emu_cause, 1);
+        // RAM's last word as well
+        let end = RAM_BASE + soc.ram.len() as u32 - 4;
+        soc.write32(end, 0x1122_3344);
+        assert_eq!(soc.read32(end + 1), 0x1122_3344);
+        soc.write32(end + 3, 0x5566_7788);
+        assert_eq!(soc.read32(end), 0x5566_7788);
     }
 
     #[test]

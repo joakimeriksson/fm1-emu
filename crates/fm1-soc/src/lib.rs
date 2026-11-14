@@ -1202,12 +1202,12 @@ impl Bus for Soc {
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
+        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+            // the aligned-down word, as an FM-1 loads it (H3, 2026-11; RAM's last word too)
+            self.misaligned(addr, 4);
+            return self.ram.read32((o & !3) as u32);
+        }
         if o + 4 <= self.ram.len() {
-            if addr & 3 != 0 && self.strict_align {
-                // the aligned-down word, as an FM-1 loads it (H3, 2026-11)
-                self.misaligned(addr, 4);
-                return self.ram.read32((o & !3) as u32);
-            }
             return self.ram.read32(o as u32);
         }
         let x = addr.wrapping_sub(XIP_BASE) as usize;
@@ -1271,12 +1271,13 @@ impl Bus for Soc {
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
+        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+            // the whole word at the aligned-down address, as an FM-1 stores it (H3, 2026-11;
+            // RAM's last word too)
+            self.misaligned(addr, 4);
+            return self.ram.write32((o & !3) as u32, value);
+        }
         if o + 4 <= self.ram.len() {
-            if addr & 3 != 0 && self.strict_align {
-                // the whole word at the aligned-down address, as an FM-1 stores it (H3, 2026-11)
-                self.misaligned(addr, 4);
-                return self.ram.write32((o & !3) as u32, value);
-            }
             return self.ram.write32(o as u32, value);
         }
         self.write32_slow(addr, value)
