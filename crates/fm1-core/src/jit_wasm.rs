@@ -1284,22 +1284,22 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 g.ld_reg(s);
                 g.i32c(p);
                 g.op(I32_SHR_U);
-                if signed {
-                    if l != 0 {
-                        g.i32c(32 - l);
-                        g.op(I32_SHL);
-                        g.i32c(32 - l);
-                        g.op(I32_SHR_S);
-                    }
+                // (a width of 0 gives 0, `bit_extract`)
+                if signed && l != 0 {
+                    g.i32c(32 - l);
+                    g.op(I32_SHL);
+                    g.i32c(32 - l);
+                    g.op(I32_SHR_S);
                 } else {
-                    g.i32c(if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) });
+                    g.i32c((1u32 << l).wrapping_sub(1));
                     g.op(I32_AND);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
             Fast::BitIns { d, s, p, l } => {
+                // (a width of 0 changes nothing, `bit_insert`)
                 let (p, l) = (p as u32 & 31, l as u32 & 31);
-                let mask = if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) };
+                let mask = (1u32 << l).wrapping_sub(1);
                 g.get(L_CPU);
                 g.ld_reg(d);
                 g.i32c(!(mask << p));
@@ -1623,7 +1623,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_SUB);
                     }
                     2 => {
-                        // |x| = (x ^ m) - m, m = x >> 31 (wrapping: the minimum stays)
+                        // |x| = (x ^ m) - m, m = x >> 31; saturating: the minimum gives the maximum
+                        // (^ its own sign)
                         g.get(L_A);
                         g.i32c(31);
                         g.op(I32_SHR_S);
@@ -1633,6 +1634,12 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_XOR);
                         g.get(L_B);
                         g.op(I32_SUB);
+                        g.set(L_A);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(31);
+                        g.op(I32_SHR_S);
+                        g.op(I32_XOR);
                     }
                     3 => {
                         // rev8: the bytes reversed
@@ -1661,7 +1668,15 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_CLZ);
                     }
                     5 => g.clamp(-32768, 32767),
-                    _ => g.clamp(0, 65535),
+                    // sat16 (u): an unsigned value into 0..65535
+                    _ => {
+                        g.i32c(65535);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(65535);
+                        g.op(I32_GT_U);
+                        g.op(SELECT);
+                    }
                 }
                 g.set(L_VAL);
                 g.st_reg_from(d, L_VAL);

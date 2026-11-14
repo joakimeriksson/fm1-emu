@@ -1794,20 +1794,12 @@ impl Cpu {
             }
             Fast::BitExt { d, s, p, l, signed } => {
                 let src = self.regs[(s & 15) as usize];
-                let (p, l) = (p as u32 & 31, l as u32 & 31);
-                self.regs[(d & 15) as usize] = if signed {
-                    if l == 0 { src >> p } else { (((src >> p) << (32 - l)) as i32 >> (32 - l)) as u32 }
-                } else {
-                    let mask = if l == 0 { 0xffff_ffffu32 } else { (1u32 << l).wrapping_sub(1) };
-                    (src >> p) & mask
-                };
+                self.regs[(d & 15) as usize] = bit_extract(src, p as u32 & 31, l as u32 & 31, signed);
             }
             Fast::BitIns { d, s, p, l } => {
                 let src = self.regs[(s & 15) as usize];
-                let (p, l) = (p as u32 & 31, l as u32 & 31);
-                let mask = if l == 0 { 0xffff_ffffu32 } else { (1u32 << l).wrapping_sub(1) };
                 let d = (d & 15) as usize;
-                self.regs[d] = (self.regs[d] & !(mask << p)) | ((src & mask) << p);
+                self.regs[d] = bit_insert(self.regs[d], src, p as u32 & 31, l as u32 & 31);
             }
             Fast::PushRets { n } => {
                 let n = n as i32;
@@ -2017,12 +2009,14 @@ impl Cpu {
                 self.regs[(d & 15) as usize] = match k {
                     0 => !x,
                     1 => x.wrapping_neg(),
-                    2 => (x as i32).wrapping_abs() as u32,
+                    // abs saturates: abs(0x80000000) is 0x7fffffff (an FM-1)
+                    2 => (x as i32).saturating_abs() as u32,
                     3 => x.swap_bytes(),
                     4 => x.leading_zeros(),
-                    // sat16 (s) / (u): a signed value into -32768..32767 / 0..65535
+                    // sat16 (s): a signed value into -32768..32767; (u): an unsigned one into
+                    // 0..65535 (an FM-1: 0xaaaaaaaa gave 0xffff)
                     5 => (x as i32).clamp(-32768, 32767) as u32,
-                    _ => (x as i32).clamp(0, 65535) as u32,
+                    _ => x.min(65535),
                 };
             }
             Fast::Div { d, a, b, k } => {
@@ -2489,11 +2483,7 @@ impl Cpu {
             "R = sextra(R, p:#i, l:#i)" => {
                 let d = r(self, 0)?;
                 let src = self.regs[r(self, 1)?];
-                let p = v(self, 2)? & 31;
-                let l = v(self, 3)? & 31;
-                let x = if l == 0 { src >> p } else { ((src >> p) << (32 - l)) as i32 as u32 >> (32 - l) };
-                self.regs[d] = if l == 0 { x } else { (((src >> p) << (32 - l)) as i32 >> (32 - l)) as u32 };
-                let _ = x;
+                self.regs[d] = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, true);
                 return Ok(Some(None));
             }
             "R.l = #i" | "R.h = #i" => {
@@ -2582,20 +2572,14 @@ impl Cpu {
             if rest.is_empty() {
                 let d = r(self, 0)?;
                 let src = self.regs[r(self, 1)?];
-                let p = v(self, 2)? & 31;
-                let l = v(self, 3)? & 31;
-                let mask = if l == 0 { 0xffff_ffffu32 } else { (1u32 << l).wrapping_sub(1) };
-                self.regs[d] = (self.regs[d] & !(mask << p)) | ((src & mask) << p);
+                self.regs[d] = bit_insert(self.regs[d], src, v(self, 2)? & 31, v(self, 3)? & 31);
                 return Ok(Some(None));
             }
         }
         if s == "R = uextra(R, p:#i, l:#i)" {
             let d = r(self, 0)?;
             let src = self.regs[r(self, 1)?];
-            let p = v(self, 2)? & 31;
-            let l = v(self, 3)? & 31;
-            let mask = if l == 0 { 0xffff_ffffu32 } else { (1u32 << l).wrapping_sub(1) };
-            self.regs[d] = (src >> p) & mask;
+            self.regs[d] = bit_extract(src, v(self, 2)? & 31, v(self, 3)? & 31, false);
             return Ok(Some(None));
         }
         match s {
@@ -2617,7 +2601,7 @@ impl Cpu {
                 };
                 return Ok(Some(None));
             }
-            "R = abs(R)" => { let d = r(self, 0)?; self.regs[d] = (self.regs[r(self, 1)?] as i32).wrapping_abs() as u32; return Ok(Some(None)); }
+            "R = abs(R)" => { let d = r(self, 0)?; self.regs[d] = (self.regs[r(self, 1)?] as i32).saturating_abs() as u32; return Ok(Some(None)); }
             "R = clz(R)" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].leading_zeros(); return Ok(Some(None)); }
             "R = rev8(R)" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].swap_bytes(); return Ok(Some(None)); }
             "R = R + R + c" => {
@@ -3559,13 +3543,15 @@ impl Cpu {
                 // compiler's `(short)__builtin_bswap16(x)`, work/probe/sem.c); `70 e0 40`
                 // rev16, each half's bytes swapped (FM-1 V16 swaps 16-bit samples two at a time
                 // with it, rev8 >> 16 for the last one); `70 e0 c0` popcnt (the vendor objdump)
+                // popcnt does not count on an FM-1: it changes nothing (pi32v2-isa
+                // hw/fm1-2026-10-24, popcnt.rr: 19 of 19 cases)
                 let d = ((raw >> 28) & 0xf) as usize;
                 let x = self.regs[((raw >> 24) & 0xf) as usize];
                 self.regs[d] = match (raw >> 22) & 3 {
                     0 => x.swap_bytes(),
                     1 => (x & 0x00ff_00ff) << 8 | (x >> 8) & 0x00ff_00ff,
                     2 => (x as u16).swap_bytes() as i16 as i32 as u32,
-                    _ => x.count_ones(),
+                    _ => self.regs[d],
                 };
             }
             27 => {
@@ -3585,8 +3571,9 @@ impl Cpu {
                     Dsp::QaslImm => qasl(self.regs[a], match (((raw >> 16) & 0xf) | ((raw >> 24) & 1) << 4) as u32 { 0 => 32, n => n }),
                     Dsp::QaslReg => qasl(self.regs[a], self.regs[b] & 0xff),
                     Dsp::Cls => {
+                        // the sign bit counts: cls(0) and cls(-1) are 32 (an FM-1, pi32v2-isa cls.rr)
                         let x = self.regs[b];
-                        (if (x as i32) < 0 { !x } else { x }).leading_zeros() - 1
+                        (if (x as i32) < 0 { !x } else { x }).leading_zeros()
                     }
                     Dsp::MinMax => {
                         let (x, y) = (self.regs[a], self.regs[b]);
@@ -3864,8 +3851,8 @@ enum Dsp {
     QaslImm,
     /// `c8 e1 A1 DB`: rD = rA <<< rB (sub-op 1 of the `<<` / `>>` / `>>>` by-register forms)
     QaslReg,
-    /// `80 e1 01 DS`: rD = cls(rS), the leading bits equal to the sign, the sign not counted
-    /// (as `clrsb`; `__builtin_pi32v2_cls`; the `clz` row's op 1)
+    /// `80 e1 01 DS`: rD = cls(rS), the leading bits equal to the sign, the sign counted (one more
+    /// than `clrsb`, an FM-1; `__builtin_pi32v2_cls`; the `clz` row's op 1)
     Cls,
     /// `34 e4 AX DB` / `35 e4`: rD = max / min(rA, rB), X = 1 signed, 0 unsigned (smax, umax, smin,
     /// umin; the classes fit only the corpus registers)
@@ -5863,9 +5850,11 @@ mod tests {
         // `c4 e1 73 61` r6 = r7 <> 19, `c4 e1 af 91` r9 = r10 <> 31
         assert_eq!(run_regs(&[0xc4, 0xe1, 0x73, 0x61], &[(7, 0x0008_0001)]).regs[6], 0x0008_0001u32.rotate_right(19));
         assert_eq!(run_regs(&[0xc4, 0xe1, 0xaf, 0x91], &[(10, 1)]).regs[9], 2);
-        // `78 e0 01 35` r3 = sat16(r5) (s), `78 e0 00 35` (u)
+        // `78 e0 01 35` r3 = sat16(r5) (s), `78 e0 00 35` (u): (u) takes the source as unsigned
+        // (an FM-1, pi32v2-isa sat16.u.rr)
         assert_eq!(run_regs(&[0x78, 0xe0, 0x01, 0x35], &[(5, 0x12345)]).regs[3], 32767);
-        assert_eq!(run_regs(&[0x78, 0xe0, 0x00, 0x35], &[(5, -5i32 as u32)]).regs[3], 0);
+        assert_eq!(run_regs(&[0x78, 0xe0, 0x00, 0x35], &[(5, -5i32 as u32)]).regs[3], 65535);
+        assert_eq!(run_regs(&[0x78, 0xe0, 0x00, 0x35], &[(5, 1234)]).regs[3], 1234);
         // `20 e0 d0 ec` r14.b3 = 208, `20 e0 ff 24` r2.b1 = 255
         assert_eq!(run_regs(&[0x20, 0xe0, 0xd0, 0xec], &[(14, 0x1234_5678)]).regs[14], 0xd034_5678);
         assert_eq!(run_regs(&[0x20, 0xe0, 0xff, 0x24], &[(2, 0x1234_5678)]).regs[2], 0x1234_ff78);
@@ -5894,10 +5883,27 @@ mod tests {
         // `df e1 c1 95` r9 = r13_r12 >> r5 (s), `df e1 20 05` r0 = r3_r2 >> r5 (u)
         assert_eq!(run_regs(&[0xdf, 0xe1, 0xc1, 0x95], &[(13, 0xffff_fff0), (12, 0), (5, 4)]).regs[9], 0x8000_0000);
         assert_eq!(run_regs(&[0xdf, 0xe1, 0x20, 0x05], &[(3, 1), (2, 0x10), (5, 4)]).regs[0], 0x1000_0001);
-        // `80 e1 01 14` r1 = cls(r4), `b0 e0 00 14` r1 += r4 (brev)
-        assert_eq!(run_regs(&[0x80, 0xe1, 0x01, 0x14], &[(4, 0xffff_00ff)]).regs[1], 15);
-        assert_eq!(run_regs(&[0x80, 0xe1, 0x01, 0x14], &[(4, 1)]).regs[1], 30);
+        // `80 e1 01 14` r1 = cls(r4), the sign bit counted (an FM-1, pi32v2-isa cls.rr), `b0 e0 00
+        // 14` r1 += r4 (brev)
+        assert_eq!(run_regs(&[0x80, 0xe1, 0x01, 0x14], &[(4, 0xffff_00ff)]).regs[1], 16);
+        assert_eq!(run_regs(&[0x80, 0xe1, 0x01, 0x14], &[(4, 1)]).regs[1], 31);
+        assert_eq!(run_regs(&[0x80, 0xe1, 0x01, 0x14], &[(4, 0)]).regs[1], 32);
         assert_eq!(run_regs(&[0xb0, 0xe0, 0x00, 0x14], &[(1, 0x8000_0000), (4, 0x8000_0000)]).regs[1], 0x4000_0000);
+    }
+
+    #[test]
+    fn bit_ops_as_an_fm1_runs_them() {
+        // pi32v2-isa hw/fm1-2026-10-24: `70 e0 c0 12` r1 = popcnt(r2) changes nothing
+        assert_eq!(run_regs(&[0x70, 0xe0, 0xc0, 0x12], &[(1, 0x7777_7777), (2, 0xff)]).regs[1], 0x7777_7777);
+        // a field width of 0: `a1 e1 00 22` r1 <= insert(r2, p:4, l:0) changes nothing, `b0 e1 00 00`
+        // r0 = uextra(r0, p:0, l:0) and `b0 e1 01 00` sextra give 0
+        assert_eq!(run_regs(&[0xa1, 0xe1, 0x00, 0x22], &[(1, 0x1234_5678), (2, 0xffff_ffff)]).regs[1], 0x1234_5678);
+        assert_eq!(run_regs(&[0xa1, 0xe1, 0x00, 0x22], &[(1, 0x1234_5678), (2, 0xffff_ffff)]).pc, 4);
+        assert_eq!(run_regs(&[0xb0, 0xe1, 0x00, 0x00], &[(0, 0x7f)]).regs[0], 0);
+        assert_eq!(run_regs(&[0xb0, 0xe1, 0x01, 0x00], &[(0, 0x8127_af5c)]).regs[0], 0);
+        // `30 e4 00 02` r0 = abs(r2) saturates
+        assert_eq!(run_regs(&[0x30, 0xe4, 0x00, 0x02], &[(2, 0x8000_0000)]).regs[0], 0x7fff_ffff);
+        assert_eq!(run_regs(&[0x30, 0xe4, 0x00, 0x02], &[(2, -5i32 as u32)]).regs[0], 5);
     }
 
     #[test]
@@ -7629,6 +7635,26 @@ fn half_mem(raw: u64) -> Option<HalfMem> {
         pre: b0 & 8 != 0,
         off: if x & 512 != 0 { x - 1024 } else { x },
     })
+}
+
+/// `u/sextra(x, p, l)`: the l-bit field at bit p; bits past 31 read 0, the sign of a signed one
+/// is the field's top bit, and a width of 0 gives 0 (an FM-1: pi32v2-isa hw/fm1-2026-10-24,
+/// `uextra(r0, p:0, l:0)` gave 0).
+fn bit_extract(x: u32, p: u32, l: u32, signed: bool) -> u32 {
+    if l == 0 {
+        0
+    } else if signed {
+        (((x >> p) << (32 - l)) as i32 >> (32 - l)) as u32
+    } else {
+        (x >> p) & ((1u32 << l) - 1)
+    }
+}
+
+/// `insert(d, s, p, l)`: d with its l-bit field at bit p from s's low bits, cut off at bit 31;
+/// a width of 0 changes nothing (an FM-1: pi32v2-isa hw/fm1-2026-10-24, `insert(r2, p:4, l:0)`).
+fn bit_insert(d: u32, s: u32, p: u32, l: u32) -> u32 {
+    let mask = ((1u32 << l) - 1) << p;
+    (d & !mask) | ((s << p) & mask)
 }
 
 /// `<<<`, the vendor compiler's `__builtin_pi32v2_qasl`: a shift left that saturates to the

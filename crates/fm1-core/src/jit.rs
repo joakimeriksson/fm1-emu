@@ -1582,14 +1582,14 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::BitExt { d, s, p, l, signed } => {
             let (p, l) = (p as u32 & 31, l as u32 & 31);
             g.ld_reg(0, s); g.a.lsr_imm(0, 0, p);
-            if l != 0 {
-                if signed { g.a.sbfx(0, 0, 0, l); } else { g.a.ubfx(0, 0, 0, l); }
-            }
+            // (a width of 0 gives 0, `bit_extract`)
+            if l == 0 { g.a.movz(0, 0, 0); } else if signed { g.a.sbfx(0, 0, 0, l); } else { g.a.ubfx(0, 0, 0, l); }
             g.st_reg(0, d);
         }
         Fast::BitIns { d, s, p, l } => {
+            // (a width of 0 changes nothing, `bit_insert`)
             let (p, l) = (p as u32 & 31, l as u32 & 31);
-            let mask = if l == 0 { u32::MAX } else { (1u32 << l) - 1 };
+            let mask = (1u32 << l) - 1;
             g.ld_reg(0, s); g.ld_reg(1, d);
             g.a.mov32(2, mask); g.a.and(0, 0, 2); g.a.lsl_imm(0, 0, p);
             g.a.mov32(2, !(mask << p)); g.a.and(1, 1, 2); g.a.orr(0, 0, 1);
@@ -1648,10 +1648,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             match k {
                 0 => g.a.mvn(0, 0),
                 1 => g.a.neg(0, 0),
-                // (i32::MIN stays i32::MIN, as wrapping_abs)
+                // (saturating: i32::MIN gives i32::MAX, the sign of the negated i32::MIN flips it)
                 2 => {
                     g.a.cmp_imm(0, 0);
                     g.a.cneg(0, 0, AC::Lt);
+                    g.a.asr_imm(1, 0, 31);
+                    g.a.eor(0, 0, 1);
                 }
                 3 => g.a.rev(0, 0),
                 4 => g.a.clz(0, 0),
@@ -1663,12 +1665,11 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     g.a.cmp(0, 1);
                     g.a.csel(0, 1, 0, AC::Lt);
                 }
+                // (sat16 (u): an unsigned value into 0..65535)
                 _ => {
-                    g.a.cmp_imm(0, 0);
-                    g.a.csel(0, ZR, 0, AC::Lt);
                     g.a.mov32(1, 65535);
                     g.a.cmp(0, 1);
-                    g.a.csel(0, 1, 0, AC::Gt);
+                    g.a.csel(0, 1, 0, AC::Hi);
                 }
             }
             g.st_reg(0, d);

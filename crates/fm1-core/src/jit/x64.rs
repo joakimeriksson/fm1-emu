@@ -879,19 +879,21 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             if p != 0 {
                 g.a.sh_i(Sh::Shr, RAX, p);
             }
-            if l != 0 {
-                if signed {
-                    g.a.sh_i(Sh::Shl, RAX, 32 - l);
-                    g.a.sh_i(Sh::Sar, RAX, 32 - l);
-                } else {
-                    g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
-                }
+            if l == 0 {
+                // (a width of 0 gives 0, `bit_extract`)
+                g.a.mov_ri(RAX, 0);
+            } else if signed {
+                g.a.sh_i(Sh::Shl, RAX, 32 - l);
+                g.a.sh_i(Sh::Sar, RAX, 32 - l);
+            } else {
+                g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
             }
             g.st_reg(RAX, d);
         }
         Fast::BitIns { d, s, p, l } => {
+            // (a width of 0 changes nothing, `bit_insert`)
             let (p, l) = (p as u32 & 31, l as u32 & 31);
-            let mask = if l == 0 { u32::MAX } else { (1u32 << l) - 1 };
+            let mask = (1u32 << l) - 1;
             g.ld_reg(RAX, s);
             g.ld_reg(RCX, d);
             g.a.alu_ri(Alu::And, RAX, mask);
