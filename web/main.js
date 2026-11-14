@@ -93,6 +93,9 @@ const title = document.getElementById("title");
 const openInput = document.getElementById("open");
 const bankInput = document.getElementById("bank");
 const bankName = document.getElementById("bankname");
+const diskInput = document.getElementById("disk");
+const diskName = document.getElementById("diskname");
+let diskImage = null;
 const saveStatus = document.getElementById("save-status");
 const saveStore = new SaveStore();
 const memoryRecords = new Map();
@@ -391,14 +394,24 @@ bankInput.addEventListener("change", async () => {
   bankName.textContent = file.name;
   if (node) boot();
 });
+if (diskInput) diskInput.addEventListener("change", async () => {
+  const file = diskInput.files[0];
+  diskInput.value = "";
+  if (!file) return;
+  diskImage = new Uint8Array(await file.arrayBuffer());
+  if (diskName) diskName.textContent = file.name;
+  if (node) boot();
+});
 const stage = document.querySelector(".stage");
 stage.addEventListener("dragover", (e) => { e.preventDefault(); });
 stage.addEventListener("drop", (e) => {
   e.preventDefault();
-  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|syx)$/i.test(f.name));
+  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|syx|img)$/i.test(f.name));
   if (!file) return;
   if (/\.syx$/i.test(file.name)) {
     file.arrayBuffer().then((b) => { bank = new Uint8Array(b); bankName.textContent = file.name; if (node) boot(); });
+  } else if (/\.img$/i.test(file.name)) {
+    file.arrayBuffer().then((b) => { diskImage = new Uint8Array(b); if (diskName) diskName.textContent = file.name; if (node) boot(); });
   } else {
     openLocal(file);
   }
@@ -944,6 +957,7 @@ function boot(options = {}) {
       node.port.postMessage({ type: "boot", seq, wasm: wasm.slice(0), package: got.bytes.slice().buffer,
         sectors: packSectors(sectors).buffer, syx: importedBank ? importedBank.slice().buffer : null,
         script: trying?.script ? new TextEncoder().encode(trying.script).buffer : null,
+        disk: diskImage ? diskImage.slice().buffer : null,
         mhz: clock, jit: params.get("jit") !== "0", chip: CHIP,
         // (?ahead=0: each quantum emulates only for its own frames, as before the even pace)
         ahead: params.has("ahead") ? Number(params.get("ahead")) : undefined });

@@ -130,6 +130,9 @@ class Fm1 extends AudioWorkletProcessor {
     if (m.syx && x.fm1_load_syx(copy(m.syx), m.syx.byteLength) === 1) {
       throw new Error("this firmware cannot load that DX7 bank");
     }
+    if (m.disk?.byteLength && x.fm1_usb_disk) {
+      x.fm1_usb_disk(copy(m.disk), m.disk.byteLength);
+    }
     // a try-out's input script (web/tryout.js): UTF-8 bytes, played on the emulated clock from now
     if (m.script?.byteLength && (!x.fm1_bench_script || x.fm1_bench_script(copy(m.script), m.script.byteLength) !== 0)) {
       throw new Error("the input script did not load");

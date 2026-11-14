@@ -612,9 +612,7 @@ impl Soc {
         self.periph.chip_reset();
         self.p33.chip_reset(cause);
         let mut old = std::mem::take(&mut self.usb);
-        if old.cable {
-            self.usb.plug(self.periph.hz);
-        }
+        self.usb.keep_attachment(&mut old, self.periph.hz);
         self.usb.keep_recording(&mut old); // (a computer's recording goes on across the reset)
         (self.paused, self.lock_owner, self.cpu1_release, self.cpu1_released_once, self.crc) = ([false; 2], None, false, false, 0);
         (self.cpu1_idle, self.cpu1_fault) = (false, None);
@@ -757,6 +755,14 @@ impl Soc {
         if let Some((at, b)) = due.uart_rx {
             self.write8(at, b);
         }
+        if due.usb_packet {
+            let mut u = std::mem::take(&mut self.usb);
+            let now = self.periph.cycles;
+            u.complete_packets(self, now);
+            self.periph.usb_packet_next = u.packet_deadline();
+            self.usb = u;
+            self.periph.next_due = 0;
+        }
         if due.usb_frame {
             let pullup = self.sfr_get(usb::USB_IO_CON0) & 0x40 != 0;
             let mut u = std::mem::take(&mut self.usb);
@@ -781,6 +787,13 @@ impl Soc {
         self.periph.usb_period = (self.periph.hz / 1000).max(1);
         self.periph.usb_next = self.periph.cycles + self.periph.usb_period;
         self.periph.next_due = 0;
+    }
+
+    /// Connect one writable USB disk; the firmware must initiate its host session.
+    pub fn usb_disk(&mut self, disk: Box<dyn usb::SectorStorage>) {
+        self.usb.attach_disk(disk, self.periph.hz);
+        self.periph.usb_period = (self.periph.hz / 1000).max(1);
+        self.periph.usb_next = self.periph.cycles + self.periph.usb_period;
     }
 
     /// The highest-priority enabled pending interrupt: (irq, prio).
@@ -1493,6 +1506,8 @@ impl Soc {
             Region::Usb if (usb::USB_LO..=usb::USB_HI).contains(&addr) => {
                 self.usb.write(addr, value, self.periph.cycles);
                 self.periph.set_usb_irqs(self.usb.irq_lines());
+                self.periph.usb_packet_next = self.usb.packet_deadline();
+                self.periph.next_due = 0;
             }
             Region::Usb => {
                 if addr == 0x16a0c && self.board == Board::Smk37 {
