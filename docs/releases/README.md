@@ -15,6 +15,16 @@ pull request that changes the emulator), and publishes one GitHub Release: the n
 `docs/releases/v<version>.md`, then the pull requests merged since the last release (GitHub's
 list). The page needs no release: it deploys from `master`.
 
+The page shows the release from the same two places: `web/release.mjs`, run by `web/build.sh`,
+writes the version into the header and a "What's new" section with the downloads from
+`Cargo.toml`'s version and its notes: their first paragraph, the `## Downloads` table (file names
+`fm1-plugin-<version>-<os>-<arch>.zip`, `fm1-emu-...`; "New." in a row marks it new) and the
+`## What's new` list (each item shortened: the parentheses go; the "Contributors" item becomes
+the thanks). `node --test web/*.test.mjs` fails on notes it cannot read. The release film: put
+its YouTube link in the notes (a line such as `The release film: https://youtu.be/ID`) and the
+page shows it in that section. `node web/release.mjs web/index.html web/smk37/index.html`
+refreshes the copy committed in the pages (optional: the build writes its own).
+
 ## Steps
 
 1. In a pull request: the version in `Cargo.toml` (`[workspace.package]`) and in
