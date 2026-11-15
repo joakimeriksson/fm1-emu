@@ -60,3 +60,13 @@ No physical hardware or real Ableton/Logic/Pro Tools session was tested. Current
 Implemented isolated browser working databases by instance UUID and setup ID, stable instance URLs, scoped setup resumption, and flush-before-switch coordination. MIDI inputs now route by exact port ID and issue panic messages when a controller disconnects or the route/channel changes. Eight Studio domain tests pass, including namespace separation, ambiguous-controller names and panic message coverage. These tests do not constitute end-to-end physical controller validation.
 
 Full volatile recall remains incomplete. The inspected CPU and SoC do not expose a complete serializable checkpoint contract; implementing it requires an explicit schema across both cores, private CPU interrupt state, RAM banks, peripheral timers/DMA, flash and USB state, with JIT caches recreated rather than serialized. Do not mark the proposed two-instance unsaved-edit DAW acceptance test as passed.
+
+The native scripted MIDI run produced a non-silent WAV, but the no-input comparison produced no WAV; the baseline comparison is inconclusive and is not counted as a passed MIDI equivalence test. Physical keyboard transport, browser multi-instance end-to-end tests and complete volatile recall remain pending.
+
+## HYP1 compatibility check
+
+On 2026-11-15 imported the author's HYP1 1.5.65 package from https://rustypawz.github.io/fm1-HYP1/firmware/hyp1-1.5.65.fwsc. SHA-256: da4940a44bed3b004eaf1194daffd9bec693d454652418f1235cb03a4159c149. The local catalog's 1.5.62 was not substituted. Firmware remains in ignored reference/firmwares.
+
+Native fm1-live original-binary run reached 6000 ms with active LCD/LED output and non-zero audio (peak 215 over the final half second). Browser Studio imported the package, booted it at 240 MHz, displayed animated firmware UI, opened the Acid page and triggered breakdown from the panel. Observed transient headroom was roughly 3x realtime, not a latency or sustained-load benchmark. Screenshot evidence was saved outside the repository. No physical-device flashing, physical MIDI-controller test, exhaustive save/reload test, or sound equivalence claim is made.
+
+Beginner workflows now live in user-guide.md and are linked from the README and agent router. Next implementation priority remains complete volatile checkpoints and actual DAW recall acceptance, followed by the shared native library/editor integration and MIDI/transport completion.

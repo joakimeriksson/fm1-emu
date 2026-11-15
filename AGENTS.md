@@ -49,6 +49,7 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 | Architecture, runtime boundaries, storage or bridge changes | context/architecture.md |
 | UI work, styling, components, visual or design changes | context/design-system.md |
 | Building, testing, installation or verification evidence | context/development.md |
+| Using Studio, changing firmware, controller setup, backups or beginner troubleshooting | context/user-guide.md |
 | Current progress, next steps or known limitations | context/status.md |
 | Product requirements or scope decisions | context/product-specification.md |
 | Community projects, source selection or research evidence | context/research.md |

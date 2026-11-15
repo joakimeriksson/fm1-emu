@@ -6,6 +6,8 @@ The aim is to run the same firmware you install on an M-VAVE FM-1: its sound, se
 
 **Early development.** Native standalone and plugin targets retain the upstream device panel. The new Studio interface is currently in the browser. Full session snapshots, expanded firmware editors and physical-device transfers are still planned. There is no hardware available for verification yet.
 
+**New here? Read the [beginner user guide](context/user-guide.md)** for firmware changes, HYP1, keyboard setup, DAWs, backups and offline use.
+
 ## What you can use now
 
 - Build the native Apple Silicon standalone emulator and VST3/AU/CLAP bundles.
