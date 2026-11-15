@@ -1,0 +1,40 @@
+# AGENTS.md — <PROJECT NAME>
+
+> Router for coding agents. Keep this lean: routing, commands, constraints, gotchas. Depth lives in `/context/` and loads only when a task matches a row below.
+
+<One line: what this repo is.>
+
+## Commands
+
+```
+install:    <exact command>
+build:      <exact command>
+test:       <exact command>
+lint:       <exact command>
+typecheck:  <exact command>
+run (dev):  <exact command>
+```
+<Only list commands that are non-obvious or project-specific. Drop rows that don't apply.>
+
+## Constraints
+
+- <Files/dirs never to edit — generated, vendored, lockfiles managed by tooling.>
+- <Forbidden patterns / "do not bump X" / security boundaries.>
+
+## Gotchas & non-standard patterns
+
+- <The thing that looks wrong but is intentional.>
+- <The footgun a newcomer hits.>
+
+## Where to look (conditional context)
+
+| When the task involves… | Read |
+|---|---|
+| <UI, styling, components, visual changes> | context/design-system.md |
+| <architecture, module boundaries, data flow> | context/architecture.md |
+| <the public API surface> | context/api.md |
+| anything else / first orientation | context/overview.md |
+
+## Maintenance
+
+After completing a feature, architectural change, or scope change, re-run `/ez-context` to keep this context layer current.

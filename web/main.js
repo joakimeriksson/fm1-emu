@@ -18,14 +18,15 @@ const DEV = DEVICE === "smk37"
   : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.fwsc$/i,
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
+const STUDIO = params.get("studio") === "1";
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
-const catalog = await (await fetch("firmwares.json")).json();
+const catalog = STUDIO ? {default:"studio-local",firmwares:[{id:"studio-local",name:"Import firmware",version:"",byo:true}]} : await (await fetch("firmwares.json")).json();
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
 let hubWait;
-const newcomers = DEVICE === "fm1"
+const newcomers = !STUDIO && DEVICE === "fm1"
   ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => { hubWait = setTimeout(() => ok([]), 3000); })]).finally(() => clearTimeout(hubWait))
   : [];
 catalog.firmwares.push(...newcomers);
@@ -77,6 +78,7 @@ function endTryOut() {
   q.delete("script");
   history.replaceState(null, "", `?${q}`);
 }
+if (STUDIO) fw = catalog.firmwares[0];
 let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
@@ -192,7 +194,7 @@ const hubCard = (f) => hubCardUrl(f.hub);
 const UNTESTED = "New on the Hub: not yet run in the emulator, so it may not work here";
 // the FM-1 page: which entries have an SMK-37 build (that catalog names them)
 const twins = new Map();
-if (DEVICE === "fm1") {
+if (!STUDIO && DEVICE === "fm1") {
   try {
     for (const s of (await (await fetch("smk37/firmwares.json")).json()).firmwares) if (s.fm1) twins.set(s.fm1, s.id);
   } catch { /* (no SMK-37 catalog next to this page: no links) */ }
@@ -283,12 +285,12 @@ function noteVersion(f, version) {
   if (f === fw) showFirmware();
 }
 const keptLocal = await keptEntry("local");
-if (keptLocal) {
+if (keptLocal && !STUDIO) {
   localFw = { id: "local", name: keptLocal.name, version: "", bytes: keptLocal.package };
   fwSel.add(new Option(`${localFw.name} (your file)`, "local"), 0);
   if (params.get("fw") === "local" || (!params.has("fw") && stored(DEV.key + "fw") === "local")) { fw = localFw; fwSel.value = "local"; }
 }
-for (const f of catalog.firmwares.filter(f => f.byo)) {
+for (const f of catalog.firmwares.filter(f => f.byo && !STUDIO)) {
   try { await packageOf(f); } catch { /* user has not opened a stock package yet */ }
 }
 let bank = null;                           // a DX7 32-voice bank for the stock firmware, or null
@@ -310,10 +312,10 @@ function showFirmware() {
     parts = [b, "From a link: not in this page's list, so it may not run here."];
   } else if (fw.byo) {
     const dl = document.createElement("a");
-    dl.href = fw.download;
+    dl.href = fw.download || "#";
     dl.textContent = `download ${DEV.stock} from M-VAVE`;
     const doc = document.createElement("a");
-    doc.href = fw.repo;
+    doc.href = fw.repo || "#";
     doc.textContent = "how it runs";
     const have = packages.has(fw.id) ? " Your copy is kept in this browser; open another .fwsc to replace it." :
       " Then click \u201cOpen .fwsc\u2026\u201d (or drop the file on the synth); this browser keeps it for next time.";
@@ -385,7 +387,7 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
+  if (!STUDIO && mv && (fw.byo || DEV.stockFile.test(file.name))) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -1223,3 +1225,46 @@ document.getElementById("open-saved-version").addEventListener("click", action(a
   if (node) await boot();
   else status.textContent = `${record.name} saved version ready: click Start`;
 }));
+
+
+// Studio's narrow same-origin bridge. The core/panel/audio path remains upstream.
+// No hardware operations, arbitrary commands, cross-origin input or automatic audio start.
+if (STUDIO && window.parent !== window) {
+  const report = (type, fields = {}) => window.parent.postMessage({source:"fm1-device",type,...fields},location.origin);
+  const reportStatus = () => report("status", {text:status.textContent,running:!!running});
+  new MutationObserver(reportStatus).observe(status,{childList:true,subtree:true,characterData:true});
+  let bridgeQueue = Promise.resolve();
+  addEventListener("message", event => {
+    if (event.origin !== location.origin || event.source !== window.parent || event.data?.source !== "fm1-studio") return;
+    const message = event.data;
+    bridgeQueue = bridgeQueue.then(async () => {
+      if (message.type === "load") {
+        if (!(message.bytes instanceof Uint8Array) || message.bytes.length > 16 << 20 || typeof message.name !== "string" || message.name.length > 256) throw new Error("Invalid Studio import");
+        if (message.kind === "save") {
+          const record = await importSave(new TextDecoder().decode(message.bytes),async hash =>
+            message.package instanceof Uint8Array && await packageHash(message.package) === hash ? message.package : null);
+          await bootQueue;
+          await flushRunning();
+          const old = await saveStore.load(record.hash);
+          record.revision = memoryRecords.get(record.hash)?.revision || old?.revision || 0;
+          memoryRecords.set(record.hash,record);
+          localFw = {id:"local",name:record.name,version:"",bytes:record.package};
+          let opt = [...fwSel.options].find(o=>o.value === "local");
+          if (!opt) fwSel.add(opt = new Option("","local"),0);
+          opt.text = record.name; fw = localFw; fwSel.value = "local";
+          bank = null; loadedUrl = null; showFirmware();
+          if (node) await boot({imported:record});
+          else status.textContent = record.name + " setup ready: click Start on the device";
+        } else if (message.kind === "firmware") {
+          await openLocal(new File([message.bytes],message.name + ".fwsc"));
+        } else throw new Error("Unsupported Studio item");
+        reportStatus();
+      } else if (message.type === "export") {
+        if (!running) throw new Error("Start a firmware before exporting its saved flash.");
+        await flushRunning();
+        report("export",{name:running.record.name,text:exportSave(running.record)});
+      }
+    }).catch(error => report("error",{text:error.message}));
+  });
+  report("ready");
+}

@@ -1,0 +1,26 @@
+{
+  "skill_name": "ez-context",
+  "evals": [
+    {
+      "id": 1,
+      "name": "bootstrap-ui-app",
+      "prompt": "Set up an agent context layer for this repo (a Vite + React todo app). Interview answers, since I won't be around to answer live: it's for end users who want a fast, keyboard-driven todo app; the one non-obvious thing is that all state is kept in localStorage with no backend; tone should be friendly but concise; out of scope is any multi-user/sync feature; we use an existing minimal black-and-white visual style with a single teal accent. Go ahead and bootstrap everything.",
+      "expected_output": "Bootstrap path. Creates lean AGENTS.md router (commands from package.json, no architecture prose), context/overview.md (Tier 1, dual-sourced), context/design-system.md (text-only, because a UI surface exists), a dual-sourced README.md, frontmatter with last_verified + source_refs on each context doc, and wires distribution (symlink-or-copy). Ends with a summary.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "bootstrap-cli-no-ui",
+      "prompt": "Bootstrap the agent/human context docs for this project. It's a Python CLI that converts CSV files to Parquet. Interview answers up front: audience is data engineers running it in batch jobs; the non-obvious bit is that it streams rows so it can handle files bigger than memory; keep the tone utilitarian; explicitly out of scope is any GUI. Set it all up.",
+      "expected_output": "Bootstrap path. Creates AGENTS.md, context/overview.md, README.md. Does NOT create context/design-system.md (no UI surface) and says so in the summary. Commands derived from pyproject.toml. Router stays lean.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "reconcile-stale-and-drift",
+      "prompt": "Run ez-context on this repo to bring the context docs back in sync. We just shipped some changes. Don't rewrite everything — only fix what's actually out of date or newly missing.",
+      "expected_output": "Reconcile path (existing /context/ + AGENTS.md detected). Runs the staleness check (finds the design-system.md / overview.md whose source_refs changed after last_verified), classifies the change, runs structural-drift check and notices the new api/ subsystem that no doc covers -> flags a new Tier-2 doc + routing row. Updates ONLY stale/implicated docs with minimal diffs, bumps last_verified, leaves fresh docs untouched. Summary distinguishes 'updated' vs 'new doc for drift' vs 'left untouched'.",
+      "files": []
+    }
+  ]
+}

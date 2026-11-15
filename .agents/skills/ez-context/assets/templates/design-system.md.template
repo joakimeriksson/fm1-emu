@@ -1,0 +1,31 @@
+---
+load_when: "UI work, styling, components, visual or design changes"
+last_verified: <YYYY-MM-DD>
+source_refs:
+  - src/components/**
+  - src/styles/**
+  - tailwind.config.*
+  - "**/*.css"
+---
+
+# Design system
+
+> Text-only. Encode what's already true in the code; label anything proposed as a proposal.
+
+## 1. Design tokens
+**Color** — <role → value: bg, surface, text, accent, semantic (success/warn/error)>
+**Type** — <families, scale, weights>
+**Spacing** — <scale>
+**Radii / shadows / breakpoints** — <values>
+
+## 2. Component architecture
+<Organization (atomic/feature/…), naming, shared vs. one-off location, composition patterns.>
+
+## 3. Accessibility
+<Actual baseline (e.g. WCAG 2.1 AA), focus handling, contrast rules, keyboard/ARIA expectations.>
+
+## 4. Theming
+<Light/dark or brand theming approach; how themes are applied; how to make a component theme-aware.>
+
+## 5. Component-doc conventions
+<How components are documented: props tables, usage examples, do/don't — so the system stays consistent as it grows.>
