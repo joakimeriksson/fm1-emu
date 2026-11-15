@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn misaligned_words_move_the_aligned_down_word() {
-        // an FM-1 (H3, 2026-11): a misaligned word load gives the aligned-down word, a misaligned
+        // an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1): a misaligned word load gives the aligned-down word, a misaligned
         // word store writes the whole word there; a halfword load at +1 the aligned-down halfword
         let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
         soc.strict_align = true;
