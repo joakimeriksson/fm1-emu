@@ -214,7 +214,7 @@ impl std::fmt::Debug for DecodeError {
 
 /// Classes whose corpus-mined mask is wider than the instructions it stands for: the words they
 /// really cover. The rest of the mask decodes as nothing in the vendor objdump (20260730.1, -mcpu=r3)
-/// and in pi32v2-isa's table, and on an FM-1 (2026-11) runs as something else.
+/// and in pi32v2-isa's table, and on an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 14) runs as something else.
 fn covers(e: &IsaEntry, win: u64) -> bool {
     match e.name {
         // `R = #i`: `rN = 0..255` for r0..r7 (`001i iiii 01jj jrrr`) and `rN = 0` for r8..r15
@@ -335,7 +335,7 @@ mod tests {
 
     #[test]
     fn words_r_mov_i_l2_does_not_cover_are_nops() {
-        // an FM-1 (2026-11): `45 00`..`48 00` change nothing (4 of 4)
+        // an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 14): `45 00`..`48 00` change nothing (4 of 4)
         for w in ["4500", "4600", "4700", "4800"] {
             assert_eq!(le(w).unwrap().syntax(), "nop", "{w}");
         }
