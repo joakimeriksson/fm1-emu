@@ -131,6 +131,12 @@ struct Tmr {
 }
 pub const VEC_BASE: u32 = 0x01C7_FE00;
 
+/// How long an eye takes in a LED, in seconds (`led_shown`). A firmware that dims a LED pulses it
+/// faster than this, and a 16 ms frame catches a varying number of the pulses: a dim LED drawn
+/// from one frame's fraction flickers. Raise it if a dim LED still flickers, lower it if a LED
+/// that blinks on the beat looks smeared.
+const LED_SEEN_S: f32 = 0.04;
+
 /// Key id at (packed row bit, physical column), -1 = none
 /// (hal/fm1_input.h FM1_KEYMAP). Ids 0..13 are buttons, 14..40 note keys
 /// (F3 .. G5).
@@ -262,6 +268,8 @@ pub struct Periph {
     led_pend: u64,
     led_last: u64,
     led_since: u64,
+    /// Each LED's lit fraction as `led_shown` averages it.
+    led_avg: [f32; 41],
     pub keys_down: [bool; 41],
     /// The keys' force (the module notes): a ramp from `from` to `to` over `dur` cycles from `t0`
     key_force: [Ramp; 41],
@@ -408,6 +416,7 @@ impl Default for Periph {
             led_pend: 0,
             led_last: 0,
             led_since: 0,
+            led_avg: [0.0; 41],
             keys_down: [false; 41],
             key_force: [Ramp::default(); 41],
             key_vel: 100,
@@ -650,6 +659,7 @@ impl Periph {
             led_acc: old.led_acc,
             led_last: old.led_last,
             led_since: old.led_since,
+            led_avg: old.led_avg,
             keys_down: old.keys_down,
             key_force: old.key_force,
             key_vel: old.key_vel,
@@ -1247,12 +1257,24 @@ impl Periph {
         std::array::from_fn(|i| self.led_acc[i] as f32 / span)
     }
 
-    /// The fraction of time each LED was lit since the last call.
+    /// The fraction of time each LED was lit since the last call (of this or `led_shown`).
     pub fn led_take(&mut self) -> [f32; 41] {
         let out = self.led_peek();
         self.led_since = self.cycles;
         self.led_acc = [0; 41];
         out
+    }
+
+    /// The LEDs as an eye sees them, for a panel to draw: each LED's lit fraction since the last
+    /// call (`led_take`), averaged over about LED_SEEN_S of emulated time.
+    pub fn led_shown(&mut self) -> [f32; 41] {
+        let span = (self.cycles - self.led_since) as f32 / self.hz as f32;
+        let now = self.led_take();
+        let k = 1.0 - (-span / LED_SEEN_S).exp();
+        for (avg, now) in self.led_avg.iter_mut().zip(now) {
+            *avg += k * (now - *avg);
+        }
+        self.led_avg
     }
 
     // ---- key matrix -----------------------------------------------------
@@ -1604,5 +1626,43 @@ mod tests {
         p.cycles = 2000;
         p.led_last = 2000;
         assert_eq!(p.led_take()[5], 0.0, "the take did reset it");
+    }
+
+    /// LED 5 lit `lit(t0, t1)` cycles of each 16 ms frame for 2.5 s: (its lit fraction, its
+    /// `led_shown`) for each frame after the first 0.5 s.
+    fn led_frames(lit: impl Fn(u64, u64) -> u64) -> Vec<(f32, f32)> {
+        let mut p = Periph::default();
+        let frame = p.hz * 16 / 1000;
+        (0..156)
+            .map(|_| {
+                p.led_acc[5] = lit(p.cycles, p.cycles + frame);
+                p.cycles += frame;
+                p.led_last = p.cycles;
+                (p.led_acc[5] as f32 / frame as f32, p.led_shown()[5])
+            })
+            .skip(31)
+            .collect()
+    }
+
+    fn swing(v: impl Iterator<Item = f32> + Clone) -> f32 {
+        v.clone().fold(0.0, f32::max) / v.fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn a_dim_led_whose_pulses_fall_unevenly_into_frames_looks_steady() {
+        // a 45 us pulse every 2.4 ms: 6 or 7 pulses in a 16 ms frame
+        let (period, width) = (CPU_HZ * 24 / 10_000, CPU_HZ * 45 / 1_000_000);
+        let f = led_frames(|t0, t1| (t1 / period - t0 / period) * width);
+        assert!(swing(f.iter().map(|x| x.0)) > 1.1, "a frame's fraction swings");
+        assert!(swing(f.iter().map(|x| x.1)) < 1.05, "led_shown holds still");
+        let mean = f.iter().map(|x| x.1).sum::<f32>() / f.len() as f32;
+        assert!((mean / (width as f32 / period as f32) - 1.0).abs() < 0.02, "at the LED's duty");
+    }
+
+    #[test]
+    fn a_led_blinking_on_the_beat_still_blinks() {
+        // lit 64 ms of each 112 ms, at the matrix's full fraction (1 column in 11)
+        let f = led_frames(|t0, t1| if t0 % (CPU_HZ * 112 / 1000) < CPU_HZ * 64 / 1000 { (t1 - t0) / 11 } else { 0 });
+        assert!(swing(f.iter().map(|x| x.1)) > 2.0, "led_shown still goes dark and bright");
     }
 }

@@ -1681,7 +1681,7 @@ fn main() {
                         *leds.lock().unwrap() = l;
                         *pads.lock().unwrap() = m.soc.periph.smk.pads;
                     } else {
-                        *leds.lock().unwrap() = m.soc.periph.led_take();
+                        *leds.lock().unwrap() = m.soc.periph.led_shown();
                     }
                     last_lcd = Instant::now();
                 }
@@ -1740,7 +1740,6 @@ fn main() {
     let mut enc_clicks = [0i32; 7];
     let mut turning = [0u32; 8];
     let mut scroll_acc = [0f32; 8];
-    let mut shown_leds = [0f32; 41];
     let mut grab: Option<Ctl> = None;
     let mut was_pressed = false;
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
@@ -1875,17 +1874,12 @@ fn main() {
             *t = t.saturating_sub(1);
         }
 
-        // ---- draw: LEDs fade out over a few frames instead of flickering
-        {
-            let l = leds.lock().unwrap();
-            for i in 0..41 {
-                shown_leds[i] = l[i].max(shown_leds[i] * 0.8);
-            }
-        }
+        // ---- draw
         {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
             let fb = lcd.lock().unwrap().clone();
-            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
+            let lit = *leds.lock().unwrap();
+            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &lit, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
