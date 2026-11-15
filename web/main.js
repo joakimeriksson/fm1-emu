@@ -6,7 +6,7 @@
 import { fetchPackage, hubNewcomers, hubCardUrl } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
 import { tryOutOf, loadTryOut } from "./tryout.js";
-import { selectedInputs, panicMessages } from "./midi-input.js";
+import { selectedInputs, panicMessages, MiniLab3, isMiniLab3 } from "./midi-input.js";
 
 const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // The device this page is for: the FM-1 (index.html) or the SMK-37 (smk37/index.html, <html
@@ -82,7 +82,7 @@ function endTryOut() {
   history.replaceState(null, "", `?${q}`);
 }
 if (STUDIO) fw = catalog.firmwares[0];
-let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
+let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 240);
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
 let latency = params.get("latency") || stored("fm1.latency") || "interactive";
@@ -120,9 +120,11 @@ const fitPanel = () => document.documentElement.style.setProperty("--above",
 fitPanel();
 
 let node = null;
-let frame = null;            // the latest LCD + LEDs from the audio thread
+let renderWorker = null;
+let frame = null;            // the latest LCD + LEDs from the render worker
 const down = new Uint8Array(64);           // keys and buttons held (FM-1: matrix ids 0..40; SMK-37: keys 0..36, buttons 37..54)
 const encClicks = new Int32Array(8);
+const visualPositions = new Float32Array(8);
 const turning = new Uint32Array(9);
 let pot = 900;
 // SMK-37: its analog inputs as set (pads 0..15, faders 16..19, the pitch / mod wheel 20 / 21)
@@ -448,7 +450,13 @@ function draw() {
     if (frame.pads) for (let p = 0; p < 16; p++) ui.panel_set(5, p, frame.pads[p]);
   }
   for (let i = 0; i < 64; i++) ui.panel_set(0, i, down[i]);
-  for (let i = 0; i < 8; i++) ui.panel_set(1, i, encClicks[i]);
+  for (let i = 0; i < 8; i++) {
+    ui.panel_set(1, i, encClicks[i]);
+    const drag = [...pointers.values()].find(p => p.grab === i);
+    const target = encClicks[i] + (drag ? drag.acc / 8 : 0);
+    visualPositions[i] += (target - visualPositions[i]) * .75;
+    if (board === 0) ui.panel_position(i, visualPositions[i]);
+  }
   ui.panel_set(2, 0, pot);
   for (let i = 0; i < 9; i++) {
     ui.panel_set(3, i, turning[i]);
@@ -538,9 +546,9 @@ canvas.addEventListener("pointermove", (e) => {
   } else if (board === 1 && p.grab >= 300) {
     slide(p, y);
   } else if (p.grab >= 0 && p.grab < (board === 1 ? 8 : 7)) {
-    p.acc += p.lastY - y;
-    while (p.acc >= 12) { p.acc -= 12; turn(p.grab, 1); }
-    while (p.acc <= -12) { p.acc += 12; turn(p.grab, -1); }
+    p.acc += (p.lastY - y) * (e.shiftKey ? .25 : 1);
+    while (p.acc >= 8) { p.acc -= 8; turn(p.grab, 1); }
+    while (p.acc <= -8) { p.acc += 8; turn(p.grab, -1); }
   } else if (board === 0 && p.grab === 7) {
     setPot(pot + (p.lastY - y) * 4);
   }
@@ -592,6 +600,9 @@ function keyId(k) {
 }
 const padKey = (k) => (board === 1 && /^[1-8]$/.test(k) ? Number(k) - 1 : -1);
 addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
+    e.preventDefault(); if (!e.repeat) document.getElementById("open").click(); return;
+  }
   if (e.metaKey || e.ctrlKey || e.target instanceof HTMLSelectElement) return;
   if (ENC_KEYS[e.key]) { e.preventDefault(); turn(...ENC_KEYS[e.key]); return; }
   const pad = padKey(e.key);
@@ -626,10 +637,37 @@ if (!navigator.requestMIDIAccess) {
   midiSel.disabled = midiChSel.disabled = true;
   document.getElementById("midiin").title = "this browser has no Web MIDI (Chrome, Edge and Firefox do)";
 }
-function midiMessage(e) {
+const controllerProfiles = new Map();
+const controllerButtons = new Set();
+const controllerSel = document.getElementById("controller-profile");
+controllerSel.value = stored("fm1.controller") || "auto";
+controllerSel.addEventListener("change", () => {panicMidi();controllerProfiles.clear();store("fm1.controller", controllerSel.value);});
+function midiMessage(e, input) {
   const d = e.data;
   if (!d.length || !node) return;
   const bytes = Array.from(d);
+  if (bytes[0] < 0xf8) {
+    midiAct.classList.add("on");
+    clearTimeout(midiActOff);
+    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
+  }
+
+  if (board === 0 && controllerSel.value !== "raw" && isMiniLab3(input?.name)) {
+    let profile = controllerProfiles.get(input.id);
+    if (!profile) {profile = new MiniLab3();controllerProfiles.set(input.id, profile);}
+    const actions = profile.route(bytes);
+    if (actions) {
+      for (const a of actions) {
+        if (a.type === "enc") {const i=[0,6,1,2,3,4,5].indexOf(a.enc);turn(i,a.clicks);}
+        else if (a.type === "pot") setPot(a.value);
+        else if (a.type === "key") {
+          if (a.down) controllerButtons.add(a.id); else controllerButtons.delete(a.id);
+          setKey(a.id,a.down);
+        }
+      }
+      return;
+    }
+  }
   if (midiCh && bytes[0] >= 0x80 && bytes[0] < 0xf0) bytes[0] = (bytes[0] & 0xf0) | (midiCh - 1);
   if (board === 1) {
     // the SMK-37 has no MIDI in jack: notes C3..C6 play its keys (the velocity as the time between
@@ -648,26 +686,24 @@ function midiMessage(e) {
   } else {
     send({ type: "midi", bytes });
   }
-  if (bytes[0] < 0xf8) {
-    midiAct.classList.add("on");
-    clearTimeout(midiActOff);
-    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
-  }
 }
 // listen to the wanted inputs only; the list follows devices coming and going
 let connectedMidiIds = new Set();
 function panicMidi() {
+  for (const id of controllerButtons) setKey(id,false);
+  controllerButtons.clear();
   if (board === 0) for (const bytes of panicMessages()) send({type:"midi",bytes});
 }
 function midiConnect() {
   if (!midi) return;
   const want = midiSel.value;
   const inputs = [...midi.inputs.values()].filter(input => input.state !== "disconnected");
-  const selected = selectedInputs(inputs,want);
+  const selected = selectedInputs(inputs,want).filter(input => want !== "*" || !input.name?.toLowerCase().replaceAll(" ","").includes("minilab3") || isMiniLab3(input.name));
   const ids = new Set(selected.map(input=>input.id));
   if ([...connectedMidiIds].some(id=>!ids.has(id))) panicMidi();
+  for (const id of controllerProfiles.keys()) if (!ids.has(id)) controllerProfiles.delete(id);
   connectedMidiIds = ids;
-  for (const input of midi.inputs.values()) input.onmidimessage = ids.has(input.id) ? midiMessage : null;
+  for (const input of midi.inputs.values()) input.onmidimessage = ids.has(input.id) ? e => midiMessage(e,input) : null;
   midiSel.replaceChildren(new Option("off",""),new Option("all inputs","*"));
   for (const input of inputs) midiSel.add(new Option(input.name || "MIDI controller",input.id));
   // Migrate a remembered name only if it identifies exactly one input.
@@ -821,7 +857,7 @@ const perf = {
       `audio clock drift: ${r(100 * this.drift, 1)}% · seconds with drops: ${this.drops} · idle skipped: ${r(100 * this.idleShare)}% of the time`,
       `jit: ${jit ? `${jit.regions} regions compiled, ${jit.failed} failed${jit.error ? ` (${jit.error})` : ""} · ` +
         `compiling took ${r(jit.compileMs)} ms, the longest ${r(jit.compileMaxMs, 1)} ms` : "?"}`,
-      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"}`,
+      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"} · output underruns: ${frame?.outputUnderruns ?? "?"}`,
     ].join("\n");
   },
 };
@@ -855,6 +891,7 @@ async function setLatency(l) {
   // a larger buffer needs a new audio context: rebuild the graph, boot again
   node.port.onmessage = null;
   node.disconnect();
+  renderWorker?.terminate(); renderWorker = null;
   running = null;
   await ac.close();
   await startAudio();
@@ -972,7 +1009,7 @@ function boot(options = {}) {
       sessions.set(seq, session);
       loadedUrl = got.url;
       showFirmware();
-      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0);
+      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0); visualPositions.fill(0); controllerProfiles.clear();
       frame = last = null;
       booting = seq;
       perf.reset();
@@ -1025,6 +1062,12 @@ async function startAudio(auto = false) {
   }
   await ac.audioWorklet.addModule("worklet.js");
   node = new AudioWorkletNode(ac, "fm1", { numberOfInputs: 0, outputChannelCount: [2] });
+  renderWorker = new Worker("render-worker.js", {type:"module"});
+  renderWorker.onmessage = onWorklet;
+  const channel = new MessageChannel();
+  renderWorker.postMessage({type:"connect", sampleRate:ac.sampleRate, port:channel.port1},[channel.port1]);
+  node.port.postMessage({type:"connect-renderer",port:channel.port2},[channel.port2]);
+  renderWorker.onerror = e => { status.textContent = `Audio renderer: ${e.message || "worker failed; restart audio"}`; };
   node.connect(ac.destination);
   node.port.onmessage = onWorklet;
   perf.reset();
@@ -1102,9 +1145,10 @@ function onWorklet(e) {
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
     status.title = [`speed: how much faster than real time the emulator runs this firmware on this device ` +
       `(emulated time per time spent emulating; below 1x the sound breaks up)`,
-      `load: the share of the audio thread's time the emulator takes (over 100%: the sound breaks up)`,
+      `load: render worker time relative to audio duration (over 100% cannot sustain playback)`,
       m.jit ? `JIT: ${m.jit.regions} regions compiled, ${m.jit.failed} failed${m.jit.error ? ` (${m.jit.error})` : ""}` : "",
-      `${m.short} short audio quanta (the firmware's audio fell behind its own clock)`].filter(Boolean).join("\n");
+      `${m.short} short audio quanta (includes boot silence)`,
+      `${m.outputUnderruns ?? 0} output underruns (worker queue ran empty); output queue ${(m.outputQueueMs ?? 128000*4/44100).toFixed(1)} ms`].filter(Boolean).join("\n");
     last = { t: now };
   }
 }

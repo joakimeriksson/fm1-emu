@@ -1,6 +1,7 @@
-//! List CoreMIDI inputs and monitor incoming bytes for one minute. No MIDI output.
+//! List CoreMIDI inputs and monitor incoming bytes for a configurable duration. No MIDI output.
 use std::time::{Duration,Instant};
 fn main() {
+ let seconds=std::env::args().nth(1).and_then(|s|s.parse::<u64>().ok()).unwrap_or(60);
  let probe=midir::MidiInput::new("FM-1 MIDI diagnostic").expect("MIDI initialization");
  let mut connections=Vec::new();
  for port in probe.ports() {
@@ -14,6 +15,6 @@ fn main() {
    Ok(connection)=>connections.push(connection),Err(error)=>eprintln!("{name}: {error}")
   }
  }
- println!("Monitoring {} MiniLab input(s) for 60 seconds; play keys now.",connections.len());
- let start=Instant::now();while start.elapsed()<Duration::from_secs(60) {std::thread::sleep(Duration::from_millis(100));}
+ println!("Monitoring {} MiniLab input(s) for {seconds} seconds; play keys now.",connections.len());
+ let start=Instant::now();while start.elapsed()<Duration::from_secs(seconds) {std::thread::sleep(Duration::from_millis(100));}
 }

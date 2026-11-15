@@ -7,16 +7,24 @@ source_refs:
   - web/persistence.js
   - tools/package-studio.mjs
   - crates/fm1-plugin/src/**
+  - web/render-worker.js
+  - web/render-runtime.js
+  - web/worklet.js
+  - crates/fm1-soc/src/controller.rs
 ---
 # Architecture
 
 ## One execution core, separate host surfaces
 
-Keep the Rust CPU/SoC and original firmware execution path authoritative. Standalone uses fm1-live; plugin uses the existing native worker; browser uses fm1-web through its AudioWorklet. Studio adds no synthesis implementation.
+Keep the Rust CPU/SoC and original firmware execution path authoritative. Standalone uses fm1-live; plugin uses the existing native worker; browser executes fm1-web in a dedicated render worker and sends audio through a small AudioWorklet queue. Studio adds no synthesis implementation.
 
 The browser Studio hosts the upstream-compatible device page in a same-origin iframe. Its narrow postMessage bridge accepts local imports and export requests only; check both origin and source window in each direction. It never starts audio automatically or performs hardware operations.
 
 Studio mode (`studio=1`) disables automatic Hub discovery and catalog downloads. The default clock is explicitly 240 MHz. The device still starts only after a user gesture. The upstream page remains available independently for comparison.
+
+The browser renderer (`render-worker.js` + `render-runtime.js`) owns the machine, JIT and snapshots. A direct MessageChannel connects it to `worklet.js`, which consumes a bounded stereo queue (four quanta initially, growing by two on an underrun to at most 16). LCD/flash messages travel directly from the worker to the page; only audio and small control messages reach the realtime thread. Boot IDs reject stale audio; pause acknowledgements flush queued output. No SharedArrayBuffer or cross-origin isolation is required. This adds about 11.6 ms of queue headroom at 44.1 kHz while moving compilation off audio deadlines.
+
+Factory MiniLab 3 profiles translate recognized CCs into physical panel actions before firmware MIDI. Only the standard performance port is auto-mapped. Mapped CCs are consumed once; other messages pass through. Rust and browser policies have matching regression cases. DAW plugin MIDI retains its existing raw behavior.
 
 ## Data ownership
 

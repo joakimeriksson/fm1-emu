@@ -12,6 +12,8 @@ The aim is to run the same firmware you install on an M-VAVE FM-1: its sound, se
 
 - Build the native Apple Silicon standalone emulator and VST3/AU/CLAP bundles.
 - Build a static browser studio with the same WASM emulation core and playable hardware view.
+- Use a factory MiniLab 3 profile in standalone/browser, with all four FM-1 parameter knobs, navigation and master mapping.
+- Open native firmware with Cmd/Ctrl+O; Shift-drag encoders for fine adjustment.
 - Import original `.fwsc` firmware and `.fm1save` persistent setups into a local, hash-addressed collection.
 - Search, reopen and export items, and back up/restore the collection.
 - Cache browser runtime assets for offline use; imported firmware is stored locally.

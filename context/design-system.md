@@ -5,6 +5,9 @@ source_refs:
   - web/studio/index.html
   - web/studio/studio.css
   - web/studio/app.js
+  - web/main.js
+  - crates/fm1-live/src/panel.rs
+  - crates/fm1-plugin/src/editor.rs
 ---
 # Design system
 
@@ -99,3 +102,7 @@ Only the documented light Studio theme is implemented. The emulated panel retain
 ## Documentation contract
 
 For each new reusable control, record its purpose, available states, keyboard behavior, destructive effects, token use and any exceptions here or in a focused component note. Keep implementation and this document synchronized on every UI change. The in-app Design system page is a visual specimen; this Markdown document is the design contract.
+
+## Controller and encoder interaction increment
+
+The device page adds a labeled Controller select with Auto / Raw states, native keyboard selection and a 40 px minimum height, 8 px inset/radius. It changes host routing only. MiniLab page mapping follows the physical panel; pads retain note performance and never silently invoke Save/Record. Hardware canvas encoders use an 8 px drag detent, Shift for quarter sensitivity, and fractional visual positions with immediate discrete firmware input. Visual motion is decorative; it never reports finer firmware values. Native polling is up to 120 Hz, browser drawing follows requestAnimationFrame. Existing hardware artwork remains the documented geometry exception.

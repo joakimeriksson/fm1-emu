@@ -601,6 +601,7 @@ static mut PANEL_LCD: Vec<u16> = Vec::new();
 static mut PANEL_LEDS: [f32; 41] = [0.0; 41];
 static mut PANEL_DOWN: [bool; 64] = [false; 64];
 static mut PANEL_ENC: [i32; 8] = [0; 8];
+static mut PANEL_POS: [f32; 7] = [0.0; 7];
 static mut PANEL_TURN: [u32; 9] = [0; 9];
 static mut PANEL_POT: u16 = 900;
 /// Which panel the page draws: 0 the FM-1's, 1 the SMK-37's.
@@ -691,6 +692,11 @@ pub extern "C" fn panel_leds() -> *mut f32 {
 
 /// UI state for the drawing: a key held, an encoder's clicks, the pot, a knob's glow.
 #[no_mangle]
+pub extern "C" fn panel_position(i: u32, value: f32) {
+    if i < 7 && value.is_finite() { unsafe { PANEL_POS[i as usize] = value; } }
+}
+
+#[no_mangle]
 pub extern "C" fn panel_set(kind: u32, i: u32, v: i32) {
     unsafe {
         match kind {
@@ -739,6 +745,7 @@ pub extern "C" fn panel_draw() -> *const u8 {
             let st = panel::State {
                 lcd: &PANEL_LCD,
                 enc_clicks: &std::array::from_fn(|i| PANEL_ENC[i]),
+                positions: Some(&PANEL_POS),
                 pot: PANEL_POT,
                 down: &std::array::from_fn(|i| PANEL_DOWN[i]),
                 leds: &PANEL_LEDS,

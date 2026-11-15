@@ -7,6 +7,8 @@ source_refs:
   - web/main.js
   - web/midi-input.js
   - context/status.md
+  - crates/fm1-live/src/main.rs
+  - crates/fm1-soc/src/controller.rs
 ---
 # FM-1 Studio user guide
 
@@ -101,7 +103,7 @@ The default native input accepts all MIDI inputs. Use `--midi none` to disable t
 ### Change firmware in the standalone window
 
 1. Click the emulator window so it has keyboard focus.
-2. Press **F4**. On a Mac keyboard, use **Fn-F4** if F4 invokes a system feature.
+2. Press **Cmd+O** on Mac, or **Ctrl+O**. **F4** also works; use **Fn-F4** if F4 invokes a system feature. Release the keys to open the picker.
 3. Select an original **.fwsc** package in the file picker. Cancel keeps the current firmware.
 4. The old run closes normally and the selected firmware starts in its place. Audio/MIDI connections are reopened.
 
@@ -207,14 +209,70 @@ mkdir -p "$HOME/Music/FM-1/Working"
   --flash "$HOME/Music/FM-1/Working/hyp1-1.5.65.bin"
 ```
 
-The raw web link with mhz=100 underclocks the emulated CPU relative to nominal 240 MHz. Try mhz=240, using the same exact firmware and piece/settings before comparing. The catalog currently pins HYP1 1.5.62; importing 1.5.65 directly avoids silently comparing different versions. The maker's web player compiles firmware source for its browser runtime; ours executes CPU instructions. Sound agreement between those paths needs testing, not assumption.
+The raw web link with mhz=100 underclocks the emulated CPU relative to nominal 240 MHz. Try mhz=240, using the same exact firmware and piece/settings before comparing. The catalog now selects HYP1 1.5.65. An older cached browser build may still list 1.5.62; close its tabs and reopen, or import the exact package. The maker's web player compiles firmware source for its browser runtime; ours executes CPU instructions. Sound agreement between those paths needs testing, not assumption.
 
-The reported distorted/wrong sound is an OPEN fidelity issue. Native ten-second runs of the same 1.5.65 package at 100/240 MHz both produced audio without 16-bit clipping; this does not rule out underruns, CPU/peripheral errors, different initial state or synthesis differences. Neither boot success nor zero clipping is proof of musical correctness. No matched-state recording comparison with the author's player has passed yet.
+For a sound comparison, match the firmware version, piece, Noise Colour and effect settings first. Native ten-second runs of the same 1.5.65 package at 100/240 MHz both produced audio without 16-bit clipping; this does not rule out underruns, CPU/peripheral errors, different initial state or synthesis differences. Neither boot success nor zero clipping is proof of musical correctness. No matched-state recording comparison with the author's player has passed yet.
 
 ### HYP1 keeps sounding after releasing a key
 
 HYP1 normally generates its own music; its ordinary key mode edits the scale, rather than acting like a conventional piano. Open Pad (ENV), Drone (LFO), or Acid (ARP), then hold SEL and press ENV to put that voice in BY HAND mode. The voice's keys then play it manually. Repeat the combination to return it to generative mode. Other generated voices continue; use PLAY to stop the arrangement. Envelope release and effects can leave a tail after note-off.
 
-With the MiniLab connected here, diagnostic capture confirmed channel-1 note-on and note-off messages arriving at the Mac. This establishes controller transmission; it does not establish every HYP1 MIDI route's behavior. If a manual voice remains stuck, distinguish it from other generated voices before changing firmware or controller settings.
+The reported held notes were caused by the MiniLab’s **Hold** button being on; turning it off resolved them. Diagnostic capture confirmed channel-1 note-on and note-off messages arriving at the Mac. This establishes controller transmission; it does not establish every HYP1 MIDI route's behavior. If a manual voice remains stuck, distinguish it from other generated voices before changing firmware or controller settings.
 
-The native F4 picker now fires once after releasing F4, avoiding repeated dialogs from held/repeated key events. Restart the application after rebuilding to use this change.
+The native firmware picker fires once after releasing Cmd/Ctrl+O or F4, avoiding repeated dialogs from held/repeated key events. Restart the application after rebuilding to use these changes.
+
+
+### HYP1 crackle versus continuous noise
+
+The reproduced startup selected piece **06**, with Noise Colour **Black**. Black deliberately generates vinyl crackle. The author’s player can start with a different piece/colour, so two fresh launches need not sound alike. This was confirmed by the user: choosing **White** removed the unexpected crackle.
+
+1. Turn **SELECT** to **Noise**.
+2. Turn **KNOB2** (Colour) to **White** or **Pink** for a continuous texture.
+3. Adjust **KNOB1** (Level), **KNOB3** (Tone) and **KNOB4** (Pump) to taste. Level zero mutes this layer.
+4. To keep it, use HYP1’s own store operation, then preserve your working flash as described above.
+
+This changes the piece, not the emulator’s sound engine. A render check of the original 1.5.65 binary produced identical native/browser samples across 655,360 frames; the native interpreter also matched the first 346,880 frames. This checks agreement between our engines, not equivalence to physical hardware or the author’s source-compiled player.
+
+## MiniLab 3 control profile
+
+Restart the rebuilt native app. In the browser, reopen the updated page, choose **Minilab3 MIDI** under MIDI in and leave **Controller → Auto · MiniLab 3** selected. Use the factory **Arturia** mode (Shift + Pad 3), not DAW mode. No controller settings are written by the app.
+
+| MiniLab control | FM-1 action |
+|---|---|
+| Knobs 1–4 | KNOB1–KNOB4 on the current firmware page |
+| Knob 5 | SELECT / page navigation |
+| Knob 6 | PRESETS / piece selection |
+| Knob 7 | ALGORITHM |
+| Knob 8 or fader 4 | MASTER volume |
+| Large encoder | SELECT; Shift + turn selects PRESETS |
+| Large encoder click | HOME |
+| Shift button | Hold SCL (called SEL in HYP1); release to let go |
+| Keyboard, pitch/mod strips, Hold/sustain | Normal firmware MIDI input |
+| Pads and faders 1–3 | Normal firmware MIDI input; their effect depends on the firmware |
+
+The first message from each parameter/navigation knob anchors its position; subsequent movement turns the emulated encoder. This avoids jumping a parameter whose value the firmware has not exposed. MASTER is an absolute volume control. Factory parameter/navigation CC values stop at 0/127: turn back when an endpoint is reached. Customized CC assignments and relative modes on the eight small knobs are not auto-detected. The large encoder uses its factory relative format. The profile consumes mapped CCs so they cannot simultaneously change a second firmware MIDI parameter.
+
+Pads remain musical notes rather than hidden Save/Record commands. Faders 1–3 retain firmware assignments; a configurable mapping/learn editor and plugin controller-profile selection are later work. The native/browser profile is not automatically applied to DAW-hosted MIDI. **Raw MIDI** in the browser, or native `--controller-raw`, bypasses panel mapping. Auto/all-input routing excludes MiniLab MCU/HUI, ALV and DIN Thru ports; explicitly selecting one still permits it.
+
+Reference: [Arturia’s MIDI implementation chart](https://support.arturia.com/hc/en-us/articles/6189475866396-MiniLab-3-General-Questions). Factory knob/fader traffic was captured from the attached controller; physical testing of every mapped gesture after rebuilding remains separate.
+
+## Responsive controls and audio
+
+Drag encoders vertically; hold **Shift** for four-times finer mouse travel. Knob pointers now move between detents, with smaller visual rotation per step. Firmware parameters still move by their real encoder detents; the display never invents extra parameter precision. Mouse, keyboard and MIDI actions are sent immediately; visual easing does not delay them.
+
+Native playback now starts with a **12 ms** queue rather than 50 ms, and the FM-1 panel polls at up to 120 Hz. This is a queue target, not a measured end-to-end latency promise. The queue grows if needed to prevent underruns. For an explicit device buffer, add `--buffer 128`; if unsupported the app falls back to the device default. For more headroom add `--latency 24`.
+
+The browser executes firmware/JIT in a worker and feeds a bounded audio queue, starting at four quanta (about 11.6 ms at 44.1 kHz) and adding two quanta after an underrun, up to 16. LCD and save messages travel directly to the page without passing through the audio thread. The status tooltip separates boot/firmware short quanta from actual output underruns. If an old offline build appears, close all tabs for that origin and reopen; updates wait until active sessions finish. Browser storage belongs to its hostname and port: changing port opens a separate library.
+
+## Try GR!MM
+
+The local firmware folder contains **GR!MM 2.0.2**, verified against the author’s release digest. Open `reference/firmwares/grimm-2.0.2.fwsc` using Cmd/Ctrl+O in the native app, or **Open .fwsc…** in the browser (Cmd/Ctrl+O also opens that chooser). To add it to Studio’s library, use **Import firmware**.
+
+For a persistent native setup, use a separate working file:
+
+```sh
+./target/release/fm1-live --fwsc reference/firmwares/grimm-2.0.2.fwsc \
+  --flash "$HOME/Music/FM-1/Working/grimm-2.0.2.bin"
+```
+
+Source: [GR!MM v2.0.2](https://github.com/GRiMMBIENT/grimm/releases/tag/v2.0.2). The release fixes missing factory samples after switching firmware. Its emulated six-second boot/render check passed; hardware and full feature acceptance remain pending.

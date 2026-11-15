@@ -367,6 +367,8 @@ pub fn knob(buf: &mut [u32], cx: f32, cy: f32, r: f32, angle: f32, glow: f32) {
 pub struct State<'a> {
     pub lcd: &'a [u16],
     pub enc_clicks: &'a [i32; 7],
+    /// Visual encoder position in detents; firmware still receives integer physical detents.
+    pub positions: Option<&'a [f32; 7]>,
     pub pot: u16,
     pub down: &'a [bool; 41],
     pub leds: &'a [f32; 41],
@@ -396,7 +398,7 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State, theme: &Theme) {
     // knobs: encoders turn 18 degrees a click; the pot sweeps 270 degrees
     for (i, (_, _, cx, cy, r)) in ENCS.iter().enumerate() {
         let glow = (st.turning[i] as f32 / 10.0).min(1.0);
-        knob(buf, *cx, *cy, *r, (st.enc_clicks[i] as f32 * 18.0).to_radians(), glow);
+        knob(buf, *cx, *cy, *r, (st.positions.map_or(st.enc_clicks[i] as f32, |p| p[i]) * 6.0).to_radians(), glow);
     }
     let pa = (-135.0 + 270.0 * st.pot as f32 / 1023.0).to_radians();
     knob(buf, POT.0, POT.1, POT.2, pa, (st.turning[7] as f32 / 10.0).min(1.0));
@@ -517,6 +519,7 @@ mod tests {
         let st = State {
             lcd: &lcd,
             enc_clicks: &[0; 7],
+            positions: None,
             pot: 512,
             down: &[false; 41],
             leds: &[0.0; 41],
@@ -538,6 +541,7 @@ mod tests {
         let st = State {
             lcd: &lcd,
             enc_clicks: &[0; 7],
+            positions: None,
             pot: 512,
             down: &[false; 41],
             leds: &[0.0; 41],

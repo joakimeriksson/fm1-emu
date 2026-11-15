@@ -293,3 +293,6 @@ section li { margin: 4px 0; }
 
 /* (an element the page hides stays hidden whatever its display rule) */
 [hidden] { display: none !important; }
+
+/* New controller-profile control follows the Studio compact base-8 geometry. */
+#controller-profile { min-height: 40px; padding-inline: 8px; border-radius: 8px; }

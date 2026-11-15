@@ -33,3 +33,5 @@ Native diagnostic: target/release/fm1-emu --fwsc reference/firmwares/felucca.fws
 The supplied ez-context helper can check staleness from source_refs. npm run check:context checks routing, metadata and local Markdown targets without depending on git history. Neither checker proves a document’s prose correct; manually reconcile the design doc for every visual change.
 
 Standalone macOS app packaging: tools/package_macos_app.sh. It builds the native executable, creates target/apps/FM-1 Studio.app and ad-hoc signs the bundle. Public distribution/notarization is not implied.
+
+The MiniLab diagnostic example accepts an optional monitoring duration: `cargo run --release -p fm1-live --example midi_probe -- 120`. It receives only; it never configures or writes to a controller. Studio tests now cover the realtime queue’s bounded prefill/stale-boot/pause behavior and factory controller mapping. Browser asset packaging includes the render worker/runtime, with worker URLs stamped alongside imports. Keep direct-loop WASM benchmarks separate from end-to-end worker/output-underrun verification.

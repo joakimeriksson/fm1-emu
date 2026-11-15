@@ -47,7 +47,7 @@ if (process.env.FM1_PROFILE) x.fm1_profile(1);
 const out = process.argv[4] ? [] : null;
 const durations = [], steady = [];
 const t0 = performance.now(), memoryStart = x.memory.buffer.byteLength;
-let real = 0, short = 0, steadyStart, steadyMs, steadyFrames = 0, warmupJit;
+let real = 0, short = 0, steadyShort = 0, steadyStart, steadyMs, steadyFrames = 0, warmupJit;
 // Stop on emulated time, as native does. Boot may produce no audio; never count silence
 // inserted by fm1_render as useful audio or claim the requested duration was completed.
 while (x.fm1_ms() < secs * 1000) {
@@ -62,7 +62,7 @@ while (x.fm1_ms() < secs * 1000) {
   const elapsed = performance.now() - start;
   durations.push(elapsed);
   if (steadyStart !== undefined) steady.push(elapsed);
-  if (have < 128) short++;
+  if (have < 128) { short++; if (steadyStart !== undefined) steadyShort++; }
   if (out && have) {
     const l = new Float32Array(x.memory.buffer, x.fm1_out_l(), have), r = new Float32Array(x.memory.buffer, x.fm1_out_r(), have);
     for (let i = 0; i < have; i++) out.push(Math.round(l[i] * 32768), Math.round(r[i] * 32768));
@@ -82,7 +82,7 @@ const idleMs = x.fm1_idle_ms ? x.fm1_idle_ms() : null;
 const quantumMs = 128 / 44.1, over = steady.filter(d => d > quantumMs).length;
 const result = { mhz, ahead: x.fm1_ahead ? ahead : 0, cap, requestedMs: secs * 1000, emulatedMs, wallSeconds: wall,
   realtime: emulatedMs / 1000 / wall, audioFrames: real, audioRealtime: real / 44100 / wall,
-  shortQuanta: short, renderMs: percentiles(durations), steadyRenderMs: percentiles(steady),
+  shortQuanta: short, steadyShortQuanta: steadyShort, renderMs: percentiles(durations), steadyRenderMs: percentiles(steady),
   steadyQuanta: steady.length, steadyOver: over, idleShare: idleMs === null ? null : idleMs / emulatedMs,
   steadyRealtime: steadyStart === undefined ? null : (emulatedMs - steadyMs) / (end - steadyStart),
   steadyAudioFrames: real - steadyFrames, jit: stats, warmupJit, memoryStart, memoryEnd: x.memory.buffer.byteLength,
