@@ -508,10 +508,16 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
 
 ## Hardware facts (an FM-1, 2026-11)
 
-Measured on an M-VAVE FM-1 (AC791N) by single instructions run from RAM with every register, the psr flags,
-sp and a scratch area set, and everything read back: the runs and their raw records are in
-[pi32v2-isa](https://github.com/jvitkauskas/pi32v2-isa) `hw/fm1-2026-10-24*` and `hw/fm1-2026-11-14-bit12`
-(about 14000 single-instruction cases). `tools` in the fm1-emu work tree replays them through this core.
+Measured on an M-VAVE FM-1 (AC791N). The runs, their method and their raw records are in
+[pi32v2-isa](https://github.com/jvitkauskas/pi32v2-isa)'s `hw/`:
+- `hw/fm1-2026-10-24*` and `hw/fm1-2026-11-14-bit12`: about 14000 single instructions run from RAM, with
+  every register, the psr flags, sp and a scratch area set, and everything read back.
+  `tools/hw_replay.py --isa PATH` replays them through this core.
+- `hw/fm1-2026-11-15-excprobe`: a RAM app with its own exception handler. It covers misaligned accesses,
+  divide by zero and the FPU traps, `rep` counts and interrupts, the PC limits, cycle costs, and words
+  only this decoder took (`45 00`..`48 00`, the `iff` gotos).
+- `hw/fm1-2026-11-14-bootprobe`: the application's entry state under M-VAVE's loader and m-bootloader.
+
 Where they disagree with notes above, these win.
 
 - **psr**: bit 3 N, bit 2 Z, bit 1 C (1 = no borrow), bit 0 V. Reading psr keeps the flags; pushing it
