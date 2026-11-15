@@ -98,6 +98,21 @@ Replace those paths and the keyboard name with yours. Choose a different flash f
 
 The default native input accepts all MIDI inputs. Use `--midi none` to disable them. Browser and native libraries do not automatically synchronize.
 
+### Change firmware in the standalone window
+
+1. Click the emulator window so it has keyboard focus.
+2. Press **F4**. On a Mac keyboard, use **Fn-F4** if F4 invokes a system feature.
+3. Select an original **.fwsc** package in the file picker. Cancel keeps the current firmware.
+4. The old run closes normally and the selected firmware starts in its place. Audio/MIDI connections are reopened.
+
+Changing firmware restarts the instrument and loses unsaved RAM edits. **The current native picker launch does not automatically create a persistent working-flash file.** For reliable native saving, launch from Terminal with the explicit `--flash` path shown above, save inside the firmware, then quit normally. Keep a different working-flash file for each firmware/setup. F4 preserves MIDI/channel/clock options but deliberately does not carry a flash file into another firmware, so use the explicit Terminal command when the destination needs persistent flash too.
+
+### MiniLab 3 on macOS
+
+For musical keys, choose the input named **Minilab3 MIDI**, rather than MCU/HUI, ALV or DIN THRU. Start with channel 1 for Felucca's first part. A focused computer-keyboard panel is not required for USB MIDI input.
+
+The updated native app detects newly connected inputs and reconnections about twice per second. The old running executable must be restarted once to use this fix. When launching explicitly, add `--midi "Minilab3 MIDI"`; this prevents the DAW-control ports from being mixed into performance input. If firmware is generative, consult its manual before expecting ordinary piano-key behavior.
+
 ## Use a DAW
 
 The VST3 build is at `target/plugin/FM-1.vst3`. It has **not** been automatically installed. If installing it yourself, first quit the DAW and preserve any existing FM-1 plugin; development builds currently use upstream-compatible identifiers.
@@ -161,3 +176,45 @@ Recording controls, sample/patch editors, MIDI-file playback, full volatile reca
 ## Physical hardware
 
 Hardware flashing, full-device backup/restore and live companion editing are planned but not verified or exposed as completed Studio workflows. Emulator imports do not perform those operations. Keep physical-device installation instructions separate until the companion has been implemented and tested.
+
+## Audacity 4 and the macOS verification warning
+
+Audacity 4 is an audio editor with VST effect support; our FM-1 bundle is an instrument. Its standard VST instrument workflow is not supported in Audacity. Use the standalone emulator to make audio, then import a WAV into Audacity, or use an instrument host such as Ableton for MIDI performance.
+
+A warning that Apple cannot verify the plugin is a separate macOS verification issue. A local ad-hoc signature can be structurally valid without a Developer ID/notarization. A downloaded bundle may also carry quarantine attributes. Do not mistake this warning for an antivirus finding, or assume a valid signature proves a downloaded plugin trustworthy.
+
+On 2026-11-15 the installed system-wide FM-1 bundle had a valid ad-hoc signature and quarantine attributes. Audacity recorded it as Error with errorCode -3; this code's meaning was not established. The installed wrapper and embedded CLAP hashes differed from this project's local build. We did not remove quarantine, change Gatekeeper or replace that installation. Direct Audacity instrument use remains unsupported by the published host documentation, not a completed acceptance test.
+
+References: [Audacity plugin support](https://plugins.audacityteam.org/) and [Audacity 4 transition guide](https://www.audacityteam.org/manual/new-in-audacity-4/audacity-3-to-4-transition-guide/).
+
+## macOS unblocking: project-specific files only
+
+For a trusted local build, first try opening the standalone app, then System Settings → Privacy & Security → Open Anyway if offered. This creates an exception for that item. See https://support.apple.com/en-us/102445.
+
+For trusted downloaded builds, removing com.apple.quarantine from the exact app/plugin bundle is an alternative. Recursive removal includes the embedded CLAP in our VST3/AU bundles. This does not sign/notarize the software or verify its safety. Quit the host before changing installed plugins, then reopen/rescan. Do not disable Gatekeeper globally or recursively unblock the entire project, Downloads, or plugin directory.
+
+Relevant local artifacts: target/apps/FM-1 Studio.app; target/release/fm1-live; target/release/fm1-emu; target/plugin/FM-1.vst3; target/plugin/FM-1.component; target/plugin/FM-1.clap. Installed copies, if present, require their own item-specific treatment under the user's Library/Audio/Plug-Ins or /Library/Audio/Plug-Ins. System-wide copies may need administrator privileges. Firmware packages, saves and web source files do not need executable approval.
+
+## Native HYP1 launch and sound comparison
+
+From the project root:
+
+```sh
+mkdir -p "$HOME/Music/FM-1/Working"
+./target/release/fm1-live \
+  --fwsc reference/firmwares/hyp1-1.5.65.fwsc \
+  --mhz 240 --midi all \
+  --flash "$HOME/Music/FM-1/Working/hyp1-1.5.65.bin"
+```
+
+The raw web link with mhz=100 underclocks the emulated CPU relative to nominal 240 MHz. Try mhz=240, using the same exact firmware and piece/settings before comparing. The catalog currently pins HYP1 1.5.62; importing 1.5.65 directly avoids silently comparing different versions. The maker's web player compiles firmware source for its browser runtime; ours executes CPU instructions. Sound agreement between those paths needs testing, not assumption.
+
+The reported distorted/wrong sound is an OPEN fidelity issue. Native ten-second runs of the same 1.5.65 package at 100/240 MHz both produced audio without 16-bit clipping; this does not rule out underruns, CPU/peripheral errors, different initial state or synthesis differences. Neither boot success nor zero clipping is proof of musical correctness. No matched-state recording comparison with the author's player has passed yet.
+
+### HYP1 keeps sounding after releasing a key
+
+HYP1 normally generates its own music; its ordinary key mode edits the scale, rather than acting like a conventional piano. Open Pad (ENV), Drone (LFO), or Acid (ARP), then hold SEL and press ENV to put that voice in BY HAND mode. The voice's keys then play it manually. Repeat the combination to return it to generative mode. Other generated voices continue; use PLAY to stop the arrangement. Envelope release and effects can leave a tail after note-off.
+
+With the MiniLab connected here, diagnostic capture confirmed channel-1 note-on and note-off messages arriving at the Mac. This establishes controller transmission; it does not establish every HYP1 MIDI route's behavior. If a manual voice remains stuck, distinguish it from other generated voices before changing firmware or controller settings.
+
+The native F4 picker now fires once after releasing F4, avoiding repeated dialogs from held/repeated key events. Restart the application after rebuilding to use this change.
