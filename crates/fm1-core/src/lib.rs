@@ -2324,7 +2324,7 @@ impl Cpu {
                     "++R=R" => { let b = r(self, 1)?; self.regs[b] = self.regs[b].wrapping_add(self.regs[r(self, 2)?]); (self.regs[b], None) }
                     _ => return Ok(None),
                 };
-                // a post-increment load into its own base leaves the loaded value (an FM-1, 2026-11)
+                // a post-increment load into its own base leaves the loaded value (an FM-1: pi32v2-isa hw/fm1-2026-10-24-v2)
                 let x = ld(bus, w, signed, addr);
                 if let Some((b, inc)) = post {
                     self.regs[b] = self.regs[b].wrapping_add(inc);
@@ -2345,7 +2345,7 @@ impl Cpu {
                 let known = matches!(addr_txt, "R+#i" | "sp+#i" | "sp" | "R+R" | "R+R<<#i" | "R++=#i" | "R++=R" | "++R=#i" | "++R=R" | "--sp");
                 let known = known && matches!(src, "R" | "#i" | "#h" | "rets");
                 // a pre-increment's new base is written after the source is read: a store of the
-                // base writes its old value (an FM-1, 2026-11)
+                // base writes its old value (an FM-1: pi32v2-isa hw/fm1-2026-10-24-v2)
                 let mut pre: Option<(usize, u32)> = None;
                 let (addr, post): (u32, Option<(usize, u32)>) = if !known { (0, None) } else { match addr_txt {
                     "R+#i" => { n = 2; (self.regs[r(self, 0)?].wrapping_add(v(self, 1)?), None) }
@@ -3389,8 +3389,8 @@ impl Cpu {
                 // `r2 = 0; rep 2 r2 {…}` unguarded for the empty overlay.
                 // One rep runs at most 32 times: a count c of 32 or more runs (c & 31) + 1 times
                 // and leaves c minus that in the register, which is why the compiler follows a
-                // register rep with `if (rN != 0) goto` it (an FM-1, 2026-11: counts 0, 31, 32,
-                // 33, 63, 64, 255, 256, 0x80000000 and 0xffffffff; docs/isa-notes.md).
+                // register rep with `if (rN != 0) goto` it (an FM-1: pi32v2-isa hw/fm1-2026-11-15-excprobe, groups 4
+                // and 5, counts 0 to 0xffffffff; docs/isa-notes.md).
                 let raw = raw_v(insn);
                 let n = 2 * (((raw >> 4) & 0xf) as u32 + 1);
                 self.rep_start = next_pc;
@@ -3456,7 +3456,7 @@ impl Cpu {
                 let base = match m.base { Some(b) => self.regs[b], None => self.sp };
                 let step = match m.index { Some(i) => self.regs[i] << m.shift, None => m.off as u32 };
                 let addr = if m.post { base } else { base.wrapping_add(step) };
-                // a store is two word stores with the base update between them (an FM-1, 2026-11:
+                // a store is two word stores with the base update between them (an FM-1, pi32v2-isa hw/fm1-2026-10-24-v2:
                 // with the base in the pair, the low word is the old base, the high word the new);
                 // a load into the pair wins over the update
                 let vlo = self.regs[lo];
@@ -4419,7 +4419,7 @@ fn decode_pair_mem(raw: u64) -> PairMem {
         PairMem { pair, store, base, off, index: None, shift: 0, pre: false, post: true }
     } else {
         let index = Some(((raw >> 24) & 0xf) as usize);
-        // bit 19 (second-word bit 3) scales the index by 8: `d[rB+rI<<3]` (an FM-1, 2026-11)
+        // bit 19 (second-word bit 3) scales the index by 8: `d[rB+rI<<3]` (an FM-1: pi32v2-isa hw/fm1-2026-10-24-v2)
         let shift = if (raw >> 19) & 1 != 0 { 3 } else { 0 };
         PairMem { pair, store, base, off: 0, index, shift, pre: raw & 6 == 4, post: raw & 6 == 6 }
     }
@@ -6024,7 +6024,7 @@ mod tests {
     #[test]
     fn rep_runs_at_most_32_times() {
         // `02 03` rep 2 r2 { `c3 21` r3 += 1 }, then a nop: (count, body runs, r2 after) as an FM-1
-        // ran them (2026-11, docs/isa-notes.md)
+        // ran them (pi32v2-isa hw/fm1-2026-11-15-excprobe, groups 4 and 5)
         for (count, runs, left) in [(31u32, 31u32, 0u32), (32, 1, 31), (33, 2, 31), (63, 32, 31), (64, 1, 63), (255, 32, 223),
             (256, 1, 255), (0x8000_0000, 1, 0x7fff_ffff), (0xffff_ffff, 32, 0xffff_ffdf)] {
             let mut ram = FlatRam::new(vec![0x02, 0x03, 0xc3, 0x21, 0, 0, 0, 0, 0, 0]);
@@ -6273,7 +6273,7 @@ mod tests {
         assert_eq!(add_flags(0xffff_ffff, 1, 0).1, 4 | 2, "zero with a carry: Z and C");
     }
 
-    /// Memory accesses as an FM-1 runs them (pi32v2-isa hw/fm1-2026-10-24-v2, 2026-11): the scaled
+    /// Memory accesses as an FM-1 runs them (pi32v2-isa hw/fm1-2026-10-24-v2): the scaled
     /// pair index, stores of a high half, a store of the base it updates, a load into it, and a pair
     /// store whose pair holds its base.
     #[test]

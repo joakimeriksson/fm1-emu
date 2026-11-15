@@ -160,7 +160,7 @@ stub hacks were removed.
   2*(bits(4,7)+1). `rep N #k {` (`8x xx`): same N, k = bits(8,12)+1.
   The block is the N bytes after the rep; it runs k / rR times. Count 0
   skips the block (the CRT runs `r2 = 0; rep 2 r2 {…}` unguarded for the
-  empty overlay). **Measured on an FM-1 (2026-11, "Hardware facts" below):
+  empty overlay). **Measured on an FM-1 ("Hardware facts" below):
   a count of 0 does skip the body, and one `rep` runs at most 32 times**: a
   count c of 32 or more runs (c & 31) + 1 times and leaves c minus that in
   rR, and the compiler's `if (rR != 0) goto rep` after every register-count
@@ -263,7 +263,7 @@ offset; the register-pair store used base = bits(24,27)).
   register at the lowest address; `[rN++]` also advances the base.
 - Shift counts: a zero field prints as 32. `testset b[R]`: cc = (old != 0)
   and byte |= 0x80 (SDK spins `testset; ifeq goto retry`). **Wrong on an FM-1
-  (2026-11, below): the byte becomes 0xFF and psr bits 3..0 take the old byte's
+  (below): the byte becomes 0xFF and psr bits 3..0 take the old byte's
   bits 3..0**, so a held lock (0xFF) sets Z and `ifeq` retries. `tbb/tbh [R]`:
   pc = next_pc + 2*table[R] with the table right after the instruction
   (tbh entries are halfwords, R pre-scaled). `cnum` = core id.
@@ -381,7 +381,7 @@ coefficients did. Probes `probes/softfloat/*.c` (`run.sh`; 64-bit add / sub / co
 shift / multiply, soft double) compare the emulator with the host.
 
 - **Flags** (`Cpu::flags`, psr bits 0..3): N, C (set = no borrow, as on ARM), Z (assumed),
-  V. **Measured on an FM-1 (2026-11, below): bit 3 is N, bit 2 Z, bit 1 C, bit 0 V; this note
+  V. **Measured on an FM-1 (below): bit 3 is N, bit 2 Z, bit 1 C, bit 0 V; this note
   had N and V the other way round, and most ALU forms, not only add / subtract, write N and Z.** clang's 64-bit code reads them right after the low-word add / subtract: `R = R + R + c`,
   `R = R - R - !c`, and `rX = psr` then `slt` = N ^ V (bits 0, 3) / `ult` = !C (bit 1).
   psr used to read 0 and the carry forms assumed C clear, so every 64-bit add lost its
@@ -477,7 +477,7 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
 - **Pair extract** `de e1`: rD = rQ >> n (s|u); d = bits(28,31), q = bits(21,23), n = bits(16,19) |
   bits(24,25) << 4, signed = bit27. `df e1` by a register (bits 24-27; signed = bit16). Saturated
   into 32 bits (assumed: clang uses it only for `__builtin_pi32v2_shfms64` / `shfmu64`, never for
-  a plain `(int)(x >> n)`, which it does with a pair shift). **Measured (2026-11): saturated, and
+  a plain `(int)(x >> n)`, which it does with a pair shift). **Measured on an FM-1 (below): saturated, and
   the register count is its low 8 bits (64..255 shift everything out).**
 - **`<<<` saturates** (`qasl`): the 2-byte `xx a0` / `SD 1a` with bit 3, `c0 e1` op 2 (bits 25-27),
   `c8 e1` sub-op 1. Plain C shifts compile to `<<`; it used to run as one.
@@ -489,7 +489,7 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
   rD = rA & ~(1 << rB) on all registers.
 - Assumed, no C equivalent: `80 e1 01` cls = leading bits equal to the sign, sign not counted;
   `b0 e0` rD += rS (brev), a bit-reversed add. `80 e1 02` zcmp is left undecoded (unknown).
-  **Measured (2026-11, below): cls counts the sign bit too (cls(0) = 32); the brev add is
+  **Measured on an FM-1 (below): cls counts the sign bit too (cls(0) = 32); the brev add is
   rev(rev(a) + rev(b)) and writes all four flags; zcmp is the sign, -1 / 0 / 1.**
   The six 64-bit multiply builtins do not compile (the backend cannot select them).
 - These decode before the table: its classes fit only corpus registers or had no semantics
@@ -506,7 +506,7 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
   DPRAM pairs, fpu/acc classes — all still Unsupported (halt with class
   name, which is the intended discovery path).
 
-## Hardware facts (an FM-1, 2026-11)
+## Hardware facts (an FM-1)
 
 Measured on an M-VAVE FM-1 (AC791N). The runs, their method and their raw records are in
 [pi32v2-isa](https://github.com/jvitkauskas/pi32v2-isa)'s `hw/`:
