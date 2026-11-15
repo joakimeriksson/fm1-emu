@@ -252,6 +252,32 @@ fn chip_key(blob: &[u8]) -> u16 {
     key
 }
 
+/// The chip key of a whole flash image as installed (the boot area's `isd_config.ini`, as
+/// `unpack` finds it; one whose CRC checks first). None: no such file.
+pub fn flash_key(flash: &[u8]) -> Option<u16> {
+    let (mut key, mut unchecked) = (None, None);
+    let mut o = 32;
+    while o + 32 <= flash.len() && key.is_none() {
+        let mut e = [0u8; 32];
+        e.copy_from_slice(&flash[o..o + 32]);
+        unmask(&mut e, 0xffff);
+        let h = head(&e, 0);
+        if h.name == "isd_config.ini" && h.offset + 34 <= flash.len() {
+            let k = chip_key(&flash[h.offset..h.offset + 32]);
+            if crc16(&flash[h.offset..h.offset + 32]) == u16le(flash, h.offset + 32) {
+                key = Some(k);
+            } else {
+                unchecked = Some(k);
+            }
+        }
+        if h.last {
+            break;
+        }
+        o += 32;
+    }
+    key.or(unchecked)
+}
+
 fn unscramble(buf: &mut [u8], from: usize, len: usize, base: usize, key: u16) {
     let mut i = 0;
     while i < len {
@@ -642,6 +668,35 @@ mod tests {
         assert_eq!(ok(styles.clone(), 0x4000), None, "the app area");
         assert_eq!(ok(styles.clone(), 0xdf000), None, "past the data area");
         assert_eq!(resources_n(&package(&[(0, 0, flash)]), 20), None, "no entry, no region");
+    }
+
+    /// The chip key found in a whole flash image (its isd_config.ini), and the boot-parameter
+    /// block as an FM-1's loaders hand it over: chip key, trim 0xF80A, MAC all 0xFF.
+    #[test]
+    fn the_boot_block_has_the_chip_key() {
+        let mut flash = vec![0xffu8; 0x1000];
+        let mut e = [0u8; 32];
+        e[4..8].copy_from_slice(&0x200u32.to_le_bytes());
+        e[14] = 1; // the last entry
+        e[16..30].copy_from_slice(b"isd_config.ini");
+        unmask(&mut e, 0xffff);
+        flash[32..64].copy_from_slice(&e);
+        let blob: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        flash[0x200..0x220].copy_from_slice(&blob);
+        let crc = crc16(&blob);
+        flash[0x220..0x222].copy_from_slice(&crc.to_le_bytes());
+        let key = chip_key(&blob);
+        assert_eq!(flash_key(&flash), Some(key));
+        assert_eq!(flash_key(&vec![0xffu8; 0x1000]), None);
+
+        use fm1_core::Bus;
+        let mut soc = crate::Soc::new(512 * 1024, vec![0; 16]);
+        let at = crate::RAM_BASE + 0x7fc00;
+        assert_eq!(crate::write_boot_info(&mut soc, at, &flash), at);
+        let mut w = |k: u32| soc.read32(at + 4 * k);
+        assert_eq!((w(0), w(1), w(2)), (at + 24, 0x4000, crate::XIP_BASE));
+        assert_eq!(w(3), key as u32 | 0xf80a << 16, "chip key, trim");
+        assert_eq!((w(4), w(5)), (u32::MAX, u32::MAX), "no MAC");
     }
 
     #[test]

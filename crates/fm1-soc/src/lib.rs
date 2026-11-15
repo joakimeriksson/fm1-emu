@@ -1647,6 +1647,9 @@ pub fn stock_boot(soc: &mut Soc, flash: &[u8], params: u32, board: Board) -> u32
     write_boot_info(soc, params, flash)
 }
 
+/// The trim value in the boot-parameter block: the one an FM-1 had (`write_boot_info`).
+const BOOT_TRIM: u32 = 0xf80a;
+
 /// The boot-parameter block the SPL (uboot.boot) hands the stock app in r0, as the SDK's
 /// `BOOT_DEVICE_INFO` (include_lib/system/boot.h) and the SPL's own code at 0x31B2..0x3200
 /// build it: fs_info (-> the flash header copied right after the struct), sfc_base_addr (the
@@ -1654,6 +1657,10 @@ pub fn stock_boot(soc: &mut Soc, flash: &[u8], params: u32, board: Board) -> u32
 /// 8-byte MAC, then the 32-byte flash header unmasked (CRC-16 keystream from 0xFFFF; its CRC
 /// checks). The app copies parts of it to 0x01C7FD50 (boot_hwinfo_save) and its NOR file
 /// system finds the flash from sfc_base_addr. Writes the block at `at` (RAM); returns `at`.
+///
+/// As an FM-1's loaders (M-VAVE's uboot.boot 015 and m-bootloader 2.3) left it at the app's
+/// entry (pi32v2-isa hw/fm1-2026-11-14-bootprobe): chip_id is the chip key (the flash's, `flash_key`:
+/// 0x980F there), trim_value that unit's 0xF80A, the MAC all 0xFF (none programmed).
 pub fn write_boot_info(soc: &mut Soc, at: u32, flash: &[u8]) -> u32 {
     let mut head = [0u8; 32];
     head.copy_from_slice(&flash[..32]);
@@ -1662,7 +1669,8 @@ pub fn write_boot_info(soc: &mut Soc, at: u32, flash: &[u8]) -> u32 {
         *b ^= key as u8;
         key = (key << 1) ^ if key & 0x8000 != 0 { 0x1021 } else { 0 };
     }
-    let words = [at + 24, 0x4000, XIP_BASE, 0, 0, 0];
+    let chip = fwsc::flash_key(flash).unwrap_or(0) as u32;
+    let words = [at + 24, 0x4000, XIP_BASE, chip | BOOT_TRIM << 16, u32::MAX, u32::MAX];
     for (i, w) in words.iter().enumerate() {
         soc.write32(at + 4 * i as u32, *w);
     }
