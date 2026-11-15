@@ -81,7 +81,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     ResizeObserver: class { observe() {} }, scrollY: 0, Option: Element, navigator: {},
     fetch: async url => ({ json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : cat,
       arrayBuffer: async () => new ArrayBuffer(0) }),
-    WebAssembly: { instantiate: async () => ({ instance: { exports: { panel_board() {}, panel_width: () => 100, panel_height: () => 100 } } }) },
+    WebAssembly: { instantiate: async () => ({ instance: { exports: { panel_board() {}, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1, panel_theme_name: () => 0, panel_theme() {}, memory: { buffer: new ArrayBuffer(256) } } } }) },
     requestAnimationFrame() {}, addEventListener() {}, AudioContext, AudioWorkletNode,
     matchMedia: () => ({ matches: false }), confirm: () => true,
     fetchPackage: async f => ({ bytes: new Uint8Array(960).fill(f.id === 'a' ? 1 : 2), url: f.package }),
