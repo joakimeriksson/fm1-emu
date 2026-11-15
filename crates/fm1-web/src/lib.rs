@@ -474,8 +474,8 @@ pub extern "C" fn fm1_lcd_revision() -> u32 {
     machine().map_or(0, |m| m.soc.lcd.revision)
 }
 
-/// The LEDs as an eye sees them (41 floats, fm1_soc's `led_shown`; SMK-37: its 19 button LEDs'
-/// on-fractions since the last call, first).
+/// The LEDs as an eye sees them (41 floats, fm1_soc's `led_shown`). SMK-37: its 19 button LEDs
+/// first, each its on-fraction since the last call.
 #[no_mangle]
 pub extern "C" fn fm1_leds() -> *const f32 {
     #[allow(static_mut_refs)]

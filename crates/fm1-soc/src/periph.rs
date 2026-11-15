@@ -268,7 +268,6 @@ pub struct Periph {
     led_pend: u64,
     led_last: u64,
     led_since: u64,
-    /// Each LED's lit fraction as `led_shown` averages it.
     led_avg: [f32; 41],
     pub keys_down: [bool; 41],
     /// The keys' force (the module notes): a ramp from `from` to `to` over `dur` cycles from `t0`
@@ -1257,7 +1256,7 @@ impl Periph {
         std::array::from_fn(|i| self.led_acc[i] as f32 / span)
     }
 
-    /// The fraction of time each LED was lit since the last call (of this or `led_shown`).
+    /// The fraction of time each LED was lit since the last call.
     pub fn led_take(&mut self) -> [f32; 41] {
         let out = self.led_peek();
         self.led_since = self.cycles;
@@ -1628,19 +1627,19 @@ mod tests {
         assert_eq!(p.led_take()[5], 0.0, "the take did reset it");
     }
 
-    /// LED 5 lit `lit(t0, t1)` cycles of each 16 ms frame for 2.5 s: (its lit fraction, its
-    /// `led_shown`) for each frame after the first 0.5 s.
+    /// LED 5 lit `lit(t0, t1)` cycles of each 16 ms frame: (its lit fraction, its `led_shown`)
+    /// for each frame once the average has settled.
     fn led_frames(lit: impl Fn(u64, u64) -> u64) -> Vec<(f32, f32)> {
         let mut p = Periph::default();
-        let frame = p.hz * 16 / 1000;
-        (0..156)
+        let frame = p.cycle_of_ms(16);
+        (0..2500 / 16)
             .map(|_| {
                 p.led_acc[5] = lit(p.cycles, p.cycles + frame);
                 p.cycles += frame;
                 p.led_last = p.cycles;
                 (p.led_acc[5] as f32 / frame as f32, p.led_shown()[5])
             })
-            .skip(31)
+            .skip(500 / 16)
             .collect()
     }
 
