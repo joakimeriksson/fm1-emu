@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Zip the plugin tools/build_plugin.sh built (target/plugin) for a release:
-# target/plugin/release/fm1-plugin-<version>-macos-arm64.zip with the AU, the VST3, the CLAP and
+# Zip the plugin `UNIVERSAL=1 tools/build_plugin.sh` built (target/plugin) for a release:
+# target/plugin/release/fm1-plugin-<version>-macos-universal.zip with the AU, the VST3, the CLAP and
 # an install guide, and the release's notes beside it (notes.md). With APPLE_ID, APPLE_TEAM_ID
 # and APPLE_APP_PASSWORD set (and the bundles signed with a Developer ID), Apple notarizes it and
 # the tickets are stapled to the bundles, so it installs without warnings; otherwise the guide
@@ -10,12 +10,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 out=target/plugin
 version=$(sed -nE 's/^version = "(.*)"/\1/p' crates/fm1-plugin/Cargo.toml | head -1)
-name=fm1-plugin-$version-macos-arm64
+name=fm1-plugin-$version-macos-universal
 rel=$out/release
 rm -rf "$rel"
 mkdir -p "$rel/$name"
 for b in FM-1.component FM-1.vst3 FM-1.clap; do
-  [ -d "$out/$b" ] || { echo "no $out/$b: run tools/build_plugin.sh first" >&2; exit 1; }
+  lipo "$out/$b/Contents/MacOS/FM-1" -verify_arch arm64 x86_64 ||
+    { echo "$out/$b: missing or not universal; run UNIVERSAL=1 tools/build_plugin.sh first" >&2; exit 1; }
 done
 
 notarized=
@@ -46,7 +47,7 @@ cat > "$rel/$name/INSTALL.txt" <<TXT
 FM-1 plugin $version: the M-VAVE FM-1 emulator as an instrument (AU, VST3, CLAP)
 https://github.com/joakimeriksson/fm1-emu
 
-For Macs with Apple silicon (M1 or later), macOS 11 or later.
+For Macs with Apple silicon or Intel, macOS 11 or later.
 
 1. Copy the plug-ins to your plug-in folders (create the folders that are missing):
      FM-1.component  ->  ~/Library/Audio/Plug-Ins/Components/   (AU: Logic, GarageBand)
@@ -78,7 +79,7 @@ The M-VAVE FM-1 emulator as an **instrument plugin**: **AU** (Logic, GarageBand)
 - The project keeps the firmware and the patches it saves.
 - The emulator's lead over the DAW is reported as latency, so notes land where they were placed.
 
-**Download:** \`$name.zip\`, for Macs with Apple silicon (macOS 11 or later). Its \`INSTALL.txt\`
+**Download:** \`$name.zip\`, for Macs with Apple silicon or Intel (macOS 11 or later). Its \`INSTALL.txt\`
 says where each file goes.$( [ -n "$notarized" ] && echo " Signed and notarized." || printf '\n\nThis build is **not signed** with an Apple Developer ID, so macOS blocks it until it is\nallowed. After copying the plug-ins, run once in Terminal:\n\n```sh\nxattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/FM-1.component ~/Library/Audio/Plug-Ins/VST3/FM-1.vst3 ~/Library/Audio/Plug-Ins/CLAP/FM-1.clap\n```' )
 
 It passes Apple's AU validator and Steinberg's VST3 validator. It has been tried in GarageBand

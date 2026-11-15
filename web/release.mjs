@@ -63,7 +63,7 @@ export function parseNotes(md, version) {
     const m = /^\|\s*`([^`]+)`\s*\|(.*)\|\s*$/.exec(l);
     if (!m) continue;
     const file = m[1];
-    const p = /-(macos|windows|linux)-(arm64|x86_64)\./.exec(file);
+    const p = /-(macos|windows|linux)-(arm64|x86_64|universal)\./.exec(file);
     downloads.push({
       file, url: `${REPO}/releases/download/v${version}/${file}`,
       kind: file.startsWith("fm1-plugin-") ? "plugin" : file.startsWith("fm1-emu-") ? "live" : "other",
@@ -108,7 +108,7 @@ export function readRelease(root) {
 }
 
 const OS = { windows: "Windows", macos: "macOS", linux: "Linux" };
-const ARCH = { macos: { arm64: "Apple silicon", x86_64: "Intel" }, any: { arm64: "ARM64", x86_64: "x86-64" } };
+const ARCH = { macos: { arm64: "Apple silicon", x86_64: "Intel", universal: "Apple silicon and Intel" }, any: { arm64: "ARM64", x86_64: "x86-64" } };
 const GROUPS = [
   ["plugin", "DAW plugin", "AU, VST3 and CLAP"],
   ["live", "fm1-live, standalone", "a firmware in a window, with audio and MIDI in"],

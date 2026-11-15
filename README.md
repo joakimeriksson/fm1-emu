@@ -87,7 +87,7 @@ Its firmwares, each with its author: [docs/FIRMWARES.md](docs/FIRMWARES.md#the-s
 
 ## On your computer
 
-**Download** `fm1-live` for macOS (Apple silicon) or Linux (ARM64, x86-64) from
+**Download** `fm1-live` for macOS (Apple silicon and Intel) or Linux (ARM64, x86-64) from
 [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest), and play a firmware
 package: `./fm1-live --fwsc felucca.fwsc`. Or build it from a checkout:
 
@@ -171,12 +171,12 @@ other synth:
   the heaviest at about 1.5x.
 
 **Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest):
-a zip for Macs with Apple silicon (M1 or later; AU, VST3 and CLAP) and one for Windows (x86-64;
+a zip for Macs with Apple silicon or Intel (AU, VST3 and CLAP) and one for Windows (x86-64;
 VST3 and CLAP). Each has an `INSTALL.txt` that says where the files go. Until a release is signed
 with an Apple Developer ID, macOS blocks it until you allow it, with one Terminal command that
 `INSTALL.txt` gives; the Windows build is unsigned too, and Windows hosts load it as it is.
 
-**Build and install it yourself (macOS, Apple silicon).** You need Rust, CMake and Ninja
+**Build and install it yourself (macOS).** You need Rust, CMake and Ninja
 (`brew install cmake ninja`), then:
 
 ```sh
