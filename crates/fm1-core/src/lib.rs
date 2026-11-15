@@ -1490,6 +1490,26 @@ impl Cpu {
         (outside, trip)
     }
 
+    /// What the instruction at `pc` does with the psr flags on the block path (fm1-live's
+    /// FM1_FLAG_AUDIT, which steps the interpreter and checks every flag read against the writer
+    /// it got its flags from).
+    #[doc(hidden)]
+    pub fn flag_audit<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Option<FlagUse> {
+        let slot = self.fetch_at(bus, pc).ok()?;
+        let (line, x) = (self.icache[slot], self.icache_x[slot]?);
+        let insn = decode_any(x.win, pc).ok()?;
+        let sets = line.fast.is_some_and(|f| f.sets_flags());
+        let s = x.pre.syntax;
+        Some(FlagUse {
+            reads: reads_psr_flags(&insn),
+            writes: sets || (line.fast.is_none() && writes_psr_flags(s)),
+            dropped: sets && !line.careful && line.fast.is_some_and(jit_drops_flags),
+            psr_push: s.starts_with("[--sp] = {psr"),
+            psr_pop: s.starts_with("{psr") && s.ends_with("= [sp++]"),
+            syntax: s,
+        })
+    }
+
     /// Fetch/decode/execute one instruction (`step_one`), and with `cost_model` its cost.
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         if self.isa_hist.is_some() {
@@ -6891,6 +6911,48 @@ const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 /// followed to its target too (a `[--sp] = {psr, ...}` there pushes the flags: compiled, stale
 /// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
 /// end a path. A reader that is never reached costs only speed.
+/// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
+/// `ifne` (`flags_read_later`'s readers)?
+fn reads_psr_flags(i: &Instruction) -> bool {
+    let s = i.entry.syntax;
+    s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
+        || s.starts_with("ifeq") || s.starts_with("ifne")
+}
+
+/// What an instruction does with the psr flags as the block path runs it (`Cpu::flag_audit`).
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct FlagUse {
+    /// it reads them (`flags_read_later`'s readers)
+    pub reads: bool,
+    /// it writes them: a micro-op that `Fast::sets_flags`, or an instruction without one that does
+    /// (`writes_psr_flags`)
+    pub writes: bool,
+    /// it is a micro-op that writes them, off the careful path (no `flags_live`), and one a JIT
+    /// compiles inline without them (`jit_drops_flags`): compiled code leaves the flags as they were
+    pub dropped: bool,
+    /// a push of psr (`[--sp] = {psr, ...}`) / a pop into it: the flags saved and put back
+    pub psr_push: bool,
+    pub psr_pop: bool,
+    pub syntax: &'static str,
+}
+
+/// Does an instruction without a micro-op write the psr flags: a flag producer (`is_flag_producer`),
+/// `testset`, a carry add or subtract, a write or pop of psr?
+fn writes_psr_flags(s: &str) -> bool {
+    is_flag_producer(s) || s.starts_with("testset") || s.contains("+ c") || s.contains("- !c") || s.starts_with("psr =")
+        || (s.starts_with("{psr") && s.ends_with("= [sp++]"))
+}
+
+/// Does a JIT compile this flag-writing micro-op inline, without the flags? The others (the psr
+/// pushes and pops, `AddC`, `Swap`, fmin / fmax, `Raw` but route 22 on AArch64) run in the executor
+/// in all three, which writes them.
+fn jit_drops_flags(f: Fast) -> bool {
+    matches!(f, Fast::AddRI { .. } | Fast::ShlI { .. } | Fast::SarI { .. } | Fast::Alu3 { .. } | Fast::Alu3I { .. }
+        | Fast::Alu2 { .. } | Fast::Alu2I { .. } | Fast::A4 { .. } | Fast::Ext { .. } | Fast::BitExt { .. }
+        | Fast::BitIns { .. } | Fast::Un { .. } | Fast::Div { .. } | Fast::Raw { route: 22, .. })
+}
+
 fn flags_read_later<B: Bus>(bus: &mut B, pc: u32) -> bool {
     let (mut todo, mut visits) = (vec![(pc, FLAG_SCAN)], 0);
     while let Some((mut pc, mut left)) = todo.pop() {
@@ -6899,9 +6961,7 @@ fn flags_read_later<B: Bus>(bus: &mut B, pc: u32) -> bool {
             visits += 1;
             let win = (bus.fetch32(pc + 4) as u64) << 32 | bus.fetch32(pc) as u64;
             let Ok(i) = decode_any(win, pc) else { break };
-            let s = i.entry.syntax;
-            if s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
-                || s.starts_with("ifeq") || s.starts_with("ifne") {
+            if reads_psr_flags(&i) {
                 return true;
             }
             if is_flag_producer(canon_syntax(i.entry)) {
