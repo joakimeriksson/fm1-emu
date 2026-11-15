@@ -17,7 +17,14 @@ mkdir -p "$rel/$name"
 for b in FM-1.component FM-1.vst3 FM-1.clap; do
   lipo "$out/$b/Contents/MacOS/FM-1" -verify_arch arm64 x86_64 ||
     { echo "$out/$b: missing or not universal; run UNIVERSAL=1 tools/build_plugin.sh first" >&2; exit 1; }
+  # every bundle says the release's version (0.5.1's AU and VST3 said 0.1.0, the wrapper's own)
+  v=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$out/$b/Contents/Info.plist")
+  [ "$v" = "$version" ] || { echo "$out/$b is version $v, not $version: rebuild (UNIVERSAL=1 tools/build_plugin.sh)" >&2; exit 1; }
 done
+# the AU's component version, what hosts compare to decide whether to scan it again: 0xMMmmpp
+IFS=. read -r ma mi pa <<<"$version"
+auv=$(/usr/libexec/PlistBuddy -c 'Print :AudioComponents:0:version' "$out/FM-1.component/Contents/Info.plist")
+[ "$auv" = $(( (ma << 16) | (mi << 8) | pa )) ] || { echo "the AU's component version is $auv, not $version's" >&2; exit 1; }
 
 notarized=
 if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
