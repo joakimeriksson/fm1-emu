@@ -5231,6 +5231,73 @@ mod tests {
         assert!(cpu.icache[slot].flags_live && cpu.icache[slot].careful, "the add stays on the careful path");
     }
 
+    /// A micro-op from every class of the ISA table (`fetch` at 0 on random operand bits), with the
+    /// syntax it was decoded from.
+    fn corpus_fasts() -> Vec<(Fast, &'static str, u64)> {
+        let (mut x, mut out) = (0x2545_f491_4f6c_dd1du64, Vec::new());
+        // (one core: its instruction cache is large, and `fetch` decodes again when the word differs)
+        let mut cpu = Cpu::new(0);
+        for e in fm1_isa::ISA {
+            for _ in 0..20 {
+                x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+                let raw = (e.match_ | (x & !e.mask)) & ((1u64 << (8 * e.len as u32)) - 1);
+                let mut mem = raw.to_le_bytes()[..e.len as usize].to_vec();
+                mem.resize(64, 0);
+                cpu.pc = 0;
+                let Ok(slot) = cpu.fetch(&mut FlatRam::new(mem)) else { continue };
+                if let (Some(f), Some(lx)) = (cpu.icache[slot].fast, cpu.icache_x[slot]) {
+                    out.push((f, lx.pre.syntax, raw));
+                }
+            }
+        }
+        out
+    }
+
+    /// A pair head's part (`pair_hold`) is the same on the micro-op path (`fast_head_part`) as from
+    /// its syntax (`head_part`), for every class with a micro-op.
+    #[test]
+    fn fast_head_part_is_head_part() {
+        let fasts = corpus_fasts();
+        assert!(fasts.len() > 1000, "{}", fasts.len());
+        for (f, s, raw) in fasts {
+            assert_eq!(fast_head_part(f), head_part(s), "{s} ({raw:#x}): {f:?}");
+        }
+    }
+
+    /// `Fast::sets_flags` is what `exec_fast` does: a micro-op that changes the flags on some input
+    /// says it sets them (else compiled code, which drops them, would differ), and one that says so
+    /// changes them on some input (`Raw`, whose routes `sets_flags` takes as one, excepted).
+    #[test]
+    fn sets_flags_is_what_exec_fast_does() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = move || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u32 };
+        let specials = [0u32, 1, 31, 32, 0xff, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff];
+        let mut never = std::collections::BTreeSet::new();
+        // (one RAM for every run: only the flags are looked at)
+        let (mut ram, mut done) = (FlatRam::new(vec![0x5a; 0x8000]), std::collections::HashSet::new());
+        for (f, s, raw) in corpus_fasts() {
+            if !done.insert(format!("{f:?}")) {
+                continue;
+            }
+            let mut changed = false;
+            for i in 0..64 {
+                let mut cpu = Cpu::new(0x100);
+                for r in 0..16 {
+                    cpu.regs[r] = match rnd() % 3 { 0 => specials[rnd() as usize % specials.len()], 1 => 0x1000 + rnd() % 0x2000, _ => rnd() };
+                }
+                (cpu.flags, cpu.sp, cpu.rets) = (i & 15, 0x4000 + 4 * (rnd() % 64), 0x200);
+                let before = cpu.flags;
+                cpu.exec_fast(&mut ram, f, 0x104);
+                changed |= cpu.flags & 15 != before;
+            }
+            assert!(!changed || f.sets_flags(), "{s} ({raw:#x}): {f:?} changes the flags, sets_flags says no");
+            if f.sets_flags() && !changed && !matches!(f, Fast::Raw { .. }) {
+                never.insert(format!("{s}: {f:?}"));
+            }
+        }
+        assert!(never.is_empty(), "sets_flags says these write the flags, exec_fast never changed them: {never:#?}");
+    }
+
     #[test]
     fn pair_head_and_not_shifted_runs() {
         // `94 f1 13 13` r1 = r1 & ~(1 << r3) #, then a nop (DUELL 0.2.20, when HOME is pressed):
