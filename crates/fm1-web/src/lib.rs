@@ -573,6 +573,13 @@ pub extern "C" fn fm1_idle_ms() -> u32 {
     machine().map_or(0, |m| (m.soc.periph.skipped * 1000 / m.soc.periph.hz) as u32)
 }
 
+/// The audio halves the firmware did not refill in time since boot (fm1_soc's `refill`): its own
+/// sound breaks up at this clock, on any device.
+#[no_mangle]
+pub extern "C" fn fm1_starved() -> u32 {
+    machine().map_or(0, |m| m.soc.refill.starved as u32)
+}
+
 /// cpu0's run budget handed out so far, in millions (not instructions executed: idle skipping
 /// and a short chunk count whole; the page's speed readout is fm1_ms per wall time instead).
 #[no_mangle]

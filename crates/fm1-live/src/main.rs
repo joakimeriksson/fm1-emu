@@ -555,8 +555,10 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let steady_rt = steady.map(|(t, start)| (m.soc.periph.ms() - start) as f64 / 1000.0 / t.elapsed().as_secs_f64());
     let frames = m.soc.periph.audio.len() / 2;
     println!("steady: {:?}x real time; {frames} real audio frames", steady_rt);
+    let starved = m.soc.refill.starved;
+    println!("starved: {starved} audio halves the firmware did not refill in time");
     if let Ok(path) = std::env::var("FM1_BENCH_JSON") {
-        let json = format!("{{\"emulatedMs\":{},\"wallSeconds\":{wall},\"realtime\":{},\"audioFrames\":{frames},\"steadyRealtime\":{}}}\n",
+        let json = format!("{{\"emulatedMs\":{},\"wallSeconds\":{wall},\"realtime\":{},\"audioFrames\":{frames},\"steadyRealtime\":{},\"starvedHalves\":{starved}}}\n",
             m.soc.periph.ms(), m.soc.periph.ms() as f64 / 1000.0 / wall,
             steady_rt.map_or_else(|| "null".to_owned(), |v| v.to_string()));
         std::fs::write(path, json).expect("write benchmark JSON");
@@ -1367,7 +1369,7 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_BENCH_FRAMES=DIR[,MS]  --bench: a film: the panel every MS ms (40) as DIR/000000.ppm..., and
                            DIR/audio.raw from the boot (tools/film.py turns them into a video)
      FM1_DUMPRAM=FILE      --bench, --shot: the 1 MiB of RAM at the end
-     FM1_BENCH_JSON=FILE   --bench: the speed as JSON
+     FM1_BENCH_JSON=FILE   --bench: the speed and the starved audio halves as JSON
      FM1_BENCH_NOKEYS, FM1_WARMUP_MS=N (1000), FM1_BENCH_THREAD, FM1_BENCH_TRACE, FM1_BENCH_PCS,
      FM1_BENCH_ROUTES      --bench: no default keys, the steady-speed start, a thread, checkpoints, profiles
      FM1_KEY_AT, FM1_KEY_UP, FM1_NO_PLAY, FM1_NO_SKIP, FM1_SKIP_FROM, FM1_DUMP=ADDR  --shot

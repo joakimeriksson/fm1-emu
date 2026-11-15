@@ -37,6 +37,7 @@ pub mod machine;
 pub mod p33;
 pub mod periph;
 mod ram;
+pub mod refill;
 pub mod smk;
 mod spiflash;
 pub mod usb;
@@ -351,6 +352,8 @@ pub struct Soc {
     pub cpu1_fault: Option<String>,
     /// FM1_AUDIO_TRACE: log each audio half-buffer (debugging the DMA's pace).
     audio_trace: bool,
+    /// The audio halves the firmware did not refill in time (`fm1_starved`, `fm1-live --bench`).
+    pub refill: refill::Refill,
     /// The CRC-16 unit's register (0x13504).
     crc: u16,
     /// The random number generator's state (JL_RAND, 0x13B00: R64L / R64H).
@@ -542,6 +545,7 @@ impl Soc {
             cpu1_survives: false,
             cpu1_fault: None,
             audio_trace: std::env::var_os("FM1_AUDIO_TRACE").is_some(),
+            refill: refill::Refill::default(),
             xip_flash: true,
             sfc_key: None,
             sfc_con: 0,
@@ -620,6 +624,7 @@ impl Soc {
         (self.cpu1_idle, self.cpu1_fault) = (false, None);
         (self.cpu1_running, self.waits) = (false, [None; 2]);
         self.flash.chip_reset();
+        self.refill.chip_reset();
         cpu.set_plain_state(&boot.cpu);
         // the guards as at power-on: no causes, no PC limits (the restored SFRs hold none; the
         // runner gives the core `pc_windows` again before its next block)
@@ -768,10 +773,11 @@ impl Soc {
             if self.audio_trace {
                 eprintln!("half {} ms {}", self.periph.ms(), self.periph.cycles);
             }
-            for i in 0..words {
-                let w = self.read32(adr.wrapping_add(i * 4)) as i32;
-                self.periph.audio.push((w >> 8).clamp(-32768, 32767) as i16);
+            let half: Vec<u32> = (0..words).map(|i| self.read32(adr.wrapping_add(i * 4))).collect();
+            for &w in &half {
+                self.periph.audio.push(((w as i32) >> 8).clamp(-32768, 32767) as i16);
             }
+            self.refill.half(adr, &half);
         }
     }
 

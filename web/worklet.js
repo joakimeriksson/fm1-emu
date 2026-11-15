@@ -154,6 +154,7 @@ class Fm1 extends AudioWorkletProcessor {
     this.worst = 0;                     // the longest quantum among them (once audio plays)
     this.timedMs = 0;                   // the emulated ms when the timed interval began
     this.timedIdle = 0;                 // and the idle ms skipped by then
+    this.timedStarved = 0;              // and the audio blocks the firmware left unfilled by then
     this.board = x.fm1_board();         // 0 the FM-1, 1 the SMK-37 (the package says which)
     this.seq = m.seq;
     this.paused = false;
@@ -252,20 +253,22 @@ class Fm1 extends AudioWorkletProcessor {
       if (lcd) transfer.push(lcd.buffer);
       if (pads) transfer.push(pads.buffer);
       // Report the preceding interval: its final postMessage is included in its timing.
-      const ms = x.fm1_ms(), idle = x.fm1_idle_ms?.() ?? 0;
+      const ms = x.fm1_ms(), idle = x.fm1_idle_ms?.() ?? 0, starved = x.fm1_starved?.() ?? 0;
       this.port.postMessage({ type: "frame", seq: this.seq, lcd, leds, ms,
         short: this.short, halted: x.fm1_halted(), jit: this.jit, pads, playing: this.playing,
         busy: this.lastTiming?.busy ?? 0, worst: this.lastTiming?.worst ?? 0,
-        emulated: this.lastTiming?.emulated ?? 0, idle: this.lastTiming?.idle ?? 0,
+        emulated: this.lastTiming?.emulated ?? 0, idle: this.lastTiming?.idle ?? 0, starved: this.lastTiming?.starved ?? 0,
         quanta: this.lastTiming?.quanta ?? 0, frames: this.lastTiming?.frames ?? n }, transfer);
       const took = now() - t0;
       // busy: ms of wall clock the interval's quanta took; emulated: ms of emulated time they ran,
-      // idle: of which idle skipping jumped over (cost nothing)
+      // idle: of which idle skipping jumped over (cost nothing); starved: audio blocks the firmware
+      // left unfilled (fm1_starved)
       this.lastTiming = { busy: this.busy + took, worst: playing ? Math.max(this.worst, took) : this.worst,
-        emulated: ms - this.timedMs, idle: idle - this.timedIdle,
+        emulated: ms - this.timedMs, idle: idle - this.timedIdle, starved: starved - this.timedStarved,
         quanta: this.reportCalls, frames: this.reportFrames / this.reportCalls };
       this.timedMs = ms;
       this.timedIdle = idle;
+      this.timedStarved = starved;
       this.busy = 0;
       this.worst = 0;
       this.reportFrames = 0;

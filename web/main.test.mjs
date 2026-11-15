@@ -230,6 +230,35 @@ test('the status line and the report give the emulation speed and the JIT; idle 
   assert.equal(p.api.perf.lowerClock(1.2), null);    // (60 MHz would save only ~13%)
 });
 
+test('a firmware out of time at its clock: the warning offers a higher one, and the advice never suggests that clock again', async () => {
+  const p = await page(); await p.api.startAudio(); await p.api.boot(); await settle();
+  // a second of audio: load 40% (busy 1000 for 100%), `starved` audio blocks the firmware left unfilled
+  const second = (starved, busy = 400) => {
+    p.api.perf.add({ busy, quanta: 345, frames: 128, emulated: 1000, idle: 0, worst: 1, starved });
+    p.api.perf.second({ halted: false });
+  };
+  const warning = () => p.elements.get('perfwarn').hidden ? null : p.elements.get('perfwarn-text').textContent;
+  for (let i = 0; i < 3; i++) second(9);             // (booting: not judged)
+  second(9);
+  assert.equal(warning(), null);                     // (one second is not enough)
+  second(9);
+  assert.match(warning(), /^a runs out of time at 100 MHz: .* on any device\. The real FM-1 runs at 240 MHz\./);
+  assert.equal(p.elements.get('perfwarn-fix').hidden, false);
+  assert.equal(p.elements.get('perfwarn-fix').textContent, 'Use 120 MHz');
+  assert.match(p.api.perf.report(), /^firmware out of time: 2 s, 18 audio blocks not computed in time/m);
+  // later, on a device too slow at 240 MHz: the advice stays above the clock it ran out of time at
+  await p.api.boot(); await settle();
+  p.api.setMhz(240); p.api.perf.idleShare = 0.1;
+  assert.equal(p.api.perf.lowerClock(3), 120);
+  p.api.setFirmware('b');
+  assert.equal(p.api.perf.lowerClock(3), 60);        // (another firmware: its own clocks)
+  // out of time and the device overloaded too: no clock to offer
+  p.api.setFirmware('a'); p.api.setMhz(100); await p.api.boot(); await settle();
+  for (let i = 0; i < 5; i++) second(9, 1000);
+  assert.match(warning(), /^a runs out of time at 100 MHz: .* A faster device or the desktop version will play it\./);
+  assert.equal(p.elements.get('perfwarn-fix').hidden, true);
+});
+
 test("a try-out boots with its sectors and script from this origin, starts by itself and saves nothing", async () => {
   const disk = storage(), fetched = [], told = [];
   const sector = new Uint8Array(4100); new DataView(sector.buffer).setUint32(0, 0x96000, true); sector.fill(7, 4);
