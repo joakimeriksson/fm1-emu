@@ -6,6 +6,8 @@
 #   tools/build_plugin.sh            # build, install, validate
 #   NO_INSTALL=1 tools/build_plugin.sh
 #   SIGN_IDENTITY="Developer ID Application: ..." tools/build_plugin.sh
+#   UNIVERSAL=1 tools/build_plugin.sh   # for Apple silicon and Intel Macs in one build (the release's;
+#                                       # rustup target add aarch64-apple-darwin x86_64-apple-darwin)
 # tools/package_plugin.sh zips what this builds for a release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,11 +23,17 @@ sign() {
 }
 
 # the CLAP: a bundle around the cdylib
-(cd crates/fm1-plugin && cargo build --release)
+if [ -n "${UNIVERSAL:-}" ]; then
+  (cd crates/fm1-plugin && cargo build --release --target aarch64-apple-darwin --target x86_64-apple-darwin)
+  dylibs=(crates/fm1-plugin/target/{aarch64,x86_64}-apple-darwin/release/libfm1_plugin.dylib)
+else
+  (cd crates/fm1-plugin && cargo build --release)
+  dylibs=(crates/fm1-plugin/target/release/libfm1_plugin.dylib)
+fi
 clap=$out/FM-1.clap
 rm -rf "$clap"
 mkdir -p "$clap/Contents/MacOS"
-cp crates/fm1-plugin/target/release/libfm1_plugin.dylib "$clap/Contents/MacOS/FM-1"
+lipo -create -output "$clap/Contents/MacOS/FM-1" "${dylibs[@]}"
 version=$(sed -nE 's/^version = "(.*)"/\1/p' crates/fm1-plugin/Cargo.toml | head -1)
 cat > "$clap/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -44,7 +52,8 @@ EOF
 sign "$clap"
 
 # the AU around it
-cmake -S crates/fm1-plugin/wrap -B "$out/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFM1_CLAP="$clap" >/dev/null
+cmake -S crates/fm1-plugin/wrap -B "$out/build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DFM1_CLAP="$clap" \
+  -DCMAKE_OSX_ARCHITECTURES="$(lipo -archs "$clap/Contents/MacOS/FM-1" | tr ' ' ';')" >/dev/null
 cmake --build "$out/build"
 au=$(find "$out/build" -maxdepth 2 -name "FM-1.component" -type d | head -1)
 rm -rf "$out/FM-1.component"

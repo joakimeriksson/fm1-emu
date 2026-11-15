@@ -29,7 +29,11 @@ function jitImports(exports, stats) {
         return slot;
       } catch (e) {
         stats.failed++;
-        stats.error = String(e);
+        // with what it was called: a report then tells a stale module (helpers undefined, #142)
+        // from a table that is too short
+        let size = "?";
+        try { size = exports().__indirect_function_table.length; } catch {}
+        stats.error = `${e} (helpers ${hRead}, ${hWrite}, ${hOp}; table ${size})`;
         return 0;
       } finally {
         const elapsed = now() - start;

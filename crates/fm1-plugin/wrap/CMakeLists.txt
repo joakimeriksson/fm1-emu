@@ -8,7 +8,6 @@
 cmake_minimum_required(VERSION 3.21)
 if (APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0 CACHE STRING "")
-    set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "")
 endif ()
 # the plugin's version, the release's (crates/fm1-plugin/Cargo.toml): the AU's and the VST3's
 # bundle version, and the AU component version hosts cache their scan by
