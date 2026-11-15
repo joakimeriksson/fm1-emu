@@ -15,7 +15,7 @@ Build the real native and WASM binaries, establish the documented design system,
 
 Prove silent controller firmware advances without generated audio; implement outgoing emulated MIDI and variable-length SysEx; characterize timing; test host clock/transport and offline bounce. Establish complete CPU/RAM/peripheral snapshot serialization before claiming complete session recall.
 
-Improve instance isolation: library setups of one firmware need their own independent working state, rather than sharing one hash-indexed device save.
+Browser working-flash isolation is implemented by instance/setup scope. Next validate multi-tab browser persistence end-to-end and implement volatile checkpoints; plugin instance isolation and complete recall need their own acceptance tests.
 
 ## Then: expanded editing and native integration
 

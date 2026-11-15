@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../",import.meta.url));
 cpSync(root+"web/studio",root+"web/dist/studio",{recursive:true,filter:path=>!path.endsWith(".test.mjs")});
-const assets=["index.html","main.js","style.css","fm1_web.wasm","worklet.js","jit.js","fwsc.js","persistence.js","tryout.js","firmwares.json",
+const assets=["index.html","main.js","style.css","fm1_web.wasm","worklet.js","jit.js","fwsc.js","persistence.js","midi-input.js","tryout.js","firmwares.json",
   "studio/index.html","studio/studio.css","studio/app.js","studio/library.js"];
 const hash=createHash("sha256");
 for(const asset of assets) hash.update(asset).update(readFileSync(root+"web/dist/"+asset));

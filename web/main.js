@@ -6,6 +6,7 @@
 import { fetchPackage, hubNewcomers, hubCardUrl } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
 import { tryOutOf, loadTryOut } from "./tryout.js";
+import { selectedInputs, panicMessages } from "./midi-input.js";
 
 const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // The device this page is for: the FM-1 (index.html) or the SMK-37 (smk37/index.html, <html
@@ -19,6 +20,8 @@ const DEV = DEVICE === "smk37"
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
 const STUDIO = params.get("studio") === "1";
+const instanceScope = STUDIO ? params.get("instance") || "" : "";
+if (STUDIO && !/^[a-f0-9-]{36}:[a-f0-9]{64}$/.test(instanceScope)) throw new Error("Studio instance identity is missing or invalid");
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
@@ -97,7 +100,7 @@ const bankInput = document.getElementById("bank");
 const bankName = document.getElementById("bankname");
 const themeSel = document.getElementById("theme");
 const saveStatus = document.getElementById("save-status");
-const saveStore = new SaveStore();
+const saveStore = new SaveStore(globalThis.indexedDB, STUDIO ? "studio:" + instanceScope : "");
 const memoryRecords = new Map();
 const saveMessage = (text, failed = false) => { saveStatus.textContent = text; saveStatus.dataset.error = String(failed); };
 const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}. Export a backup to keep your changes.`, true);
@@ -652,15 +655,25 @@ function midiMessage(e) {
   }
 }
 // listen to the wanted inputs only; the list follows devices coming and going
+let connectedMidiIds = new Set();
+function panicMidi() {
+  if (board === 0) for (const bytes of panicMessages()) send({type:"midi",bytes});
+}
 function midiConnect() {
   if (!midi) return;
   const want = midiSel.value;
-  const names = [...midi.inputs.values()].map((i) => i.name);
-  for (const o of [...midiSel.options]) if (o.value !== "" && o.value !== "*" && !names.includes(o.value)) o.remove();
-  for (const n of names) if (![...midiSel.options].some((o) => o.value === n)) midiSel.add(new Option(n, n));
-  if ([...midiSel.options].some((o) => o.value === want)) midiSel.value = want;
-  for (const input of midi.inputs.values())
-    input.onmidimessage = want === "*" || want === input.name ? midiMessage : null;
+  const inputs = [...midi.inputs.values()].filter(input => input.state !== "disconnected");
+  const selected = selectedInputs(inputs,want);
+  const ids = new Set(selected.map(input=>input.id));
+  if ([...connectedMidiIds].some(id=>!ids.has(id))) panicMidi();
+  connectedMidiIds = ids;
+  for (const input of midi.inputs.values()) input.onmidimessage = ids.has(input.id) ? midiMessage : null;
+  midiSel.replaceChildren(new Option("off",""),new Option("all inputs","*"));
+  for (const input of inputs) midiSel.add(new Option(input.name || "MIDI controller",input.id));
+  // Migrate a remembered name only if it identifies exactly one input.
+  const value = want === "*" || !want ? want : selected.length === 1 ? selected[0].id : want;
+  if (![...midiSel.options].some(option=>option.value===value)) midiSel.add(new Option("Disconnected controller",value));
+  midiSel.value = value;
 }
 async function midiOpen() {
   if (midi || !navigator.requestMIDIAccess) return midiConnect();
@@ -681,10 +694,12 @@ async function midiOpen() {
   midiSel.value = want;
 }
 midiSel.addEventListener("change", () => {
+  panicMidi();
   store("fm1.midi", midiSel.value);
   if (midiSel.value) midiOpen(); else midiConnect();
 });
 midiChSel.addEventListener("change", () => {
+  panicMidi();
   midiCh = Number(midiChSel.value);
   store("fm1.midich", midiCh);
 });
@@ -1241,11 +1256,12 @@ if (STUDIO && window.parent !== window) {
       if (message.type === "load") {
         if (!(message.bytes instanceof Uint8Array) || message.bytes.length > 16 << 20 || typeof message.name !== "string" || message.name.length > 256) throw new Error("Invalid Studio import");
         if (message.kind === "save") {
-          const record = await importSave(new TextDecoder().decode(message.bytes),async hash =>
+          let record = await importSave(new TextDecoder().decode(message.bytes),async hash =>
             message.package instanceof Uint8Array && await packageHash(message.package) === hash ? message.package : null);
           await bootQueue;
           await flushRunning();
           const old = await saveStore.load(record.hash);
+          if (old) record = old; // Resume this setup’s working copy after reopening.
           record.revision = memoryRecords.get(record.hash)?.revision || old?.revision || 0;
           memoryRecords.set(record.hash,record);
           localFw = {id:"local",name:record.name,version:"",bytes:record.package};
@@ -1259,12 +1275,16 @@ if (STUDIO && window.parent !== window) {
           await openLocal(new File([message.bytes],message.name + ".fwsc"));
         } else throw new Error("Unsupported Studio item");
         reportStatus();
+      } else if (message.type === "flush") {
+        await bootQueue;
+        await flushRunning();
+        report("flushed",{request:message.request});
       } else if (message.type === "export") {
         if (!running) throw new Error("Start a firmware before exporting its saved flash.");
         await flushRunning();
         report("export",{name:running.record.name,text:exportSave(running.record)});
       }
-    }).catch(error => report("error",{text:error.message}));
+    }).catch(error => report("error",{text:error.message,request:message.request}));
   });
   report("ready");
 }

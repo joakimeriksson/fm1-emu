@@ -22,7 +22,7 @@ Studio mode (`studio=1`) disables automatic Hub discovery and catalog downloads.
 
 The Studio IndexedDB database stores immutable imported firmware/setup records, keyed by their content hash. Firmware identity is separately the original package hash. Import validation calls the existing unpacker, retaining unchanged bytes. Collection imports validate all entries before one write transaction. UI labels never render user filenames as HTML.
 
-The device page owns its running flash and upstream save database. Studio exports its current persistent setup through the bridge; files can be imported back into the collection. Full CPU/RAM snapshotting is not implemented. Multiple saved setups of one package still address upstream’s shared working flash; this needs separate instance identities before stronger isolation claims.
+The device page owns its running flash and upstream save database. Studio exports its current persistent setup through the bridge; files can be imported back into the collection. Full CPU/RAM snapshotting is not implemented. Working storage is now scoped by the Studio instance UUID in its URL plus the immutable library item ID. A new base-URL visit creates a separate instance; retaining an instance URL permits persistent recall. Deliberately opening the same instance URL twice shares the same working scope and retains upstream revision conflict detection. Switching waits for a flush acknowledgement; timeout keeps the current device. Reopening a setup resumes its scoped working copy rather than reapplying its original imported baseline.
 
 There is no implicit native/browser storage synchronization. All hardware backup and recovery routes remain future work. Unknown formats cannot be converted into a firmware package simply by renaming a file.
 
@@ -35,3 +35,5 @@ Only the build’s same-origin asset allowlist is cached. Firmware comes from th
 ## Future boundary
 
 Firmware-specific adapters should target the emulated USB interface and physical MIDI transport with the same protocol contract. Privileged recovery stays in a standalone coordinator/helper, never the audio callback. Full machine snapshots, silent-firmware progress, general MIDI/SysEx and host transport need dedicated feasibility work before expanding the editor.
+
+MIDI input routing uses exact port IDs; migration from a name is allowed only when unambiguous. Disconnect and route/channel changes send sustain-off, all-notes-off and all-sound-off for each channel. This is performance MIDI, not a hardware-transfer or SysEx implementation.

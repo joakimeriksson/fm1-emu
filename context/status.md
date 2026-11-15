@@ -47,10 +47,16 @@ No physical hardware or real Ableton/Logic/Pro Tools session was tested. Current
 ## Known limitations
 
 - Full volatile CPU/RAM snapshots are not implemented; unsaved edits need the firmware’s Save command.
-- Setups of one firmware share the original device page’s working flash. Export before replacing.
+- Reusing the exact same Studio instance URL shares its working scope; open the base URL for an independent instance.
 - Native apps/plugins do not share Studio’s browser library or new UI yet.
 - Expanded editors, general MIDI/SysEx/clock/host transport and hardware transfers remain roadmap work.
 - Browser canvas keyboard accessibility needs a dedicated accessible layer.
 - Collection archives currently allow at most 256 items / 24 MiB of imported binary content.
 - Offline readiness is subject to browser storage policy; exported backups remain necessary.
 - Existing upstream plugin IDs are retained; do not install automatically over an existing FM-1 plugin.
+
+## State and controller increment
+
+Implemented isolated browser working databases by instance UUID and setup ID, stable instance URLs, scoped setup resumption, and flush-before-switch coordination. MIDI inputs now route by exact port ID and issue panic messages when a controller disconnects or the route/channel changes. Eight Studio domain tests pass, including namespace separation, ambiguous-controller names and panic message coverage. These tests do not constitute end-to-end physical controller validation.
+
+Full volatile recall remains incomplete. The inspected CPU and SoC do not expose a complete serializable checkpoint contract; implementing it requires an explicit schema across both cores, private CPU interrupt state, RAM banks, peripheral timers/DMA, flash and USB state, with JIT caches recreated rather than serialized. Do not mark the proposed two-instance unsaved-edit DAW acceptance test as passed.

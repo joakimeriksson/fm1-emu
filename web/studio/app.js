@@ -2,6 +2,13 @@ import { Library, prepareImport, filterItems, downloadItem, encodeCollection, de
 import { fetchPackage } from "../fwsc.js";
 const $ = id => document.getElementById(id);
 const library = new Library();
+const instanceQuery = new URLSearchParams(location.search);
+let instanceId = instanceQuery.get("instance");
+if (!/^[a-f0-9-]{36}$/.test(instanceId || "")) {
+  instanceId = crypto.randomUUID();
+  instanceQuery.set("instance", instanceId);
+  history.replaceState(null,"", "?" + instanceQuery);
+}
 let items = [], active = null, frameReady = false, pendingItem = null, noticeTimer;
 const frame = $("device-frame");
 function notice(message, error = false) {
@@ -47,8 +54,21 @@ function sendItem(item) {
   frame.contentWindow.postMessage({source:"fm1-studio",type:"load",kind:item.kind,name:item.name,
     bytes:item.bytes, package:item.package}, location.origin);
 }
+let loadQueue = Promise.resolve();
+const flushWaiters = new Map();
 function loadItem(item) {
-  active = item; pendingItem = item; showView("device"); render();
+  loadQueue = loadQueue.then(() => switchItem(item)).catch(error => notice(error.message,true));
+  return loadQueue;
+}
+async function switchItem(item) {
+  if (active?.id === item.id && frame.getAttribute("src")) { showView("device"); return; }
+  if (frameReady) await new Promise((resolve,reject) => {
+    const request = crypto.randomUUID();
+    const timer = setTimeout(() => {flushWaiters.delete(request);reject(new Error("Could not save the current device. Export its setup before switching."));},10000);
+    flushWaiters.set(request,{resolve,reject,timer});
+    frame.contentWindow.postMessage({source:"fm1-studio",type:"flush",request},location.origin);
+  });
+  active = item; pendingItem = item; frameReady = false; showView("device"); render();
   $("empty-device").hidden = true; frame.hidden = false;
   $("active-name").textContent = item.name;
   $("identity-name").textContent = item.name;
@@ -57,8 +77,7 @@ function loadItem(item) {
   $("identity-hash").textContent = item.hash;
   $("engine-status").textContent = "Preparing the device…";
   $("export-save").disabled = true;
-  if (!frame.getAttribute("src")) frame.src = "../index.html?embed=1&studio=1&mhz=240";
-  else if (frameReady) { sendItem(item); pendingItem = null; }
+  frame.src = "../index.html?embed=1&studio=1&mhz=240&instance=" + instanceId + ":" + item.id;
 }
 function saveFile(bytes, name) {
   const url = URL.createObjectURL(new Blob([bytes],{type:"application/octet-stream"}));
@@ -119,7 +138,11 @@ $("export-save").addEventListener("click",()=> {
 window.addEventListener("message",event=> {
   if(event.origin!==location.origin || event.source!==frame.contentWindow || event.data?.source!=="fm1-device") return;
   const message=event.data;
-  if(message.type==="ready") {
+  if(message.type==="flushed" || (message.type==="error" && message.request)) {
+    const pending = flushWaiters.get(message.request);
+    if(pending) {clearTimeout(pending.timer);flushWaiters.delete(message.request);
+      if(message.type==="error") pending.reject(new Error(message.text)); else pending.resolve();}
+  } else if(message.type==="ready") {
     frameReady=true; if(pendingItem) {sendItem(pendingItem);pendingItem=null;}
   } else if(message.type==="status") {
     $("engine-status").textContent=message.text;

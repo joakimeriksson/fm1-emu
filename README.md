@@ -56,7 +56,7 @@ Firmware is retained byte-for-byte, identified by SHA-256. Different versions co
 - `.fm1save`: firmware identity plus saved flash changes, interoperable with upstream tools where supported.
 - `.fm1library`: Studio collection archive; not a device backup or flashable firmware.
 
-Saved flash does **not** preserve unsaved RAM edits. Use the firmware’s Save command before exporting. Full volatile machine snapshots remain an explicit engineering gate. Different setups of the same firmware currently share the device page’s working flash; export before replacing a setup.
+Saved flash does **not** preserve unsaved RAM edits. Use the firmware’s Save command before exporting. Full volatile machine snapshots remain an explicit engineering gate. Studio gives each instance URL and library item its own working flash. Open Studio from its base URL for a new independent instance; retain its generated URL to resume that instance. Opening the exact same instance URL twice intentionally addresses the same working state, with revision conflicts detected by the save store. Switching waits for flash persistence.
 
 The library remains on this browser origin. It does not sync automatically with native apps or another browser. Keep exported backups separate from browser storage. Initial collection archives are bounded to 256 items and 24 MiB of imported binary content.
 
@@ -96,3 +96,11 @@ Context follows the supplied ez-context skill, preserved in `.agents/skills/ez-c
 Emulator code is MIT; see [LICENSE](LICENSE). This fork retains upstream authorship and technical documentation. Firmware packages, patches, samples, fonts and other third-party material retain their own licenses. Downloading a firmware does not authorize redistributing it.
 
 This is an independent project, not affiliated with M-VAVE.
+
+## USB MIDI keyboard input
+
+Connect a class-compliant USB MIDI keyboard to the Mac. Traditional DIN MIDI controllers can connect through a macOS-compatible USB MIDI interface. In browser Studio, start the device, select the controller under **MIDI in**, and grant MIDI permission. Keep **Channel: as sent** unless the firmware requires a particular channel. Channel support is firmware-specific; Felucca uses channels 1–4. Controller input is available through the existing device controls, not through a physical FM-1.
+
+In native standalone, use `--midi NAME` to choose a controller (the default accepts all MIDI inputs). In a DAW, select/arm the keyboard as the track’s MIDI input and route it to the FM-1 plugin. The DAW owns the controller connection. A keyboard connected directly to the Mac does not require physical FM-1 hardware.
+
+Browser input now distinguishes identically named ports by ID and releases sustain/notes on disconnect or route/channel changes. Physical-controller acceptance remains pending; no keyboard was assumed present during automated tests.
