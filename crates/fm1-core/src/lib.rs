@@ -1429,8 +1429,7 @@ impl Cpu {
         let jumped = self.exec_fast(bus, f, next_pc);
         self.pair_commit(pending);
         if head {
-            // (route 40 is `R.bN = #i`, a byte of a register)
-            let part = if matches!(f, Fast::Raw { route: 40, .. }) { 1 } else { 4 };
+            let part = fast_head_part(f);
             let dest = match f { Fast::Raw { route, raw } => raw_dest(route, raw as u64), _ => NO_DEST };
             self.pair_hold(before, Some(f), part, dest);
         }
@@ -1550,9 +1549,7 @@ impl Cpu {
         let res = self.execute(bus, &insn, &x.pre, next_pc);
         self.pair_commit(pending);
         if is_pair_head && res.is_ok() {
-            // a head that writes part of a register: `R.bN = ...`, `R.l = ...`, `R.h = ...`
-            let s = x.pre.syntax;
-            let part = if s.starts_with("R.b") { 1 } else if s.starts_with("R.") { 2 } else { 4 };
+            let part = head_part(x.pre.syntax);
             let dest = head_dest(&insn, &x.pre);
             self.pair_hold(before, l.fast, part, dest);
         }
@@ -1625,11 +1622,10 @@ impl Cpu {
         self.sreg_store[Self::sreg_index(n)] = v;
     }
 
-    /// `alu` for the micro-ops, setting the flags on add / subtract.
-    #[inline(always)]
     /// `alu` with the psr flags an FM-1 writes (pi32v2-isa hw/fm1-2026-10-24): add and subtract
     /// all four; the logic forms and the 32-bit multiply N and Z; the shifts N, Z and C
     /// (`set_shift_flags`).
+    #[inline(always)]
     fn alu_f(&mut self, op: Op, a: u32, b: u32) -> u32 {
         match op {
             Op::Add => { let (r, f) = add_flags(a, b, 0); self.flags = f; r }
@@ -2700,7 +2696,7 @@ impl Cpu {
             }
             "R = abs(R)" => { let d = r(self, 0)?; self.regs[d] = (self.regs[r(self, 1)?] as i32).saturating_abs() as u32; return Ok(Some(None)); }
             "R = clz(R)" => { let d = r(self, 0)?; let x = self.regs[r(self, 1)?].leading_zeros(); self.set_nz(x); self.regs[d] = x; return Ok(Some(None)); }
-            "R = rev8(R)" => { let d = r(self, 0)?; self.regs[d] = self.regs[r(self, 1)?].swap_bytes(); return Ok(Some(None)); }
+            "R = rev8(R)" => { let d = r(self, 0)?; let x = self.regs[r(self, 1)?].swap_bytes(); self.set_nz(x); self.regs[d] = x; return Ok(Some(None)); }
             "R = R + R + c" => {
                 let d = r(self, 0)?;
                 let (v, f) = add_flags(self.regs[r(self, 1)?], self.regs[r(self, 2)?], (self.flags & F_C != 0) as u32);
@@ -7525,6 +7521,29 @@ const RETS_MASK: u32 = 0x07ff_fffe;
 /// No register known written (`head_dest`).
 const NO_DEST: [(usize, u32); 2] = [(0, 0); 2];
 
+/// How finely a pair head writes the register it changes (`Cpu::pair_hold`), from its syntax: 1 a
+/// byte (`R.bN = ...`, route 40's `R.b# = #i (raw)`), 2 a half (`R.l = ...`, `R.h = ...`), else 4,
+/// the whole register.
+fn head_part(syntax: &str) -> u32 {
+    if syntax.starts_with("R.b") {
+        1
+    } else if syntax.starts_with("R.") {
+        2
+    } else {
+        4
+    }
+}
+
+/// `head_part` for a micro-op, which has no syntax at hand: route 40 (`R.b# = #i (raw)`) is the one
+/// micro-op that writes part of a register (test `fast_head_part_is_head_part`).
+fn fast_head_part(f: Fast) -> u32 {
+    if matches!(f, Fast::Raw { route: 40, .. }) {
+        1
+    } else {
+        4
+    }
+}
+
 /// The registers (and the bits of them; mask 0: none) an instruction with no micro-op writes,
 /// where its decoding says (`Cpu::pair_hold`): slot 0 of a syntax whose destination is one
 /// register (`R`, `R.l`, `R.h`, `R.bN` before an `=`, `op=` or `<=`), else `raw_dest` by route,
@@ -8310,7 +8329,8 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
         "{rets} = [sp++]" => Some(Fast::PopRets),
         "tbb [R]" | "tbh [R]" => Some(Fast::Tb { r: r(0)?, half: s.starts_with("tbh") }),
         "R = R & ~R" => Some(Fast::Alu3 { d: r(0)?, a: r(1)?, b: r(2)?, op: Op::AndNot }),
-        // (register counts are taken & 31, as `alu` does; immediate counts of 32 and more fill)
+        // (register counts are the register's low 8 bits, as `alu` takes them: 32..255 shift everything
+        // out; immediate counts of 32 and more stay with the interpreter)
         "R <<= R" | "R >>= R" | "R >>>= R" => Some(Fast::Alu2 { d: r(0)?, b: r(1)?, op: shift_op(&s[2..])? }),
         "R <<= #i" | "R >>= #i" | "R >>>= #i" if v(1)? < 32 => Some(Fast::Alu2I { d: r(0)?, v: v(1)?, op: shift_op(&s[2..])? }),
         "R = R << R" | "R = R >> R" | "R = R >>> R" => {
