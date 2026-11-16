@@ -120,12 +120,21 @@ const TMR_DIV: [u64; 16] = [1, 4, 16, 64, 2, 8, 32, 128, 256, 1024, 4096, 16384,
 /// crystal, bits 4-7 the prescaler, bit 15 pending, written bit 14 clears it), CNT (where it
 /// counts from), PRD (the count that raises the interrupt and restarts). The stock firmware
 /// runs its usr_timer engine (the 2 ms ADC scan, key scan) on TIMER1.
+/// A running timer is kept as the cycle it was armed on and counts since then, so its periods
+/// add up exactly at any CPU clock: each interrupt falls on the cycle its count is reached on,
+/// with no rounding carried from one period to the next.
 #[derive(Clone, Copy, Default)]
 struct Tmr {
     con: u32,
     prd: u32,
+    /// the count at `start` (0 after an interrupt)
     cnt0: u32,
+    /// the cycle it was armed on
     start: u64,
+    /// counts from `start` to the last interrupt (0 before the first)
+    done: u64,
+    /// counts from `start` to the next interrupt
+    due: u64,
     next: u64,
     pending: bool,
 }
@@ -481,11 +490,22 @@ impl Periph {
 
     /// The CPU cycles until TIMER0..3 `i` has counted `counts` (the crystal through the
     /// prescaler), rounded up to the cycle the count is reached on. Multiplied out before the one
-    /// division: at most CPU clocks a count lasts a fraction of cycles.
+    /// division, since at most clocks a count is not a whole number of cycles.
     fn tmr_cycles(&self, i: usize, counts: u64) -> u64 {
         (counts as u128 * self.tmr_div(i) as u128 * self.hz as u128).div_ceil(T4_HZ as u128) as u64
     }
 
+    /// TIMER0..3 `i`'s count now (CNT).
+    fn tmr_count(&self, i: usize) -> u32 {
+        let t = self.tmr[i];
+        if t.next == u64::MAX {
+            return t.cnt0;
+        }
+        let counts = (self.cycles - t.start) as u128 * T4_HZ as u128 / (self.tmr_div(i) as u128 * self.hz as u128);
+        t.cnt0.wrapping_add((counts as u64 - t.done) as u32)
+    }
+
+    /// Start counting from `cnt0`, now.
     fn tmr_arm(&mut self, i: usize) {
         let t = self.tmr[i];
         if t.con & 3 == 0 || t.prd == 0 {
@@ -494,6 +514,8 @@ impl Periph {
         }
         let left = t.prd.saturating_sub(t.cnt0).max(1) as u64;
         self.tmr[i].start = self.cycles;
+        self.tmr[i].done = 0;
+        self.tmr[i].due = left;
         self.tmr[i].next = self.cycles + self.tmr_cycles(i, left);
     }
 
@@ -562,11 +584,14 @@ impl Periph {
             if self.cycles >= self.tmr[i].next {
                 self.tmr[i].pending = true;
                 self.tmr[i].cnt0 = 0;
-                let per = self.tmr_cycles(i, self.tmr[i].prd.max(1) as u64);
-                self.tmr[i].start = self.tmr[i].next;
-                self.tmr[i].next += per;
-                if self.tmr[i].next <= self.cycles {
-                    self.tmr[i].next = self.cycles + per;
+                let t = &mut self.tmr[i];
+                t.done = t.due;
+                t.due += t.prd.max(1) as u64;
+                let next = t.start + self.tmr_cycles(i, self.tmr[i].due);
+                self.tmr[i].next = next;
+                if next <= self.cycles {
+                    // (a whole period behind: count again from now)
+                    self.tmr_arm(i);
                 }
             }
         }
@@ -934,15 +959,7 @@ impl Periph {
                 let t = &self.tmr[((addr - 0x10400) >> 8) as usize];
                 t.con | if t.pending { 0x8000 } else { 0 }
             }
-            0x10404 | 0x10504 | 0x10604 | 0x10704 => {
-                let i = ((addr - 0x10400) >> 8) as usize;
-                let t = self.tmr[i];
-                if t.next == u64::MAX {
-                    t.cnt0
-                } else {
-                    t.cnt0 + mul_div(self.cycles - t.start, T4_HZ, self.tmr_div(i) * self.hz)
-                }
-            }
+            0x10404 | 0x10504 | 0x10604 | 0x10704 => self.tmr_count(((addr - 0x10400) >> 8) as usize),
             0x10408 | 0x10508 | 0x10608 | 0x10708 => self.tmr[((addr - 0x10400) >> 8) as usize].prd,
             0x10900 => self.t5_con | if self.t5_pending { 0x8000 } else { 0 },
             0x10904 => {
@@ -1047,8 +1064,13 @@ impl Periph {
                 if v & 0x4000 != 0 {
                     self.tmr[i].pending = false;
                 }
-                self.tmr[i].con = v & !0xc000;
-                self.tmr_arm(i);
+                // (the interrupt handler's CON |= 1 << 14 changes nothing else: the count goes on.
+                // A new mode or prescaler counts on from where it is.)
+                if v & !0xc000 != self.tmr[i].con {
+                    self.tmr[i].cnt0 = self.tmr_count(i);
+                    self.tmr[i].con = v & !0xc000;
+                    self.tmr_arm(i);
+                }
             }
             0x10404 | 0x10504 | 0x10604 | 0x10704 => {
                 let i = ((addr - 0x10400) >> 8) as usize;
@@ -1057,6 +1079,7 @@ impl Periph {
             }
             0x10408 | 0x10508 | 0x10608 | 0x10708 => {
                 let i = ((addr - 0x10400) >> 8) as usize;
+                self.tmr[i].cnt0 = self.tmr_count(i);
                 self.tmr[i].prd = v;
                 self.tmr_arm(i);
             }
@@ -1642,6 +1665,46 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_s_periods_add_up_exactly_through_late_pending_clears() {
+        // TIMER1 at one 44.1 kHz sample (PRD 544): at 100 MHz a period is 2266.67 cycles. Each
+        // interrupt is cleared 300 cycles late, as a handler does (CON |= 1 << 14), and the
+        // N-th still falls on the cycle N periods' counts are reached on, 10000 periods on.
+        let hz = 100_000_000u64;
+        let mut p = Periph { hz, ..Periph::default() };
+        p.write(0x10508, 544);
+        p.write(0x10500, 1);
+        let con = p.read(0x10500).unwrap();
+        for n in 1..=10_000u64 {
+            let want = ((n * 544) as u128 * hz as u128).div_ceil(T4_HZ as u128) as u64;
+            p.advance(want - 1 - p.cycles);
+            assert!(!p.tmr[1].pending, "interrupt {n}: early");
+            p.advance(1);
+            assert!(p.tmr[1].pending, "interrupt {n}: on cycle {want}");
+            p.advance(300);
+            assert_eq!(p.read(0x10504), Some((300 * T4_HZ / hz) as u32), "interrupt {n}: the count went on");
+            p.write(0x10500, con | 0x4000);
+            assert!(!p.tmr[1].pending);
+        }
+    }
+
+    #[test]
+    fn a_timer_counts_on_through_a_new_prescaler_or_period() {
+        let mut p = Periph { hz: 240_000_000, ..Periph::default() };
+        p.write(0x10508, 48_000);
+        p.write(0x10500, 1);
+        p.advance(240_000); // 1 ms: 24000 counts
+        assert_eq!(p.read(0x10504), Some(24_000));
+        p.write(0x10500, 4 << 4 | 1); // the prescaler /2: on from 24000, at half the rate
+        p.advance(240_000);
+        assert_eq!(p.read(0x10504), Some(36_000));
+        p.write(0x10508, 40_000); // a shorter period: 4000 counts from here (8000 crystal ticks)
+        p.advance(80_000 - 1);
+        assert!(!p.tmr[1].pending);
+        p.advance(1);
+        assert!(p.tmr[1].pending);
+    }
+
+    #[test]
     fn led_peek_reads_the_fractions_without_taking_them() {
         let mut p = Periph::default();
         // LED 5 lit for half of the 1000 cycles since the last take
@@ -1693,4 +1756,5 @@ mod tests {
         let f = led_frames(|t0, t1| if t0 % (CPU_HZ * 112 / 1000) < CPU_HZ * 64 / 1000 { (t1 - t0) / 11 } else { 0 });
         assert!(swing(f.iter().map(|x| x.1)) > 2.0, "led_shown still goes dark and bright");
     }
+
 }
