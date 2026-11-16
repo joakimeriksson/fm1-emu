@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=FM-1 Studio
+Comment=FM-1 instrument emulator
+Exec=fm1-live
+Icon=fm1-studio
+Terminal=false
+Categories=AudioVideo;Audio;Midi;

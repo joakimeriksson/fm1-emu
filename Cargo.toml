@@ -8,6 +8,7 @@ members = [
     "crates/fm1-emu",
     "crates/fm1-live",
     "crates/fm1-web",
+    "crates/fm1-host",
 ]
 # the plugin is a workspace of its own (its GUI and plugin dependencies)
 exclude = ["crates/fm1-plugin"]

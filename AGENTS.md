@@ -26,6 +26,8 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 
 - Execute original firmware binaries. Never substitute a source-port or approximate synthesis backend.
 - Never claim physical-device verification without hardware. No hardware writes on project recall.
+- Firmware loading/boot/save changes must cover standalone, plugin and browser together. Use `fm1_soc::firmware_from_bytes` + `boot_firmware`; follow the cross-host checklist in context/development.md and run `npm run check:firmware`. Record unverified host behavior explicitly.
+- Hardware librarian changes belong in the shared companion (web/hardware + fm1-host), with explicit destination/version checks, backup/review/read-back and simulated failure tests. Read context/hardware-library.md; never perform hardware writes on emulator or DAW recall.
 - Preserve firmware bytes and hashes; do not commit downloaded firmware, user saves or device backups.
 - All new layout spacing and control sizes use the base-8 system. Read the design doc before UI edits.
 - Keep file I/O, network, parsing and UI work outside realtime audio callbacks.
@@ -48,8 +50,10 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 | Always — foundation; first orientation for any task | context/overview.md |
 | Architecture, runtime boundaries, storage or bridge changes | context/architecture.md |
 | UI work, styling, components, visual or design changes | context/design-system.md |
+| Icon artwork, app/plugin branding, favicons or platform icon builds | context/icons.md |
 | Building, testing, installation or verification evidence | context/development.md |
 | Using Studio, changing firmware, controller setup, backups or beginner troubleshooting | context/user-guide.md |
+| USB hardware librarian, project transfers, firmware adapters or companion launch | context/hardware-library.md |
 | Current progress, next steps or known limitations | context/status.md |
 | Product requirements or scope decisions | context/product-specification.md |
 | Community projects, source selection or research evidence | context/research.md |
@@ -57,4 +61,9 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Maintenance
 
-After completing a feature, architectural change, or scope change, re-run `/ez-context` to keep this context layer current. Re-check design-system.md on every UI change, even if a staleness check passes.
+Keep `context/`, this router and the root README up to date **in the same change as the implementation**, before reporting the task complete. This applies to features, bug fixes, architecture, scope, build commands and user workflows.
+
+- Reconcile using `/ez-context` (the local skill is `.agents/skills/ez-context/SKILL.md`). Update only affected docs; add a focused doc and routing entry when a new subsystem needs one.
+- Compare docs with the actual working tree, including uncommitted changes. A freshness check based on commit dates does not prove the prose matches current behavior.
+- Update beginner instructions when controls or workflows change. Record what was tested, what remains unverified and known limitations; never turn a build or simulated test into a hardware/DAW acceptance claim. Update `last_verified` and `source_refs` only for docs actually reviewed.
+- Re-check `context/design-system.md` on every UI change, even if a staleness check passes. Run `npm run check:context` after documentation changes and resolve reported routing, metadata or link errors before completion.

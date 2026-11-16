@@ -49,6 +49,16 @@ cat > "$clap/Contents/Info.plist" <<EOF
 </dict>
 </plist>
 EOF
+set_bundle_icon() {
+  mkdir -p "$1/Contents/Resources"
+  cp assets/icons/FM1.icns "$1/Contents/Resources/FM1.icns"
+  cp assets/icons/macos/Assets.car "$1/Contents/Resources/Assets.car"
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$1/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string FM1" "$1/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFile" "$1/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string FM1.icns" "$1/Contents/Info.plist"
+}
+set_bundle_icon "$clap"
 sign "$clap"
 
 # the AU around it
@@ -64,6 +74,7 @@ cp "$out/build/fm1_auv2-build-helper-output/auv2_Info.plist" "$out/FM-1.componen
 rm -rf "$out/FM-1.component/Contents/PlugIns"
 mkdir -p "$out/FM-1.component/Contents/PlugIns"
 cp -R "$clap" "$out/FM-1.component/Contents/PlugIns/"
+set_bundle_icon "$out/FM-1.component"
 sign "$out/FM-1.component"
 vst3=$(find "$out/build" -maxdepth 2 -name "FM-1.vst3" -type d | head -1)
 rm -rf "$out/FM-1.vst3"
@@ -71,6 +82,7 @@ cp -R "$vst3" "$out/FM-1.vst3"
 rm -rf "$out/FM-1.vst3/Contents/PlugIns"
 mkdir -p "$out/FM-1.vst3/Contents/PlugIns"
 cp -R "$clap" "$out/FM-1.vst3/Contents/PlugIns/"
+set_bundle_icon "$out/FM-1.vst3"
 sign "$out/FM-1.vst3"
 echo "built $clap, $out/FM-1.component and $out/FM-1.vst3"
 

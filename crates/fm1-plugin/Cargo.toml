@@ -9,6 +9,7 @@ license = "MIT"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
+fm1-host = { path = "../fm1-host" }
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
 # no default features: they bring nih-plug's VST3 bindings (GPL); VST3 comes from clap-wrapper

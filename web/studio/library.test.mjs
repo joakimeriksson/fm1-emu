@@ -31,3 +31,19 @@ test("real firmware remains unchanged through collection roundtrip when fixture 
   const [restored]=await decodeCollection(encodeCollection([item]));
   assert.deepEqual(restored.bytes,bytes);assert.equal(restored.hash,item.hash);
 });
+
+test("area firmware retains its format through import, export, collection and setup", async t => {
+  if (!process.env.FM1_TEST_AREA) { t.skip("Set FM1_TEST_AREA to an original .area fixture"); return; }
+  const {readFile} = await import("node:fs/promises");
+  const {exportSave} = await import("../persistence.js");
+  const bytes = new Uint8Array(await readFile(process.env.FM1_TEST_AREA));
+  const item = await prepareImport("SLOOP.area", bytes);
+  assert.equal(downloadItem(item).name, "SLOOP.area");
+  const [copy] = await decodeCollection(encodeCollection([item]));
+  assert.deepEqual(copy.bytes, bytes);
+  const save = new TextEncoder().encode(exportSave({name:"SLOOP", hash:item.hash, package:bytes, sectors:[]}));
+  const restored = await prepareImport("SLOOP.fm1save", save);
+  assert.deepEqual(restored.package, bytes);
+  const bad = bytes.slice(); bad[bad.length-1] ^= 1;
+  await assert.rejects(prepareImport("bad.area", bad), /area/);
+});

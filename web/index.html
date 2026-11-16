@@ -14,7 +14,12 @@
 <meta property="og:image:height" content="640">
 <meta property="og:image:alt" content="Screens of six FM-1 firmwares running in the emulator: X0X, FM1 Quest, AMB-1, FM-1 SID, ORBIT and FiMba-1">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="icon" href="data:,">
+<link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon-180.png">
+<link rel="manifest" href="./site.webmanifest">
+<meta name="theme-color" content="#222623">
 <link rel="stylesheet" href="style.css">
 <script>if (new URLSearchParams(location.search).get("embed") === "1") document.documentElement.setAttribute("data-embed", "");</script>
 </head>
@@ -70,7 +75,7 @@
         <label>Clock <select id="mhz" aria-label="Emulated clock"></select></label>
         <label>Theme <select id="theme" aria-label="Panel color theme"></select></label>
         <div class="row">
-          <label class="file">Open .fwsc… <input type="file" id="open"></label>
+          <label class="file">Open firmware… <input type="file" id="open"></label>
           <label class="file" title="A DX7 32-voice bank for M-VAVE's firmware">DX7 bank… <input type="file" id="bank"></label>
           <span id="bankname" class="dim"></span>
         </div>
@@ -91,7 +96,7 @@
             <select id="saved-versions" aria-label="Saved firmware versions"></select>
             <button type="button" id="open-saved-version">Open saved firmware</button>
             <button type="button" id="update-firmware">Check for firmware updates</button>
-            <button type="button" id="reset-save">Reset saved flash…</button>
+            <button type="button" id="reset-save">Reset Firmware State…</button>
           </div>
           <p>Settings and patches written to flash are saved automatically. Use the firmware’s own save
             command for patch edits. Backups contain saved flash and community firmware. For M-VAVE firmware, the
@@ -347,9 +352,9 @@ Thanks to bask209, eubide and pcace.</textarea>
           the 240×240 screen, the key matrix and encoders, the MASTER knob, the audio output and the MIDI IN port.
           Hot code is compiled to WebAssembly while it runs (a JIT); hover over the status line to see how many
           regions it has compiled.</p>
-        <p>Each firmware boots from its whole update package (<code>.fwsc</code>), downloaded from the author’s site
+        <p>Each firmware boots from its original update package (<code>.fwsc</code>) or supported plain application area (<code>.area</code>), downloaded from the author’s site
           on first use and kept with its saved flash. “Check for firmware updates” fetches a new copy; a changed
-          package starts a separate save so an update cannot overwrite an older version’s patches. Packages are unpacked by the page's own unpacker, <code>fwsc.js</code>; Felucca's GPL
+          package starts a separate save so an update cannot overwrite an older version’s patches. Firmware is validated and booted by the shared Rust loader; Felucca's GPL
           package code (<code>fm1pkg.js</code>) stays out of the page.</p>
         <p>The whole story, from recovering an undocumented CPU from its firmware to the two JITs and how each
           step was checked, is in a technical report:

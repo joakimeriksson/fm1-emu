@@ -30,7 +30,7 @@ async function ingestFiles(files) {
   const added = [];
   // Validate everything first; store all entries in one transaction.
   const stagedPackages = new Map();
-  const ordered = [...files].sort((a,b) => Number(!/\.fwsc$/i.test(a.name)) - Number(!/\.fwsc$/i.test(b.name)));
+  const ordered = [...files].sort((a,b) => Number(!/\.(fwsc|area)$/i.test(a.name)) - Number(!/\.(fwsc|area)$/i.test(b.name)));
   for (const file of ordered) {
     if (file.size > (/\.fm1library$/i.test(file.name) ? 128 << 20 : 16 << 20)) throw new Error("File exceeds the import size limit.");
     const resolver = async hash => stagedPackages.get(hash) || await resolvePackage(hash);
@@ -68,7 +68,8 @@ async function switchItem(item) {
     flushWaiters.set(request,{resolve,reject,timer});
     frame.contentWindow.postMessage({source:"fm1-studio",type:"flush",request},location.origin);
   });
-  active = item; pendingItem = item; frameReady = false; showView("device"); render();
+  active = item;
+  try {localStorage.setItem("fm1.last-item."+instanceId,item.id);} catch {} pendingItem = item; frameReady = false; showView("device"); render();
   $("empty-device").hidden = true; frame.hidden = false;
   $("active-name").textContent = item.name;
   $("identity-name").textContent = item.name;
@@ -162,5 +163,5 @@ async function offlineStatus() {
     if(!navigator.serviceWorker.controller) notice("Offline assets saved. Reload once before going offline.");
   } catch(error) {label.lastChild.textContent="Offline cache unavailable";notice(error.message,true);}
 }
-try {await refresh();} catch(error) {notice(error.message,true);$("engine-status").textContent="Library unavailable. Check browser storage permissions.";}
+try {await refresh();let last;try{last=localStorage.getItem("fm1.last-item."+instanceId);}catch{}const item=items.find(i=>i.id===last);if(item)loadItem(item);} catch(error) {notice(error.message,true);$("engine-status").textContent="Library unavailable. Check browser storage permissions.";}
 offlineStatus();

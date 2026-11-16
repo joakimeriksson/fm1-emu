@@ -1595,7 +1595,11 @@ impl Soc {
 /// area, unscrambled), the whole flash (the image as written, grown to the chip's size, the
 /// USR patch area given this emulator's default bank when blank and then an optional DX7
 /// bank in slots 1-32) and the entry point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirmwareFormat { UpdatePackage, ApplicationArea }
+
 pub struct Stock {
+    pub format: FirmwareFormat,
     pub xip: Vec<u8>,
     pub flash: Vec<u8>,
     pub entry: u32,
@@ -1636,7 +1640,25 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
         }
     }
     let app = u.entry("app.bin").map(|h| h.offset).unwrap_or(0x120);
-    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
+    Ok(Stock { format: FirmwareFormat::UpdatePackage, xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
+}
+
+/// Detect supported original firmware bytes, independent of filenames and host surface.
+pub fn firmware_from_bytes(bytes: &[u8], syx: Option<&[u8]>) -> Result<Stock, String> {
+    if bytes.get(16..29) == Some(b"app_area_head") { fwsc::from_area(bytes) }
+    else { stock_from_package(bytes, syx) }
+}
+
+/// Shared bootloader handoff for standalone, plugins and WASM. Call before restoring saves.
+pub fn boot_firmware(soc: &mut Soc, cpu: &mut fm1_core::Cpu, st: &Stock) {
+    let params = RAM_BASE + 0x7fc00;
+    cpu.regs[0] = stock_boot(soc, &st.flash, params, st.board);
+    soc.sfc_boot(st.key, st.app_end);
+    if st.format == FirmwareFormat::ApplicationArea {
+        cpu.sp = RAM_BASE + 0x7f000;
+        cpu.ssp = cpu.sp;
+        cpu.usp = cpu.sp;
+    }
 }
 
 /// Ready a Soc for a package's firmware: its board, its flash chip, and the SPL's boot

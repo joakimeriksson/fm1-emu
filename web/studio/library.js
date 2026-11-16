@@ -1,4 +1,4 @@
-import { appFromPackage } from "../fwsc.js";
+import { appFromPackage, isApplicationArea } from "../fwsc.js";
 import { packageHash, importSave, exportSave } from "../persistence.js";
 
 export const MAX_FILE = 16 << 20;
@@ -11,11 +11,11 @@ export async function prepareImport(name, bytes, resolvePackage = async () => nu
     return { id: await packageHash(bytes), kind: "save", name: record.name, hash: record.hash,
       bytes, package: record.package, importedAt: new Date().toISOString() };
   }
-  if (!/\.fwsc$/i.test(name)) throw new Error("Choose an original .fwsc firmware or a .fm1save setup.");
+  if (!/\.(fwsc|area)$/i.test(name)) throw new Error("Choose an original .fwsc or .area firmware or a .fm1save setup.");
   if (bytes.length > 8 << 20) throw new Error("Firmware packages must be smaller than 8 MB.");
   appFromPackage(bytes); // Validate the package; retain the original unchanged bytes.
   const hash = await packageHash(bytes);
-  return { id: hash, kind: "firmware", name: name.replace(/\.fwsc$/i, ""), hash,
+  return { id: hash, kind: "firmware", name: name.replace(/\.(fwsc|area)$/i, ""), hash,
     bytes: bytes.slice(), package: bytes.slice(), importedAt: new Date().toISOString() };
 }
 export function filterItems(items, query) {
@@ -25,7 +25,7 @@ export function filterItems(items, query) {
 }
 export function downloadItem(item) {
   return { bytes: item.bytes, name: item.name.replace(/[^a-z0-9_ .-]/gi, "_") +
-    (item.kind === "save" ? ".fm1save" : ".fwsc") };
+    (item.kind === "save" ? ".fm1save" : (isApplicationArea(item.bytes) ? ".area" : ".fwsc")) };
 }
 export function encodeCollection(items) {
   if (items.length > 256 || items.reduce((n,item) => n + item.bytes.length,0) > 24 << 20)
@@ -50,11 +50,11 @@ export async function decodeCollection(text, resolvePackage) {
   // Resolve firmware entries first, independent of archive ordering.
   const packages = new Map();
   const results = [];
-  for (const item of valid.filter(item => /\.fwsc$/i.test(item.name))) {
+  for (const item of valid.filter(item => /\.(fwsc|area)$/i.test(item.name))) {
     const record = await prepareImport(item.name, item.bytes);
     packages.set(record.hash, record.package); results.push(record);
   }
-  for (const item of valid.filter(item => !/\.fwsc$/i.test(item.name)))
+  for (const item of valid.filter(item => !/\.(fwsc|area)$/i.test(item.name)))
     results.push(await prepareImport(item.name, item.bytes,
       async hash => packages.get(hash) || await resolvePackage?.(hash)));
   return results;

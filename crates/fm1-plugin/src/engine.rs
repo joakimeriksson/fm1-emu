@@ -89,9 +89,9 @@ impl Machine {
         crate::savefile::validate_sectors(&sectors.iter().map(|(at, data)| crate::Sector {
             at: *at, data: Arc::new(data.clone()),
         }).collect::<Vec<_>>())?;
-        let st = std::panic::catch_unwind(|| fm1_soc::stock_from_package(pkg, None))
+        let st = std::panic::catch_unwind(|| fm1_soc::firmware_from_bytes(pkg, None))
             .map_err(|_| "malformed firmware package".to_owned())??;
-        let mut soc = Soc::new(RAM_SIZE, st.xip);
+        let mut soc = Soc::new(RAM_SIZE, st.xip.clone());
         soc.periph.hz = mhz * 1_000_000;
         soc.periph.skip_idle = true;
         soc.lcd_timed = lcd_timed;
@@ -100,7 +100,7 @@ impl Machine {
         cpu.user = true; // the SPL hands cpu0 over in user mode (fm1-core's Cpu::user)
         let params = RAM_BASE + 0x7fc00;
         soc.write32(params, params + 0x40);
-        cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
+        fm1_soc::boot_firmware(&mut soc, &mut cpu, &st);
         let flash0 = soc.flash.mem.clone();
         restore_flash(&mut soc, sectors);
         Ok(Machine { cpu, cpu1: None, soc, pending_tick: false, halted: false, flash0 })
@@ -125,16 +125,11 @@ impl Machine {
 }
 
 fn restore_flash(soc: &mut Soc, sectors: &[(u32, Vec<u8>)]) {
+    let mut image = soc.flash.mem.clone();
     for (at, data) in sectors {
-        let at = *at as usize;
-        soc.flash.mem[at..at + data.len()].copy_from_slice(data);
-        let from = at.max(fm1_soc::XIP_FLASH_OFFSET);
-        let end = (at + data.len()).min(fm1_soc::XIP_FLASH_OFFSET + soc.xip.len());
-        if from < end {
-            soc.xip[from - fm1_soc::XIP_FLASH_OFFSET..end - fm1_soc::XIP_FLASH_OFFSET]
-                .copy_from_slice(&data[from - at..end - at]);
-        }
+        image[*at as usize..*at as usize + data.len()].copy_from_slice(data);
     }
+    soc.restore_flash(&image);
 }
 
 struct Snapshot {
@@ -166,14 +161,21 @@ fn snapshots(pending: &mut Vec<Snapshot>, machine: Option<&Machine>, params: &cr
             let _ = request.reply.send(Err("no firmware is running".into()));
             return false;
         };
-        if now.duration_since(request.polled) < Duration::from_millis(20) { return true; }
-        request.polled = now;
-        if request.flash != m.soc.flash.mem {
-            request.flash.copy_from_slice(&m.soc.flash.mem);
-            request.quiet_since = now;
+        if now.duration_since(request.polled) >= Duration::from_millis(20) {
+            request.polled = now;
+            if request.flash != m.soc.flash.mem {
+                request.flash.copy_from_slice(&m.soc.flash.mem);
+                request.quiet_since = now;
+            }
         }
         // A firmware save may span several SPI commands and render batches.
         if m.soc.flash.busy() || now.duration_since(request.quiet_since) < Duration::from_millis(250) { return true; }
+        // Recheck after the sampled quiet period: never export between commands of a new save.
+        if request.flash != m.soc.flash.mem {
+            request.flash.copy_from_slice(&m.soc.flash.mem);
+            request.quiet_since = now;
+            return true;
+        }
         let sectors = project_sectors(&m.changed_sectors());
         let fw = params.firmware.lock().unwrap();
         if *fw.pkg == *request.pkg { *params.flash.lock().unwrap() = sectors.clone(); }
@@ -431,6 +433,18 @@ fn rtrb_fill(p: &rtrb::Producer<[f32; 2]>) -> usize {
 #[cfg(test)]
 mod portable_tests {
     use super::*;
+    #[test]
+    fn area_firmware_boots_and_restores_via_shared_loader() {
+        let Ok(path) = std::env::var("FM1_TEST_AREA") else { return };
+        let bytes = std::fs::read(path).unwrap();
+        let mut m = Machine::boot(&bytes, &[], 240, false).unwrap();
+        while m.soc.periph.ms() < 12_000 && !m.halted { m.run(100_000); }
+        assert!(!m.halted);
+        assert!(m.soc.lcd.fb.iter().any(|&p| p != 0));
+        let sectors = m.changed_sectors();
+        let copy = Machine::boot(&bytes, &sectors, 240, false).unwrap();
+        assert_eq!(copy.soc.flash.mem, m.soc.flash.mem);
+    }
     fn machine() -> Machine {
         let soc = Soc::new(RAM_SIZE, vec![0x55; 0x80000]);
         let flash0 = soc.flash.mem.clone();
@@ -467,7 +481,7 @@ mod portable_tests {
         snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(600));
         assert!(rx.try_recv().is_err());
         m.soc.write32(0x500c0, 1);
-        snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(650));
+        snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(605));
         let sectors = rx.try_recv().unwrap().unwrap();
         assert_eq!(sectors[0].at, 0xf9000);
         assert_eq!(sectors[0].data[0], 0x12);

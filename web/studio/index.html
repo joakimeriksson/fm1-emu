@@ -5,14 +5,19 @@
 <meta name="theme-color" content="#f3f1ea">
 <meta name="description" content="An offline workspace for original FM-1 firmware, sound and saved setups.">
 <title>FM-1 Studio</title>
-<link rel="icon" href="data:,"><link rel="stylesheet" href="./studio.css">
+<link rel="icon" href="../favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="../icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="../icons/favicon-16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="../icons/apple-touch-icon-180.png">
+<link rel="manifest" href="../site.webmanifest">
+<link rel="stylesheet" href="./studio.css">
 <script type="module" src="./app.js"></script>
 </head>
 <body>
 <a class="skip" href="#workspace">Skip to workspace</a>
 <header class="topbar">
   <a class="brand" href="./" aria-label="FM-1 Studio home"><span class="brand-mark" aria-hidden="true">fm<span>1</span></span><span>STUDIO<br><small>THE FIRMWARE INSTRUMENT</small></span></a>
-  <nav aria-label="Workspace"><button class="nav-button" data-view="device" aria-current="page">Instrument</button><button class="nav-button" data-view="library">Library <span id="library-count">0</span></button><button class="nav-button" data-view="system">Design system</button></nav>
+  <nav aria-label="Workspace"><a class="nav-button" href="../hardware/" target="_blank" rel="noopener">Hardware Library ↗</a><button class="nav-button" data-view="device" aria-current="page">Instrument</button><button class="nav-button" data-view="library">Library <span id="library-count">0</span></button><button class="nav-button" data-view="system">Design system</button></nav>
   <span class="status-label" id="offline-state" role="status"><span class="status-dot"></span>Preparing offline</span>
 </header>
 <div class="app-layout">
@@ -28,7 +33,7 @@
   <div class="page-heading"><div><p class="eyebrow">01 / THE INSTRUMENT</p><h1>A small machine.<br><span>More possibilities.</span></h1></div><p class="intro">The original firmware.<br>Your sound, your collection.<br>Ready wherever you make music.</p></div>
   <div class="instrument-toolbar"><div><span class="live-dot" aria-hidden="true"></span><span id="active-name">No firmware loaded</span></div><span class="mono">EMULATED FM-1 · 1 MB FLASH</span></div>
   <div class="instrument-stage" id="instrument-stage">
-    <div class="empty-device" id="empty-device"><div class="device-outline" aria-hidden="true"><div class="outline-knobs">◉ ◉<span>◉ ◉ ◉ ◉</span></div><div class="outline-screen">FM—1<span>YOUR NEXT INSTRUMENT</span></div><div class="outline-keys">▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮</div></div><h2>Start with a firmware.</h2><p>Import an original .fwsc package to play it here.<br>Its exact version stays with your library.</p><div class="action-row"><button class="button primary" id="import-main">Import .fwsc</button><button class="button secondary" id="discover">Get Felucca ↗</button></div><p class="fineprint">Felucca downloads from its published source. Imports stay on this computer.</p></div>
+    <div class="empty-device" id="empty-device"><div class="device-outline" aria-hidden="true"><div class="outline-knobs">◉ ◉<span>◉ ◉ ◉ ◉</span></div><div class="outline-screen">FM—1<span>YOUR NEXT INSTRUMENT</span></div><div class="outline-keys">▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮ ▮</div></div><h2>Start with a firmware.</h2><p>Import an original .fwsc or .area firmware to play it here.<br>Its exact version stays with your library.</p><div class="action-row"><button class="button primary" id="import-main">Import firmware</button><button class="button secondary" id="discover">Get Felucca ↗</button></div><p class="fineprint">Felucca downloads from its published source. Imports stay on this computer.</p></div>
     <iframe id="device-frame" title="Playable original FM-1 firmware and hardware controls" hidden allow="autoplay; midi"></iframe>
   </div>
   <div class="instrument-bottom"><p id="engine-status" role="status" aria-live="polite">Import a firmware to begin. No hardware required.</p><button id="export-save" class="text-button" disabled>Export saved setup ↗</button></div>
@@ -48,6 +53,6 @@
 <footer class="workspace-footer"><span>FM—1 STUDIO <span class="muted">/ LOCAL FIRST</span></span><span>Original firmware execution · Powered by fm1-emu</span></footer>
 </main>
 </div>
-<input type="file" id="file-input" hidden multiple accept=".fwsc,.fm1save,.fm1library">
+<input type="file" id="file-input" hidden multiple accept=".area,.fwsc,.fm1save,.fm1library">
 <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 </body></html>

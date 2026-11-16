@@ -27,6 +27,8 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp target/wasm/wasm32-unknown-unknown/release/fm1_web.wasm "$OUT/"
+cp -R web/icons "$OUT/icons"
+cp web/favicon.ico web/site.webmanifest "$OUT/"
 cp web/index.html web/style.css web/main.js web/persistence.js web/midi-input.js web/tryout.js web/worklet.js web/render-runtime.js web/render-worker.js web/jit.js web/fwsc.js web/firmwares.json web/fm1-emu-report.pdf web/og.png "$OUT/"
 # the SMK-37's page: its own index, catalog and preview, the same code and wasm beside them
 mkdir -p "$OUT/smk37"
