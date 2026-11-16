@@ -15,6 +15,7 @@
 <meta property="og:image:alt" content="Screens of six FM-1 firmwares running in the emulator: X0X, FM1 Quest, AMB-1, FM-1 SID, ORBIT and FiMba-1">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="data:,">
+<link rel="preload" href="InterTight.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="style.css">
 <script>if (new URLSearchParams(location.search).get("embed") === "1") document.documentElement.setAttribute("data-embed", "");</script>
 </head>
@@ -50,6 +51,7 @@
       <div class="stage">
         <canvas id="panel" aria-label="FM-1 front panel"></canvas>
         <button id="start">Start</button>
+        <button type="button" id="exitview" title="Back to the whole synth (Esc)">Show the synth</button>
       </div>
       <p class="rotate">Turn the phone sideways for a bigger synth.</p>
       <p class="hint">
@@ -69,6 +71,10 @@
         <label id="fwlabel">Firmware <select id="fw" aria-label="Firmware"></select></label>
         <label>Clock <select id="mhz" aria-label="Emulated clock"></select></label>
         <label>Theme <select id="theme" aria-label="Panel color theme"></select></label>
+        <label title="Large screen: the real layout with a bigger screen. True to life: the real FM-1's proportions. Display only: the screen alone, as large as the window allows (Esc returns)">View
+          <select id="view" aria-label="Panel layout"><option value="large">Large screen</option><option value="real">True to life</option><option value="display">Display only</option></select></label>
+        <label class="check" title="OP1–OP6, PIT, GLO, MONO and POLY, as printed on the real FM-1 for M-VAVE's own firmware">Key labels
+          <input type="checkbox" id="keylabels"></label>
         <div class="row">
           <label class="file">Open .fwsc… <input type="file" id="open"></label>
           <label class="file" title="A DX7 32-voice bank for M-VAVE's firmware">DX7 bank… <input type="file" id="bank"></label>
@@ -259,6 +265,13 @@ Thanks to bask209, eubide and pcace.</textarea>
           <li>On a touch screen every finger counts: play chords, or hold a key while you turn a knob.</li>
           <li>On a phone, turn it sideways: the synth fills the screen.</li>
         </ul>
+        <h3>View</h3>
+        <p><b>View</b> beside the synth picks how it is drawn: <b>Large screen</b> (the real FM-1's layout with a
+          bigger screen), <b>True to life</b> (the real unit's proportions) or <b>Display only</b> (the screen alone,
+          pixel for pixel and as large as the window allows; Esc brings the synth back). <b>Key labels</b> prints
+          OP1–OP6, PIT, GLO, MONO and POLY on the top keys, as on the real unit for M-VAVE's firmware. Links keep
+          it: <code>?layout=real</code>, <code>?layout=display</code>, <code>&amp;labels=1</code>. In fm1-live, F2
+          switches the view and F5 the labels (or <code>--layout</code> and <code>--key-labels</code>).</p>
       </section>
 
       <section id="midi-in" aria-labelledby="h-midi">

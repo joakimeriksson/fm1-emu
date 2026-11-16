@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
+ab_glyph = "0.2.32"
 minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"

@@ -926,6 +926,7 @@ version = "0.5.1"
 name = "fm1-plugin"
 version = "0.5.1"
 dependencies = [
+ "ab_glyph",
  "base64",
  "dispatch2",
  "fm1-core",

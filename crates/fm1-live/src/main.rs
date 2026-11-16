@@ -38,7 +38,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use fm1_core::{Bus, Cpu};
 use fm1_soc::{machine, Action, Soc};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
-use panel::{Ctl, ENCS, H, W};
+use panel::{Ctl, ENCS};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
@@ -55,6 +55,13 @@ use std::time::{Duration, Instant};
 
 /// `--record -` streams the frames on stdout: the run's reports go to stderr then.
 static REPORTS_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+/// How the FM-1's panel is drawn (--layout, --key-labels; F2 / F5 in the window).
+static LOOK: Mutex<panel::Look> = Mutex::new(panel::Look { layout: panel::Layout::Large, labels: false, scale: 1.0 });
+
+fn look() -> panel::Look {
+    *LOOK.lock().unwrap()
+}
 
 /// println!, except that with `--record -` it prints to stderr (the frames own stdout).
 macro_rules! println {
@@ -159,8 +166,12 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
-    /// --theme NAME: the panel color theme (default, cool-gray, black, orange, black-green, purple, white-blue)
+    /// --theme NAME: the panel color theme (graphite, classic, cool-gray, black, orange, black-green, purple, white-blue)
     theme: String,
+    /// --layout NAME: large (the default: a larger screen), real (the real FM-1's proportions) or display (the LCD alone)
+    layout: panel::Layout,
+    /// --key-labels: the stock firmware's labels under the top keys
+    key_labels: bool,
     /// --flash-chip NAME: which part the FM-1's flash is (the stock Puya, or the newer units' UC25HQ80)
     flash_part: fm1_soc::FlashPart,
     /// --latency MS: the audio queued ahead of the device to start with (it grows on underruns)
@@ -209,7 +220,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "graphite".into(), layout: panel::Layout::Large, key_labels: false,
                        flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
     while i < a.len() {
@@ -266,6 +277,8 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             "--theme" => o.theme = a.get(i + 1)?.clone(),
+            "--layout" => o.layout = panel::Layout::from_name(a.get(i + 1)?)?,
+            "--key-labels" => { o.key_labels = true; i -= 1; }
             "--flash-chip" => o.flash_part = fm1_soc::FlashPart::parse(a.get(i + 1)?)?,
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
@@ -1223,7 +1236,7 @@ fn panel_ppm(buf: &[u32], w: usize, h: usize) -> Vec<u8> {
 
 /// The board's panel art, rasterized, and its size.
 fn panel_base(board: fm1_soc::Board, theme: &panel::Theme) -> (Vec<u32>, usize, usize) {
-    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { (panel::base(theme), W, H) }
+    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { { let l = look(); let (w, h) = panel::size(&l); (panel::base(theme, &l), w, h) } }
 }
 
 /// The LCD as the machine shows it now, as a PPM file.
@@ -1254,7 +1267,7 @@ fn render_panel(m: &Machine, base: &[u32], down: &[bool; 41], leds: &[f32; 41], 
         panel_smk::draw(buf, base, &st);
     } else {
         let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
-        panel::draw(buf, base, &st, theme);
+        panel::draw(buf, base, &st, theme, &look());
     }
 }
 
@@ -1341,7 +1354,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package:
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--theme NAME] [--latency MS] (12 on Windows, else 50)
+         [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 on Windows, else 50)
                                  audio queued ahead of the device to start with; it grows by itself
                                  on underruns and back down after 10 s without one, no lower
                                  than a level that underran
@@ -1530,6 +1543,7 @@ fn main() {
         eprintln!("error: unknown --theme {:?}; available: {}", o.theme, names.join(", "));
         std::process::exit(2);
     });
+    *LOOK.lock().unwrap() = panel::Look { layout: o.layout, labels: o.key_labels, scale: if o.layout == panel::Layout::Display { 3.0 } else { 1.0 } };
     if let Some(ms) = o.shot {
         return shot(&o, ms, theme);
     }
@@ -1713,14 +1727,25 @@ fn main() {
         return;
     }
     // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
-    let ((ww, wh), at) = fit::start(W, H, None);
-    // (elsewhere the window stays as it was: minifb scales it for the display itself)
-    let opts = if cfg!(windows) {
-        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
-    } else {
-        WindowOptions::default()
+    // a window the size of the look's canvas (F2 / F5 change the look: a new window)
+    let open = |l: &panel::Look| -> Result<Window, minifb::Error> {
+        let (w, h) = panel::size(l);
+        let ((ww, wh), at) = fit::start(w, h, None);
+        // (elsewhere the window stays as it was: minifb scales it for the display itself)
+        let opts = if cfg!(windows) {
+            WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
+        } else {
+            WindowOptions::default()
+        };
+        let mut win = Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts)?;
+        win.set_target_fps(60);
+        if let Some((x, y)) = at {
+            win.set_position(x, y);
+        }
+        Ok(win)
     };
-    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts) {
+    let mut lk = look();
+    let mut win = match open(&lk) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1729,13 +1754,10 @@ fn main() {
             return;
         }
     };
-    win.set_target_fps(60);
-    if let Some((x, y)) = at {
-        win.set_position(x, y);
-    }
-    let mut fit = fit::Fit::new(W, H);
-    let base = panel::base(theme);
-    let mut buf = vec![0u32; W * H];
+    let (mut pw, mut ph) = panel::size(&lk);
+    let mut fit = fit::Fit::new(pw, ph);
+    let mut base = panel::base(theme, &lk);
+    let mut buf = vec![0u32; pw * ph];
     let mut down = [false; 41];
     let mut enc_clicks = [0i32; 7];
     let mut turning = [0u32; 8];
@@ -1747,7 +1769,7 @@ fn main() {
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
+    eprintln!("keys: A pw S E D F T G Y ph U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F2 layout (large screen, true to life, display only); F5 key labels; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
 
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
@@ -1763,19 +1785,19 @@ fn main() {
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
-                grab = panel::hit(mx, my);
+                grab = panel::hit(&lk, mx, my);
                 last_y = my;
                 drag_acc = 0.0;
                 if let Some(Ctl::Key(k)) = grab {
-                    mouse_vel = panel::key_vel(k, my);
+                    mouse_vel = panel::key_vel(&lk, k, my);
                 }
             } else if pressed {
                 match grab {
                     // glissando: the held note follows the pointer across keys; on the same key,
                     // its height is the pressure (aftertouch)
                     Some(Ctl::Key(k0)) => {
-                        if let Some(Ctl::Key(k)) = panel::hit(mx, my) {
-                            let v = panel::key_vel(k, my);
+                        if let Some(Ctl::Key(k)) = panel::hit(&lk, mx, my) {
+                            let v = panel::key_vel(&lk, k, my);
                             if k != k0 {
                                 grab = Some(Ctl::Key(k));
                                 mouse_vel = v;
@@ -1809,7 +1831,7 @@ fn main() {
                 last_y = my;
             }
             if let Some((_, dy)) = win.get_scroll_wheel() {
-                match panel::hit(mx, my) {
+                match panel::hit(&lk, mx, my) {
                     Some(Ctl::Enc(i)) => {
                         scroll_acc[i] += dy;
                         while scroll_acc[i] >= 1.0 {
@@ -1871,6 +1893,34 @@ fn main() {
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
         }
+        let (f2, f5) = (win.is_key_pressed(Key::F2, KeyRepeat::No), win.is_key_pressed(Key::F5, KeyRepeat::No));
+        if f2 || f5 {
+            let mut l = lk;
+            if f2 {
+                l.layout = l.layout.next();
+                l.scale = if l.layout == panel::Layout::Display { 3.0 } else { 1.0 };
+            }
+            if f5 {
+                l.labels = !l.labels;
+            }
+            if l.layout != lk.layout {
+                // another size: another window
+                match open(&l) {
+                    Ok(w) => win = w,
+                    Err(e) => {
+                        eprintln!("window: {e}");
+                        l = lk;
+                    }
+                }
+            }
+            lk = l;
+            *LOOK.lock().unwrap() = lk;
+            (pw, ph) = panel::size(&lk);
+            fit = fit::Fit::new(pw, ph);
+            base = panel::base(theme, &lk);
+            buf = vec![0u32; pw * ph];
+            grab = None;
+        }
         for t in turning.iter_mut() {
             *t = t.saturating_sub(1);
         }
@@ -1886,13 +1936,13 @@ fn main() {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
             let fb = lcd.lock().unwrap().clone();
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
-            panel::draw(&mut buf, &base, &st, theme);
+            panel::draw(&mut buf, &base, &st, theme, &lk);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
             let s = w.frames / 44_100;
-            panel::text(&mut buf, (W - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
+            panel::text(&mut buf, (pw - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
         }
-        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (W, H) };
+        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (pw, ph) };
         let (frame, fw, fh) = fit.frame(&buf, ww, wh);
         if win.update_with_buffer(frame, fw, fh).is_err() {
             break;

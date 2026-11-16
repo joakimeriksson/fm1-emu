@@ -125,16 +125,73 @@ const PITCH_REST = 535, MOD_REST = 629;
 const analog = new Uint16Array(23);
 analog[20] = PITCH_REST;
 analog[21] = MOD_REST;
+// the FM-1's view (index.html's View and Key labels): large screen (the default), true to life,
+// or the display alone; ?layout= and ?labels=1 in a link, else the last choice
+const VIEWS = ["large", "real", "display"];
+const viewSel = document.getElementById("view");
+const labelsBox = document.getElementById("keylabels");
+const exitView = document.getElementById("exitview");
+let view = [params.get("layout"), stored(DEV.key + "view")].find((v) => VIEWS.includes(v)) || "large";
+let lastPanelView = view === "display" ? "large" : view;
+let keyLabels = (params.get("labels") ?? stored(DEV.key + "labels")) === "1";
+// panel pixels per CSS pixel of drag: knobs turn at the same speed at any resolution
+let lookScale = 1;
+// the canvas at this view and resolution: the panel at 2x on a high-density screen; the display
+// alone at the largest whole multiple of its 240 pixels that fits the window, shown pixel for pixel
+function applyLook() {
+  const dpr = devicePixelRatio || 1;
+  if (board === 0) {
+    const display = view === "display";
+    const scale = display ? Math.max(1, Math.floor(Math.min(innerWidth, innerHeight) * dpr / 240)) : (dpr >= 1.5 ? 2 : 1);
+    lookScale = display ? 1 : scale;
+    ui.panel_look(VIEWS.indexOf(view), keyLabels ? 1 : 0, scale);
+    document.documentElement.dataset.view = view;
+  } else {
+    lookScale = 1;
+  }
+  W = ui.panel_width();
+  H = ui.panel_height();
+  if (canvas.width !== W) canvas.width = W;
+  if (canvas.height !== H) canvas.height = H;
+  const px = board === 0 && view === "display";
+  canvas.style.width = px ? `${W / dpr}px` : "";
+  canvas.style.height = px ? `${H / dpr}px` : "";
+  // the synth's width follows the room left below the header and the bar (index.html's canvas rule)
+  document.documentElement.style.setProperty("--aspect", String(W / H));
+}
+function setView(v, remember = true) {
+  if (!VIEWS.includes(v)) return;
+  view = v;
+  if (v !== "display") lastPanelView = v;
+  if (viewSel) viewSel.value = v;
+  if (remember) store(DEV.key + "view", v);
+  applyLook();
+}
+if (viewSel) {
+  viewSel.value = view;
+  viewSel.addEventListener("change", () => setView(viewSel.value));
+}
+if (labelsBox) {
+  labelsBox.checked = keyLabels;
+  labelsBox.addEventListener("change", () => {
+    keyLabels = labelsBox.checked;
+    store(DEV.key + "labels", keyLabels ? "1" : "0");
+    applyLook();
+  });
+}
+if (exitView) exitView.addEventListener("click", () => setView(lastPanelView));
+// the display's multiple follows the window; the panel's resolution follows the screen's density
+let lookPending = false;
+addEventListener("resize", () => {
+  if (lookPending) return;
+  lookPending = true;
+  requestAnimationFrame(() => { lookPending = false; applyLook(); });
+});
 function setBoard(b) {
   if (b === board) return;
   board = b;
   ui.panel_board(b);
-  W = ui.panel_width();
-  H = ui.panel_height();
-  canvas.width = W;
-  canvas.height = H;
-  // the synth's width follows the room left below the header and the bar (index.html's canvas rule)
-  document.documentElement.style.setProperty("--aspect", String(W / H));
+  applyLook();
   document.documentElement.dataset.board = b ? "smk37" : "fm1";
   down.fill(0);
   encClicks.fill(0);
@@ -534,10 +591,11 @@ canvas.addEventListener("pointermove", (e) => {
     slide(p, y);
   } else if (p.grab >= 0 && p.grab < (board === 1 ? 8 : 7)) {
     p.acc += p.lastY - y;
-    while (p.acc >= 12) { p.acc -= 12; turn(p.grab, 1); }
-    while (p.acc <= -12) { p.acc += 12; turn(p.grab, -1); }
+    const step = 12 * lookScale;
+    while (p.acc >= step) { p.acc -= step; turn(p.grab, 1); }
+    while (p.acc <= -step) { p.acc += step; turn(p.grab, -1); }
   } else if (board === 0 && p.grab === 7) {
-    setPot(pot + (p.lastY - y) * 4);
+    setPot(pot + (p.lastY - y) * 4 / lookScale);
   }
   p.lastY = y;
 });
@@ -587,6 +645,7 @@ function keyId(k) {
 }
 const padKey = (k) => (board === 1 && /^[1-8]$/.test(k) ? Number(k) - 1 : -1);
 addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && board === 0 && view === "display") { setView(lastPanelView); return; }
   if (e.metaKey || e.ctrlKey || e.target instanceof HTMLSelectElement) return;
   if (ENC_KEYS[e.key]) { e.preventDefault(); turn(...ENC_KEYS[e.key]); return; }
   const pad = padKey(e.key);

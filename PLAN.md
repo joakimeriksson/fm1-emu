@@ -1474,3 +1474,12 @@ fm-1/
    seen so far is RAM-resident `.data` code. The SPL (`uboot.boot`) is the
    only code before the app; if the app never calls into
    `0xFFC0xxxx`-as-ROM, no dump is needed.
+
+## Backlog
+
+- **Mirror a real FM-1's screen** (2026-11-16): the panel's "Display only" view
+  (`panel::Layout::Display`: the LCD alone, a whole multiple of 240 px, filling the window) shows
+  the emulated LCD. Someone with a real FM-1 plugged in wants the same window for the
+  hardware's own screen, as the fm1-mirror project does: find how fm1-mirror gets the frames
+  (USB from a firmware that streams them?) and feed them into the same view in the page,
+  fm1-live and the plugin.

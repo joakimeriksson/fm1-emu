@@ -595,6 +595,8 @@ pub extern "C" fn fm1_cpu1_fault() -> u32 {
 // ---------------------------------------------------------------- the front panel (page side)
 
 static mut PANEL_THEME_ID: u32 = 0;
+/// How the FM-1's panel is drawn: layout, key labels, resolution (`panel_look`).
+static mut PANEL_LOOK: panel::Look = panel::Look { layout: panel::Layout::Large, labels: false, scale: 1.0 };
 static mut PANEL_BASE: Vec<u32> = Vec::new();
 static mut PANEL_BUF: Vec<u32> = Vec::new();
 static mut PANEL_LCD: Vec<u16> = Vec::new();
@@ -639,6 +641,25 @@ pub extern "C" fn panel_theme(id: u32) {
     }
 }
 
+/// The FM-1 panel's look: `layout` 0 large screen, 1 true to life, 2 display only; `labels` the
+/// stock firmware's labels on the top keys; `scale` the resolution (1.0: the large layout's LCD at
+/// 2x; in the display layout, the LCD's whole multiple). The canvas then takes panel_width x
+/// panel_height. Forces a base rebuild.
+#[no_mangle]
+pub extern "C" fn panel_look(layout: u32, labels: u32, scale: f32) {
+    let look = panel::Look {
+        layout: panel::Layout::ALL[(layout as usize).min(2)],
+        labels: labels != 0,
+        scale: if scale.is_finite() { scale.clamp(0.5, 16.0) } else { 1.0 },
+    };
+    unsafe {
+        if PANEL_LOOK != look {
+            PANEL_LOOK = look;
+            PANEL_BASE = Vec::new();
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn panel_theme_count() -> u32 {
     panel::THEMES.len() as u32
@@ -662,12 +683,12 @@ pub extern "C" fn panel_theme_name(id: u32) -> *const u8 {
 
 #[no_mangle]
 pub extern "C" fn panel_width() -> u32 {
-    if unsafe { PANEL_BOARD } == 1 { panel_smk::W as u32 } else { panel::W as u32 }
+    if unsafe { PANEL_BOARD } == 1 { panel_smk::W as u32 } else { panel::size(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }).0 as u32 }
 }
 
 #[no_mangle]
 pub extern "C" fn panel_height() -> u32 {
-    if unsafe { PANEL_BOARD } == 1 { panel_smk::H as u32 } else { panel::H as u32 }
+    if unsafe { PANEL_BOARD } == 1 { panel_smk::H as u32 } else { panel::size(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }).1 as u32 }
 }
 
 /// Where the page writes the LCD frame (240*240 RGB565) before `panel_draw`.
@@ -714,7 +735,7 @@ pub extern "C" fn panel_draw() -> *const u8 {
         let smk = PANEL_BOARD == 1;
         let theme = &panel::THEMES[PANEL_THEME_ID.min(panel::THEMES.len() as u32 - 1) as usize].2;
         if PANEL_BASE.is_empty() {
-            PANEL_BASE = if smk { panel_smk::base() } else { panel::base(theme) };
+            PANEL_BASE = if smk { panel_smk::base() } else { panel::base(theme, &*std::ptr::addr_of!(PANEL_LOOK)) };
             PANEL_BUF = vec![0; PANEL_BASE.len()];
         }
         if PANEL_LCD.is_empty() {
@@ -744,7 +765,7 @@ pub extern "C" fn panel_draw() -> *const u8 {
                 leds: &PANEL_LEDS,
                 turning: &std::array::from_fn(|i| PANEL_TURN[i]),
             };
-            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st, theme);
+            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st, theme, &*std::ptr::addr_of!(PANEL_LOOK));
         }
         // 0RGB -> RGBA bytes in place (little endian: R G B A)
         for p in PANEL_BUF.iter_mut() {
@@ -776,7 +797,7 @@ pub extern "C" fn panel_hit(x: f32, y: f32) -> i32 {
             None => -1,
         };
     }
-    match panel::hit(x, y) {
+    match panel::hit(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }, x, y) {
         Some(panel::Ctl::Enc(i)) => i as i32,
         Some(panel::Ctl::Pot) => 7,
         Some(panel::Ctl::Btn(id)) | Some(panel::Ctl::Key(id)) => 100 + id as i32,
