@@ -499,7 +499,8 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     while m.soc.periph.ms() < ms {
         if let Some((dir, step)) = &film {
             while m.soc.periph.ms() >= next_frame {
-                let leds = m.soc.periph.led_take();
+                // (as the live panel shows them: a dim LED does not flicker in a film either)
+                let leds = m.soc.periph.led_shown();
                 let down = m.soc.periph.keys_down;
                 if let Err(e) = write_panel(&mut m, &down, &leds, &format!("{dir}/{nframes:06}.ppm"), theme) {
                     eprintln!("{dir}: {e}");

@@ -146,6 +146,11 @@ pub const VEC_BASE: u32 = 0x01C7_FE00;
 /// that blinks on the beat looks smeared.
 const LED_SEEN_S: f32 = 0.04;
 
+/// A change in a LED's lit fraction bigger than this shows at once (`led_shown`), so a button
+/// lights and goes out as it is pressed: a lit LED is on for 1 matrix column in 11 (about
+/// 0.09), while a dim LED's fraction only wobbles from frame to frame (DX747's: 0.027..0.041).
+const LED_STEP: f32 = 0.03;
+
 /// Key id at (packed row bit, physical column), -1 = none
 /// (hal/fm1_input.h FM1_KEYMAP). Ids 0..13 are buttons, 14..40 note keys
 /// (F3 .. G5).
@@ -1294,13 +1299,14 @@ impl Periph {
     }
 
     /// The LEDs as an eye sees them, for a panel to draw: each LED's lit fraction since the last
-    /// call (`led_take`), averaged over about LED_SEEN_S of emulated time.
+    /// call (`led_take`), averaged over about LED_SEEN_S of emulated time; a jump of more than
+    /// LED_STEP (a LED lit or put out) shows at once.
     pub fn led_shown(&mut self) -> [f32; 41] {
         let span = (self.cycles - self.led_since) as f32 / self.hz as f32;
         let now = self.led_take();
         let k = 1.0 - (-span / LED_SEEN_S).exp();
         for (avg, now) in self.led_avg.iter_mut().zip(now) {
-            *avg += k * (now - *avg);
+            *avg = if (now - *avg).abs() > LED_STEP { now } else { *avg + k * (now - *avg) };
         }
         self.led_avg
     }
@@ -1757,4 +1763,14 @@ mod tests {
         assert!(swing(f.iter().map(|x| x.1)) > 2.0, "led_shown still goes dark and bright");
     }
 
+    #[test]
+    fn a_pressed_button_lights_and_goes_out_at_once() {
+        // dark, lit at the matrix's full fraction from 1 s, dark again from 2 s
+        let full = |t0: u64, t1: u64| (t1 - t0) / 11;
+        let f = led_frames(|t0, t1| if (CPU_HZ..2 * CPU_HZ).contains(&t0) { full(t0, t1) } else { 0 });
+        let lit = f.iter().position(|x| x.0 > 0.0).unwrap();
+        assert!(f[lit].1 > 0.08, "fully tinted in its first frame: {}", f[lit].1);
+        let dark = lit + f[lit..].iter().position(|x| x.0 == 0.0).unwrap();
+        assert_eq!(f[dark].1, 0.0, "dark in its first frame");
+    }
 }
