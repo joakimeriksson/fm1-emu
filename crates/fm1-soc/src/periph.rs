@@ -467,9 +467,15 @@ impl Periph {
         (self.t5_prd.max(1) as u64 * self.hz / T5_HZ).max(1)
     }
 
-    /// CPU cycles per count of TIMER0..3 `i` (the crystal through the prescaler).
-    fn tmr_cycles_per_count(&self, i: usize) -> u64 {
-        TMR_DIV[((self.tmr[i].con >> 4) & 15) as usize] * self.hz / T4_HZ
+    fn tmr_div(&self, i: usize) -> u64 {
+        TMR_DIV[((self.tmr[i].con >> 4) & 15) as usize]
+    }
+
+    /// The CPU cycles until TIMER0..3 `i` has counted `counts` (the crystal through the
+    /// prescaler), rounded up to the cycle the count is reached on. Multiplied out before the one
+    /// division: at most CPU clocks a count lasts a fraction of cycles.
+    fn tmr_cycles(&self, i: usize, counts: u64) -> u64 {
+        (counts as u128 * self.tmr_div(i) as u128 * self.hz as u128).div_ceil(T4_HZ as u128) as u64
     }
 
     fn tmr_arm(&mut self, i: usize) {
@@ -480,7 +486,7 @@ impl Periph {
         }
         let left = t.prd.saturating_sub(t.cnt0).max(1) as u64;
         self.tmr[i].start = self.cycles;
-        self.tmr[i].next = self.cycles + left * self.tmr_cycles_per_count(i).max(1);
+        self.tmr[i].next = self.cycles + self.tmr_cycles(i, left);
     }
 
     /// The OS tick: 10 ms however the period register is scaled (os_start writes clk/100).
@@ -548,7 +554,7 @@ impl Periph {
             if self.cycles >= self.tmr[i].next {
                 self.tmr[i].pending = true;
                 self.tmr[i].cnt0 = 0;
-                let per = self.tmr[i].prd.max(1) as u64 * self.tmr_cycles_per_count(i).max(1);
+                let per = self.tmr_cycles(i, self.tmr[i].prd.max(1) as u64);
                 self.tmr[i].start = self.tmr[i].next;
                 self.tmr[i].next += per;
                 if self.tmr[i].next <= self.cycles {
@@ -925,7 +931,7 @@ impl Periph {
                 if t.next == u64::MAX {
                     t.cnt0
                 } else {
-                    t.cnt0 + ((self.cycles - t.start) / self.tmr_cycles_per_count(i).max(1)) as u32
+                    t.cnt0 + mul_div(self.cycles - t.start, T4_HZ, self.tmr_div(i) * self.hz)
                 }
             }
             0x10408 | 0x10508 | 0x10608 | 0x10708 => self.tmr[((addr - 0x10400) >> 8) as usize].prd,
@@ -1589,6 +1595,29 @@ mod tests {
         assert_eq!(Periph::audio_frames_at(CPU_HZ, CPU_HZ), 44_117);
         assert_eq!(Periph::audio_frames_at(160_000_000, 160_000_000), 44_117);
         assert_eq!(Periph::audio_frames_at(60 * 60 * CPU_HZ, CPU_HZ), 60 * 60 * 44_117 + 2329);
+    }
+
+    #[test]
+    fn a_timer_keeps_the_crystals_time_at_any_cpu_clock() {
+        // TIMER1 from the 24 MHz crystal, PRD 48000: the stock firmware's 2 ms engine tick
+        for hz in [60_000_000, 80_000_000, 100_000_000, 120_000_000, 160_000_000, 200_000_000, 240_000_000] {
+            for prescaler in [0, 4, 1] {
+                let div = TMR_DIV[prescaler as usize] as u32;
+                let mut p = Periph { hz, ..Periph::default() };
+                p.write(0x10508, 48_000 / div);
+                p.write(0x10500, prescaler << 4 | 1);
+                let period = 2 * hz / 1000;
+                p.advance(period / 2);
+                assert_eq!(p.read(0x10504), Some(24_000 / div), "{hz} Hz / {div}: the count half way");
+                p.advance(period / 2 - 1);
+                assert!(!p.tmr[1].pending, "{hz} Hz / {div}: early");
+                p.advance(1);
+                assert!(p.tmr[1].pending, "{hz} Hz / {div}: on time");
+                p.tmr[1].pending = false;
+                p.advance(period);
+                assert!(p.tmr[1].pending, "{hz} Hz / {div}: the next period on time");
+            }
+        }
     }
 
     #[test]
