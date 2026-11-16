@@ -109,6 +109,7 @@
       <section class="box" aria-labelledby="h-play-from">
         <h2 class="eyebrow" id="h-play-from">Play from</h2>
         <label id="midiin">MIDI in <span class="sel"><span id="midiact" aria-hidden="true"></span><select id="midi" aria-label="MIDI input"><option value="">off</option><option value="*">all inputs</option></select></span></label>
+        <label title="Auto maps factory MiniLab 3 controls to the FM-1 panel; Raw lets firmware interpret every message.">Controller <select id="controller-profile" aria-label="Controller profile"><option value="auto">Auto · MiniLab 3</option><option value="raw">Raw MIDI</option></select></label>
         <label id="midichl" title="Played notes and controllers go to this channel (M-VAVE's firmware listens on 2, Felucca's parts on 1–4)">Channel
           <select id="midich" aria-label="MIDI channel"><option value="0">as sent</option></select></label>
       </section>
@@ -222,7 +223,7 @@ Thanks to bask209, eubide and pcace.</textarea>
             reboots the synth.</li>
           <li><b>Play</b>Use the computer keyboard, the mouse or a touch screen, or a MIDI keyboard
             (<a href="#midi-in">MIDI in</a>). The status line shows the clock, how much faster than real time the
-            emulator runs the firmware on this device, and the load on the audio thread.</li>
+            emulator runs the firmware on this device, and the render-worker load.</li>
         </ol>
       </section>
 
@@ -261,7 +262,7 @@ Thanks to bask209, eubide and pcace.</textarea>
         <h3>Mouse and touch</h3>
         <ul>
           <li>Click a key or button, or drag across the keys for a glissando.</li>
-          <li>Drag a knob up or down, or scroll over it. MASTER is the volume.</li>
+          <li>Drag a knob up or down, or scroll over it. Hold Shift while dragging for fine adjustments. MASTER is the volume.</li>
           <li>On a touch screen every finger counts: play chords, or hold a key while you turn a knob.</li>
           <li>On a phone, turn it sideways: the synth fills the screen.</li>
         </ul>
@@ -335,9 +336,9 @@ Thanks to bask209, eubide and pcace.</textarea>
       <section id="limits" aria-labelledby="h-limits">
         <h2 id="h-limits">Known limits</h2>
         <ul>
-          <li><b>Speed.</b> The real FM-1 runs at 240 MHz. The page starts at 100 MHz, which keeps slower machines in
+          <li><b>Speed.</b> The real FM-1 runs at 240 MHz. The page starts at 240 MHz, which keeps slower machines in
             real time. The status line shows the speed (emulated time per time spent emulating: below 1× the sound
-            breaks up) and the load: the share of the audio thread's time the emulator takes. When a device can't keep
+            breaks up) and the load: render time relative to audio duration. When a device can't keep
             up and the sound breaks up, the page says so and offers a lower clock where one helps, or a larger audio
             buffer when the emulator has time to spare. A lower clock does not help M-VAVE's firmware: it idles most
             of the time, the emulator skips that, and so it costs about the same at any clock. The browser's
@@ -354,7 +355,7 @@ Thanks to bask209, eubide and pcace.</textarea>
 
       <section id="how" aria-labelledby="h-how">
         <h2 id="h-how">How it works</h2>
-        <p>The emulator is written in Rust and runs as WebAssembly in the browser's audio thread. It executes the
+        <p>The emulator is written in Rust and runs as WebAssembly in a dedicated browser worker. It executes the
           pi32v2 instruction set and models the parts of the chip the firmwares use: timers, interrupts, the flash,
           the 240×240 screen, the key matrix and encoders, the MASTER knob, the audio output and the MIDI IN port.
           Hot code is compiled to WebAssembly while it runs (a JIT); hover over the status line to see how many

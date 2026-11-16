@@ -26,6 +26,7 @@
 use fm1_core::Bus;
 
 pub mod script;
+pub mod controller;
 pub mod flaky;
 pub mod hwdsp;
 pub mod hweq;

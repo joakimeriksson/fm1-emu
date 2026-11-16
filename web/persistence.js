@@ -88,11 +88,15 @@ export async function importSave(text, resolvePackage = async () => null) {
 }
 
 export class SaveStore {
-  constructor(factory = globalThis.indexedDB) { this.factory = factory; }
+  constructor(factory = globalThis.indexedDB, namespace = "") {
+    if (!/^[a-zA-Z0-9:_-]{0,180}$/.test(namespace)) throw new Error("invalid instance namespace");
+    this.factory = factory;
+    this.database = "fm1-emulator" + (namespace ? ":" + namespace : "");
+  }
   async open() {
     if (!this.connection) this.connection = new Promise((resolve, reject) => {
       if (!this.factory) { reject(new Error('browser storage unavailable')); return; }
-      const request = this.factory.open('fm1-emulator', 2);
+      const request = this.factory.open(this.database, 2);
       let blocked = false;
       request.onupgradeneeded = () => {
         for (const name of ['packages', 'states', 'entries']) {

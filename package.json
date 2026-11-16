@@ -1,0 +1,14 @@
+{
+  "name": "fm1-studio",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:web": "bash tools/build_studio.sh",
+    "serve": "node tools/serve-studio.mjs",
+    "test:studio": "node --test web/studio/*.test.mjs",
+    "check:context": "python3 tools/check_context.py"
+  }
+}

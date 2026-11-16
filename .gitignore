@@ -30,3 +30,13 @@ _site/
 # tools/hwdsp.py run: raw results (tests/hwdsp/fm1.txt is the reference, from export)
 tests/hwdsp/*.json
 work/film/
+
+# Studio and derived local tooling
+node_modules/
+.DS_Store
+.claude/skills/ez-context
+.codex/skills/ez-context
+.gemini/skills/ez-context
+
+# ez-context: derived per-agent skill copies/symlinks
+.cursor/skills/ez-context

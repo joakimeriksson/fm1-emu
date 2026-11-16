@@ -6,6 +6,7 @@
 import { fetchPackage, hubNewcomers, hubCardUrl } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
 import { tryOutOf, loadTryOut } from "./tryout.js";
+import { selectedInputs, panicMessages, MiniLab3, isMiniLab3 } from "./midi-input.js";
 
 const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // The device this page is for: the FM-1 (index.html) or the SMK-37 (smk37/index.html, <html
@@ -18,14 +19,17 @@ const DEV = DEVICE === "smk37"
   : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.fwsc$/i,
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
+const STUDIO = params.get("studio") === "1";
+const instanceScope = STUDIO ? params.get("instance") || "" : "";
+if (STUDIO && !/^[a-f0-9-]{36}:[a-f0-9]{64}$/.test(instanceScope)) throw new Error("Studio instance identity is missing or invalid");
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
-const catalog = await (await fetch("firmwares.json")).json();
+const catalog = STUDIO ? {default:"studio-local",firmwares:[{id:"studio-local",name:"Import firmware",version:"",byo:true}]} : await (await fetch("firmwares.json")).json();
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
 let hubWait;
-const newcomers = DEVICE === "fm1"
+const newcomers = !STUDIO && DEVICE === "fm1"
   ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => { hubWait = setTimeout(() => ok([]), 3000); })]).finally(() => clearTimeout(hubWait))
   : [];
 catalog.firmwares.push(...newcomers);
@@ -77,7 +81,8 @@ function endTryOut() {
   q.delete("script");
   history.replaceState(null, "", `?${q}`);
 }
-let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
+if (STUDIO) fw = catalog.firmwares[0];
+let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 240);
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
 let latency = params.get("latency") || stored("fm1.latency") || "interactive";
@@ -95,7 +100,7 @@ const bankInput = document.getElementById("bank");
 const bankName = document.getElementById("bankname");
 const themeSel = document.getElementById("theme");
 const saveStatus = document.getElementById("save-status");
-const saveStore = new SaveStore();
+const saveStore = new SaveStore(globalThis.indexedDB, STUDIO ? "studio:" + instanceScope : "");
 const memoryRecords = new Map();
 const saveMessage = (text, failed = false) => { saveStatus.textContent = text; saveStatus.dataset.error = String(failed); };
 const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}. Export a backup to keep your changes.`, true);
@@ -115,9 +120,11 @@ const fitPanel = () => document.documentElement.style.setProperty("--above",
 fitPanel();
 
 let node = null;
-let frame = null;            // the latest LCD + LEDs from the audio thread
+let renderWorker = null;
+let frame = null;            // the latest LCD + LEDs from the render worker
 const down = new Uint8Array(64);           // keys and buttons held (FM-1: matrix ids 0..40; SMK-37: keys 0..36, buttons 37..54)
 const encClicks = new Int32Array(8);
+const visualPositions = new Float32Array(8);
 const turning = new Uint32Array(9);
 let pot = 900;
 // SMK-37: its analog inputs as set (pads 0..15, faders 16..19, the pitch / mod wheel 20 / 21)
@@ -249,7 +256,7 @@ const hubCard = (f) => hubCardUrl(f.hub);
 const UNTESTED = "New on the Hub: not yet run in the emulator, so it may not work here";
 // the FM-1 page: which entries have an SMK-37 build (that catalog names them)
 const twins = new Map();
-if (DEVICE === "fm1") {
+if (!STUDIO && DEVICE === "fm1") {
   try {
     for (const s of (await (await fetch("smk37/firmwares.json")).json()).firmwares) if (s.fm1) twins.set(s.fm1, s.id);
   } catch { /* (no SMK-37 catalog next to this page: no links) */ }
@@ -340,12 +347,12 @@ function noteVersion(f, version) {
   if (f === fw) showFirmware();
 }
 const keptLocal = await keptEntry("local");
-if (keptLocal) {
+if (keptLocal && !STUDIO) {
   localFw = { id: "local", name: keptLocal.name, version: "", bytes: keptLocal.package };
   fwSel.add(new Option(`${localFw.name} (your file)`, "local"), 0);
   if (params.get("fw") === "local" || (!params.has("fw") && stored(DEV.key + "fw") === "local")) { fw = localFw; fwSel.value = "local"; }
 }
-for (const f of catalog.firmwares.filter(f => f.byo)) {
+for (const f of catalog.firmwares.filter(f => f.byo && !STUDIO)) {
   try { await packageOf(f); } catch { /* user has not opened a stock package yet */ }
 }
 let bank = null;                           // a DX7 32-voice bank for the stock firmware, or null
@@ -367,10 +374,10 @@ function showFirmware() {
     parts = [b, "From a link: not in this page's list, so it may not run here."];
   } else if (fw.byo) {
     const dl = document.createElement("a");
-    dl.href = fw.download;
+    dl.href = fw.download || "#";
     dl.textContent = `download ${DEV.stock} from M-VAVE`;
     const doc = document.createElement("a");
-    doc.href = fw.repo;
+    doc.href = fw.repo || "#";
     doc.textContent = "how it runs";
     const have = packages.has(fw.id) ? " Your copy is kept in this browser; open another .fwsc to replace it." :
       " Then click \u201cOpen .fwsc\u2026\u201d (or drop the file on the synth); this browser keeps it for next time.";
@@ -442,7 +449,7 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
+  if (!STUDIO && mv && (fw.byo || DEV.stockFile.test(file.name))) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -500,7 +507,13 @@ function draw() {
     if (frame.pads) for (let p = 0; p < 16; p++) ui.panel_set(5, p, frame.pads[p]);
   }
   for (let i = 0; i < 64; i++) ui.panel_set(0, i, down[i]);
-  for (let i = 0; i < 8; i++) ui.panel_set(1, i, encClicks[i]);
+  for (let i = 0; i < 8; i++) {
+    ui.panel_set(1, i, encClicks[i]);
+    const drag = [...pointers.values()].find(p => p.grab === i);
+    const target = encClicks[i] + (drag ? drag.acc / (8 * lookScale) : 0);
+    visualPositions[i] += (target - visualPositions[i]) * .75;
+    if (board === 0) ui.panel_position(i, visualPositions[i]);
+  }
   ui.panel_set(2, 0, pot);
   for (let i = 0; i < 9; i++) {
     ui.panel_set(3, i, turning[i]);
@@ -590,8 +603,8 @@ canvas.addEventListener("pointermove", (e) => {
   } else if (board === 1 && p.grab >= 300) {
     slide(p, y);
   } else if (p.grab >= 0 && p.grab < (board === 1 ? 8 : 7)) {
-    p.acc += p.lastY - y;
-    const step = 12 * lookScale;
+    p.acc += (p.lastY - y) * (e.shiftKey ? .25 : 1);
+    const step = 8 * lookScale;
     while (p.acc >= step) { p.acc -= step; turn(p.grab, 1); }
     while (p.acc <= -step) { p.acc += step; turn(p.grab, -1); }
   } else if (board === 0 && p.grab === 7) {
@@ -646,6 +659,9 @@ function keyId(k) {
 const padKey = (k) => (board === 1 && /^[1-8]$/.test(k) ? Number(k) - 1 : -1);
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && board === 0 && view === "display") { setView(lastPanelView); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
+    e.preventDefault(); if (!e.repeat) document.getElementById("open").click(); return;
+  }
   if (e.metaKey || e.ctrlKey || e.target instanceof HTMLSelectElement) return;
   if (ENC_KEYS[e.key]) { e.preventDefault(); turn(...ENC_KEYS[e.key]); return; }
   const pad = padKey(e.key);
@@ -680,10 +696,37 @@ if (!navigator.requestMIDIAccess) {
   midiSel.disabled = midiChSel.disabled = true;
   document.getElementById("midiin").title = "this browser has no Web MIDI (Chrome, Edge and Firefox do)";
 }
-function midiMessage(e) {
+const controllerProfiles = new Map();
+const controllerButtons = new Set();
+const controllerSel = document.getElementById("controller-profile");
+controllerSel.value = stored("fm1.controller") || "auto";
+controllerSel.addEventListener("change", () => {panicMidi();controllerProfiles.clear();store("fm1.controller", controllerSel.value);});
+function midiMessage(e, input) {
   const d = e.data;
   if (!d.length || !node) return;
   const bytes = Array.from(d);
+  if (bytes[0] < 0xf8) {
+    midiAct.classList.add("on");
+    clearTimeout(midiActOff);
+    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
+  }
+
+  if (board === 0 && controllerSel.value !== "raw" && isMiniLab3(input?.name)) {
+    let profile = controllerProfiles.get(input.id);
+    if (!profile) {profile = new MiniLab3();controllerProfiles.set(input.id, profile);}
+    const actions = profile.route(bytes);
+    if (actions) {
+      for (const a of actions) {
+        if (a.type === "enc") {const i=[0,6,1,2,3,4,5].indexOf(a.enc);turn(i,a.clicks);}
+        else if (a.type === "pot") setPot(a.value);
+        else if (a.type === "key") {
+          if (a.down) controllerButtons.add(a.id); else controllerButtons.delete(a.id);
+          setKey(a.id,a.down);
+        }
+      }
+      return;
+    }
+  }
   if (midiCh && bytes[0] >= 0x80 && bytes[0] < 0xf0) bytes[0] = (bytes[0] & 0xf0) | (midiCh - 1);
   if (board === 1) {
     // the SMK-37 has no MIDI in jack: notes C3..C6 play its keys (the velocity as the time between
@@ -702,22 +745,30 @@ function midiMessage(e) {
   } else {
     send({ type: "midi", bytes });
   }
-  if (bytes[0] < 0xf8) {
-    midiAct.classList.add("on");
-    clearTimeout(midiActOff);
-    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
-  }
 }
 // listen to the wanted inputs only; the list follows devices coming and going
+let connectedMidiIds = new Set();
+function panicMidi() {
+  for (const id of controllerButtons) setKey(id,false);
+  controllerButtons.clear();
+  if (board === 0) for (const bytes of panicMessages()) send({type:"midi",bytes});
+}
 function midiConnect() {
   if (!midi) return;
   const want = midiSel.value;
-  const names = [...midi.inputs.values()].map((i) => i.name);
-  for (const o of [...midiSel.options]) if (o.value !== "" && o.value !== "*" && !names.includes(o.value)) o.remove();
-  for (const n of names) if (![...midiSel.options].some((o) => o.value === n)) midiSel.add(new Option(n, n));
-  if ([...midiSel.options].some((o) => o.value === want)) midiSel.value = want;
-  for (const input of midi.inputs.values())
-    input.onmidimessage = want === "*" || want === input.name ? midiMessage : null;
+  const inputs = [...midi.inputs.values()].filter(input => input.state !== "disconnected");
+  const selected = selectedInputs(inputs,want).filter(input => want !== "*" || !input.name?.toLowerCase().replaceAll(" ","").includes("minilab3") || isMiniLab3(input.name));
+  const ids = new Set(selected.map(input=>input.id));
+  if ([...connectedMidiIds].some(id=>!ids.has(id))) panicMidi();
+  for (const id of controllerProfiles.keys()) if (!ids.has(id)) controllerProfiles.delete(id);
+  connectedMidiIds = ids;
+  for (const input of midi.inputs.values()) input.onmidimessage = ids.has(input.id) ? e => midiMessage(e,input) : null;
+  midiSel.replaceChildren(new Option("off",""),new Option("all inputs","*"));
+  for (const input of inputs) midiSel.add(new Option(input.name || "MIDI controller",input.id));
+  // Migrate a remembered name only if it identifies exactly one input.
+  const value = want === "*" || !want ? want : selected.length === 1 ? selected[0].id : want;
+  if (![...midiSel.options].some(option=>option.value===value)) midiSel.add(new Option("Disconnected controller",value));
+  midiSel.value = value;
 }
 async function midiOpen() {
   if (midi || !navigator.requestMIDIAccess) return midiConnect();
@@ -738,10 +789,12 @@ async function midiOpen() {
   midiSel.value = want;
 }
 midiSel.addEventListener("change", () => {
+  panicMidi();
   store("fm1.midi", midiSel.value);
   if (midiSel.value) midiOpen(); else midiConnect();
 });
 midiChSel.addEventListener("change", () => {
+  panicMidi();
   midiCh = Number(midiChSel.value);
   store("fm1.midich", midiCh);
 });
@@ -863,7 +916,7 @@ const perf = {
       `audio clock drift: ${r(100 * this.drift, 1)}% · seconds with drops: ${this.drops} · idle skipped: ${r(100 * this.idleShare)}% of the time`,
       `jit: ${jit ? `${jit.regions} regions compiled, ${jit.failed} failed${jit.error ? ` (${jit.error})` : ""} · ` +
         `compiling took ${r(jit.compileMs)} ms, the longest ${r(jit.compileMaxMs, 1)} ms` : "?"}`,
-      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"}`,
+      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"} · output underruns: ${frame?.outputUnderruns ?? "?"}`,
     ].join("\n");
   },
 };
@@ -897,6 +950,7 @@ async function setLatency(l) {
   // a larger buffer needs a new audio context: rebuild the graph, boot again
   node.port.onmessage = null;
   node.disconnect();
+  renderWorker?.terminate(); renderWorker = null;
   running = null;
   await ac.close();
   await startAudio();
@@ -1014,7 +1068,7 @@ function boot(options = {}) {
       sessions.set(seq, session);
       loadedUrl = got.url;
       showFirmware();
-      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0);
+      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0); visualPositions.fill(0); controllerProfiles.clear();
       frame = last = null;
       booting = seq;
       perf.reset();
@@ -1067,6 +1121,12 @@ async function startAudio(auto = false) {
   }
   await ac.audioWorklet.addModule("worklet.js");
   node = new AudioWorkletNode(ac, "fm1", { numberOfInputs: 0, outputChannelCount: [2] });
+  renderWorker = new Worker("render-worker.js", {type:"module"});
+  renderWorker.onmessage = onWorklet;
+  const channel = new MessageChannel();
+  renderWorker.postMessage({type:"connect", sampleRate:ac.sampleRate, port:channel.port1},[channel.port1]);
+  node.port.postMessage({type:"connect-renderer",port:channel.port2},[channel.port2]);
+  renderWorker.onerror = e => { status.textContent = `Audio renderer: ${e.message || "worker failed; restart audio"}`; };
   node.connect(ac.destination);
   node.port.onmessage = onWorklet;
   perf.reset();
@@ -1144,9 +1204,10 @@ function onWorklet(e) {
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
     status.title = [`speed: how much faster than real time the emulator runs this firmware on this device ` +
       `(emulated time per time spent emulating; below 1x the sound breaks up)`,
-      `load: the share of the audio thread's time the emulator takes (over 100%: the sound breaks up)`,
+      `load: render worker time relative to audio duration (over 100% cannot sustain playback)`,
       m.jit ? `JIT: ${m.jit.regions} regions compiled, ${m.jit.failed} failed${m.jit.error ? ` (${m.jit.error})` : ""}` : "",
-      `${m.short} short audio quanta (the firmware's audio fell behind its own clock)`].filter(Boolean).join("\n");
+      `${m.short} short audio quanta (includes boot silence)`,
+      `${m.outputUnderruns ?? 0} output underruns (worker queue ran empty); output queue ${(m.outputQueueMs ?? 128000*4/44100).toFixed(1)} ms`].filter(Boolean).join("\n");
     last = { t: now };
   }
 }
@@ -1282,3 +1343,51 @@ document.getElementById("open-saved-version").addEventListener("click", action(a
   if (node) await boot();
   else status.textContent = `${record.name} saved version ready: click Start`;
 }));
+
+
+// Studio's narrow same-origin bridge. The core/panel/audio path remains upstream.
+// No hardware operations, arbitrary commands, cross-origin input or automatic audio start.
+if (STUDIO && window.parent !== window) {
+  const report = (type, fields = {}) => window.parent.postMessage({source:"fm1-device",type,...fields},location.origin);
+  const reportStatus = () => report("status", {text:status.textContent,running:!!running});
+  new MutationObserver(reportStatus).observe(status,{childList:true,subtree:true,characterData:true});
+  let bridgeQueue = Promise.resolve();
+  addEventListener("message", event => {
+    if (event.origin !== location.origin || event.source !== window.parent || event.data?.source !== "fm1-studio") return;
+    const message = event.data;
+    bridgeQueue = bridgeQueue.then(async () => {
+      if (message.type === "load") {
+        if (!(message.bytes instanceof Uint8Array) || message.bytes.length > 16 << 20 || typeof message.name !== "string" || message.name.length > 256) throw new Error("Invalid Studio import");
+        if (message.kind === "save") {
+          let record = await importSave(new TextDecoder().decode(message.bytes),async hash =>
+            message.package instanceof Uint8Array && await packageHash(message.package) === hash ? message.package : null);
+          await bootQueue;
+          await flushRunning();
+          const old = await saveStore.load(record.hash);
+          if (old) record = old; // Resume this setup’s working copy after reopening.
+          record.revision = memoryRecords.get(record.hash)?.revision || old?.revision || 0;
+          memoryRecords.set(record.hash,record);
+          localFw = {id:"local",name:record.name,version:"",bytes:record.package};
+          let opt = [...fwSel.options].find(o=>o.value === "local");
+          if (!opt) fwSel.add(opt = new Option("","local"),0);
+          opt.text = record.name; fw = localFw; fwSel.value = "local";
+          bank = null; loadedUrl = null; showFirmware();
+          if (node) await boot({imported:record});
+          else status.textContent = record.name + " setup ready: click Start on the device";
+        } else if (message.kind === "firmware") {
+          await openLocal(new File([message.bytes],message.name + ".fwsc"));
+        } else throw new Error("Unsupported Studio item");
+        reportStatus();
+      } else if (message.type === "flush") {
+        await bootQueue;
+        await flushRunning();
+        report("flushed",{request:message.request});
+      } else if (message.type === "export") {
+        if (!running) throw new Error("Start a firmware before exporting its saved flash.");
+        await flushRunning();
+        report("export",{name:running.record.name,text:exportSave(running.record)});
+      }
+    }).catch(error => report("error",{text:error.message,request:message.request}));
+  });
+  report("ready");
+}

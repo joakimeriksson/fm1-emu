@@ -86,9 +86,8 @@ const LEAD_MS: f64 = 60.0;
 /// much at each underrun, up to AUDIO_TARGET_MAX_MS: a played note waits about that long.
 const AUDIO_TARGET_STEP_MS: f64 = 4.0;
 const AUDIO_TARGET_MAX_MS: f64 = 80.0;
-/// --latency's default: low on Windows, where it was measured; elsewhere the earlier 50 ms
-/// (the JIT's warm-up can underrun at the start there).
-const AUDIO_TARGET_DEFAULT_MS: f64 = if cfg!(windows) { 12.0 } else { 50.0 };
+/// Start responsive; the adaptive target adds headroom only when the device needs it.
+const AUDIO_TARGET_DEFAULT_MS: f64 = 12.0;
 /// After this long without an underrun the target comes back down (see [`AudioTarget`]).
 const AUDIO_TARGET_CALM: Duration = Duration::from_secs(10);
 
@@ -154,6 +153,7 @@ struct Opts {
     midi: String,
     /// channel messages sent to this channel (1-16; 0 = as sent)
     midi_ch: u8,
+    controller_raw: bool,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
     cpu1_survives: bool,
@@ -219,7 +219,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0, controller_raw: false,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "graphite".into(), layout: panel::Layout::Large, key_labels: false,
                        flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
@@ -267,6 +267,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             }
             "--syx" => o.syx = Some(a.get(i + 1)?.clone()),
             "--midi" => o.midi = a.get(i + 1)?.clone(),
+            "--controller-raw" => { o.controller_raw = true; i -= 1; },
             "--midi-ch" => o.midi_ch = a.get(i + 1)?.parse().ok().filter(|c| *c <= 16)?,
             "--entry" => o.entry = u32::from_str_radix(a.get(i + 1)?.trim_start_matches("0x"), 16).ok()?,
             "--mhz" => o.mhz = a.get(i + 1)?.parse().ok()?,
@@ -1266,7 +1267,7 @@ fn render_panel(m: &Machine, base: &[u32], down: &[bool; 41], leds: &[f32; 41], 
         };
         panel_smk::draw(buf, base, &st);
     } else {
-        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
+        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, positions: None, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
         panel::draw(buf, base, &st, theme, &look());
     }
 }
@@ -1307,54 +1308,84 @@ fn button(k: Key) -> Option<u8> {
 
 /// Connect the MIDI inputs `--midi` asks for: their bytes go to the MIDI IN jack. The
 /// connections live as long as the returned value.
-fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>) -> Vec<midir::MidiInputConnection<()>> {
-    let mut conns = Vec::new();
-    if o.midi == "none" {
-        return conns;
+struct MidiInputs {
+    quit: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    panel: mpsc::Receiver<Action>,
+}
+impl Drop for MidiInputs {
+    fn drop(&mut self) {
+        self.quit.store(true, Ordering::Relaxed);
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
     }
-    let probe = match midir::MidiInput::new("fm1-live") {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("MIDI in: {e}");
-            return conns;
-        }
-    };
-    for port in probe.ports() {
-        let Ok(name) = probe.port_name(&port) else { continue };
-        if o.midi != "all" && !name.to_lowercase().contains(&o.midi.to_lowercase()) {
-            continue;
-        }
-        let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue };
-        input.ignore(midir::Ignore::None);
-        let (tx, ch) = (tx.clone(), o.midi_ch);
-        let got = input.connect(&port, "fm1-live in", move |_, msg, _| {
-            for (i, &b) in msg.iter().enumerate() {
-                let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
-                let _ = tx.send(Action::Midi { b });
+}
+fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInputs {
+    let quit = Arc::new(AtomicBool::new(false));
+    let (panel_tx, panel_rx) = mpsc::channel();
+    let mut result = MidiInputs { quit: quit.clone(), worker: None, panel: panel_rx };
+    if o.midi == "none" { return result; }
+    let (wanted, channel, tx) = (o.midi.clone(), o.midi_ch, tx.clone());
+    let controller_raw = o.controller_raw;
+    result.worker = Some(std::thread::spawn(move || {
+        let mut connections = std::collections::HashMap::new();
+        while !quit.load(Ordering::Relaxed) {
+            if let Ok(probe) = midir::MidiInput::new("fm1-live discovery") {
+                let ports: Vec<_> = probe.ports().into_iter().filter_map(|port| {
+                    let name = probe.port_name(&port).ok()?;
+                    let lower = name.to_lowercase();
+                    if wanted == "all" && lower.replace(' ', "").contains("minilab3") && !fm1_soc::controller::is_minilab3(&name) { return None; }
+                    if wanted != "all" && !name.to_lowercase().contains(&wanted.to_lowercase()) { return None; }
+                    Some((port.id(), port, name))
+                }).collect();
+                connections.retain(|id, (_, profile)| {
+                    if ports.iter().any(|(live, _, _)| live == id) { return true; }
+                    eprintln!("MIDI input disconnected: {id}");
+                    for ch in 0..16 { for cc in [64, 123, 120] {
+                        for b in [0xb0 | ch, cc, 0] { let _ = tx.send(Action::Midi { b }); }
+                    }}
+                    if *profile { for id in [3,8] {let _ = tx.send(Action::Key{id,down:false});} }
+                    false
+                });
+                for (id, port, name) in ports {
+                    if connections.contains_key(&id) { continue; }
+                    let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue; };
+                    input.ignore(midir::Ignore::None);
+                    let sender = tx.clone();
+                    let panel_sender = panel_tx.clone();
+                    let profile = fm1_panel && !controller_raw && fm1_soc::controller::is_minilab3(&name);
+                    let mut controller = fm1_soc::controller::MiniLab3::default();
+                    match input.connect(&port, "fm1-live in", move |_, msg, _| {
+                        if profile && controller.route(msg, |a| { let _ = panel_sender.send(a.clone()); let _ = sender.send(a); }) { return; }
+                        for (i, &byte) in msg.iter().enumerate() {
+                            let b = if i == 0 && channel != 0 && (0x80..0xf0).contains(&byte) {
+                                (byte & 0xf0) | (channel - 1)
+                            } else { byte };
+                            let _ = sender.send(Action::Midi { b });
+                        }
+                    }, ()) {
+                        Ok(connection) => { eprintln!("MIDI in: {name}"); connections.insert(id, (connection, profile)); }
+                        Err(error) => eprintln!("MIDI in: {name}: {error}"),
+                    }
+                }
             }
-        }, ());
-        match got {
-            Ok(c) => {
-                eprintln!("MIDI in: {name}");
-                conns.push(c);
+            // Check between short waits so closing or changing firmware stays responsive.
+            for _ in 0..5 {
+                if quit.load(Ordering::Relaxed) { break; }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            Err(e) => eprintln!("MIDI in: {name}: {e}"),
         }
-    }
-    if conns.is_empty() {
-        eprintln!("MIDI in: no inputs{}", if o.midi == "all" { String::new() } else { format!(" matching {:?}", o.midi) });
-    }
-    conns
+    }));
+    result
 }
 
 /// Pixels of vertical mouse drag per encoder click.
-const DRAG_PER_CLICK: f32 = 12.0;
+const DRAG_PER_CLICK: f32 = 8.0;
 
 const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package: a community firmware, or M-VAVE's own)
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
-options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
-         [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 on Windows, else 50)
+options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw] [--midi-ch N] [--flash FILE] [--usb]
+         [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 by default)
                                  audio queued ahead of the device to start with; it grows by itself
                                  on underruns and back down after 10 s without one, no lower
                                  than a level that underran
@@ -1408,6 +1439,19 @@ fn pick_firmware() -> Option<std::path::PathBuf> {
     rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
 }
 
+/// Modal shortcuts trigger on release, after observing an idle key state.
+/// This avoids repeat events and a held launch key reopening a picker.
+#[derive(Default)]
+struct ReleaseShortcut { armed: bool, pressed: bool }
+impl ReleaseShortcut {
+    fn update(&mut self, down: bool) -> bool {
+        if !self.armed { if !down { self.armed = true; } return false; }
+        let fire = self.pressed && !down;
+        self.pressed = down;
+        fire
+    }
+}
+
 /// F4: pick another firmware package; the arguments to start again on it. The run then ends as
 /// on Esc (the emulation stopped, a WAV being recorded finished, MIDI and audio let go of) and
 /// [`restart`] starts the new one.
@@ -1431,7 +1475,7 @@ fn open_another() -> Option<Vec<String>> {
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn carried_over(args: &[String]) -> Vec<String> {
     const WITH_VALUE: [&str; 7] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
-    const FLAGS: [&str; 3] = ["--usb", "--exclusive", "--midi-log"];
+    const FLAGS: [&str; 4] = ["--usb", "--exclusive", "--midi-log", "--controller-raw"];
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -1604,7 +1648,7 @@ fn main() {
     let status = Arc::new(Mutex::new(String::from("booting")));
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Action>();
-    let _midi = midi_inputs(&o, &tx);
+    let _midi = midi_inputs(&o, &tx, board == fm1_soc::Board::Fm1);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
     // F3: a WAV of what the firmware plays, written as the emulation makes it
@@ -1728,7 +1772,7 @@ fn main() {
     }
     // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
     // a window the size of the look's canvas (F2 / F5 change the look: a new window)
-    let open = |l: &panel::Look| -> Result<Window, minifb::Error> {
+    let open_window = |l: &panel::Look| -> Result<Window, minifb::Error> {
         let (w, h) = panel::size(l);
         let ((ww, wh), at) = fit::start(w, h, None);
         // (elsewhere the window stays as it was: minifb scales it for the display itself)
@@ -1738,14 +1782,14 @@ fn main() {
             WindowOptions::default()
         };
         let mut win = Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts)?;
-        win.set_target_fps(60);
+        win.set_target_fps(120);
         if let Some((x, y)) = at {
             win.set_position(x, y);
         }
         Ok(win)
     };
     let mut lk = look();
-    let mut win = match open(&lk) {
+    let mut win = match open_window(&lk) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1761,6 +1805,7 @@ fn main() {
     let mut down = [false; 41];
     let mut enc_clicks = [0i32; 7];
     let mut turning = [0u32; 8];
+    let mut positions = [0.0f32; 7];
     let mut scroll_acc = [0f32; 8];
     let mut shown_leds = [0f32; 41];
     let mut grab: Option<Ctl> = None;
@@ -1769,10 +1814,13 @@ fn main() {
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A pw S E D F T G Y ph U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F2 layout (large screen, true to life, display only); F5 key labels; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F2 layout (large screen, true to life, display only); F5 key labels; F3 records a WAV (to Music/fm1-emu); Cmd/Ctrl+O or F4 another firmware; Esc quits");
 
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
+    let mut firmware_shortcut = ReleaseShortcut::default();
+    let mut open_chord = ReleaseShortcut::default();
+    let mut suppress_o = false;
     while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
             enc_clicks[i] += clicks;
@@ -1780,6 +1828,13 @@ fn main() {
             let _ = tx.send(Action::Enc { enc: ENCS[i].1, clicks });
         };
 
+        for action in _midi.panel.try_iter() {
+            match action {
+                Action::Enc {enc, clicks} => if let Some(i) = ENCS.iter().position(|e| e.1 == enc) { enc_clicks[i] += clicks; turning[i] = 10; },
+                Action::Adc {ch:4, value} => {pot=value;turning[7]=10;},
+                _ => {}
+            }
+        }
         // ---- mouse
         let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
@@ -1808,7 +1863,7 @@ fn main() {
                         }
                     }
                     Some(Ctl::Enc(i)) => {
-                        drag_acc += last_y - my;
+                        drag_acc += (last_y - my) * if win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift) { 0.25 } else { 1.0 };
                         while drag_acc >= DRAG_PER_CLICK {
                             drag_acc -= DRAG_PER_CLICK;
                             turn(i, 1, &mut enc_clicks, &mut turning);
@@ -1858,8 +1913,13 @@ fn main() {
         was_pressed = pressed;
 
         // ---- held keys and buttons: computer keyboard + mouse
+        let command = [Key::LeftSuper, Key::RightSuper, Key::LeftCtrl, Key::RightCtrl].iter().any(|&k| win.is_key_down(k));
+        let o_down = win.is_key_down(Key::O);
+        if command && o_down { suppress_o = true; }
+        if !o_down { suppress_o = false; }
         let mut want = [false; 41];
         for k in win.get_keys() {
+            if command || (k == Key::O && suppress_o) { continue; }
             if let Some(id) = piano(k).or_else(|| button(k)) {
                 want[id as usize] = true;
             }
@@ -1886,9 +1946,13 @@ fn main() {
                 Key::Up => turn(1, 1, &mut enc_clicks, &mut turning),
                 Key::Comma => turn(2, -1, &mut enc_clicks, &mut turning),
                 Key::Period => turn(2, 1, &mut enc_clicks, &mut turning),
-                Key::F4 => next = open_another(),
                 _ => {}
             }
+        }
+        let f4 = firmware_shortcut.update(win.is_key_down(Key::F4));
+        let open = open_chord.update(command && o_down);
+        if f4 || open {
+            next = open_another();
         }
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
@@ -1905,7 +1969,7 @@ fn main() {
             }
             if l.layout != lk.layout {
                 // another size: another window
-                match open(&l) {
+                match open_window(&l) {
                     Ok(w) => win = w,
                     Err(e) => {
                         eprintln!("window: {e}");
@@ -1935,7 +1999,11 @@ fn main() {
         {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
             let fb = lcd.lock().unwrap().clone();
-            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &shown_leds, turning: &turning };
+            for i in 0..7 {
+                let target = enc_clicks[i] as f32 + if matches!(grab, Some(Ctl::Enc(k)) if k == i) { drag_acc / DRAG_PER_CLICK } else { 0.0 };
+                positions[i] += (target - positions[i]) * 0.75;
+            }
+            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, positions: Some(&positions), pot, down: &down, leds: &shown_leds, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme, &lk);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
@@ -2168,6 +2236,51 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires the macOS CoreMIDI service; run explicitly outside sandbox"]
+    fn midi_hotplug_delivers_notes_releases_and_disconnect_panic() {
+        use midir::os::unix::VirtualOutput;
+        let name = format!("FM1-hotplug-test-{}", std::process::id());
+        let options = super::parse_args(args(&["--midi", &name])).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let inputs = super::midi_inputs(&options, &tx, true);
+        std::thread::sleep(Duration::from_millis(100));
+        let mut source = midir::MidiOutput::new("FM1 test").unwrap().create_virtual(&name).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        source.send(&[0x90,60,100]).unwrap();
+        source.send(&[0x80,60,0]).unwrap();
+        for expected in [0x90,60,100,0x80,60,0] {
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                fm1_soc::Action::Midi { b } => assert_eq!(b,expected),
+                _ => panic!("unexpected action"),
+            }
+        }
+        drop(source);
+        for expected in [0xb0,64,0,0xb0,123,0,0xb0,120,0] {
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                fm1_soc::Action::Midi { b } => assert_eq!(b,expected),
+                _ => panic!("unexpected action"),
+            }
+        }
+        drop(inputs);
+    }
+    #[test]
+    fn controller_raw_flag_does_not_consume_the_next_option() {
+        let o = super::parse_args(args(&["--controller-raw", "--mhz", "200"])).unwrap();
+        assert!(o.controller_raw); assert_eq!(o.mhz,200);
+    }
+    #[test]
+    fn firmware_picker_ignores_repeat_and_startup_held_key() {
+        let mut shortcut = super::ReleaseShortcut::default();
+        for down in [true,true,false,false] { assert!(!shortcut.update(down)); }
+        assert!(!shortcut.update(true));
+        assert!(!shortcut.update(true));
+        assert!(shortcut.update(false));
+        for _ in 0..100 { assert!(!shortcut.update(false)); }
+        assert!(!shortcut.update(true));
+        assert!(shortcut.update(false));
+    }
     use super::AudioTarget;
     use std::time::{Duration, Instant};
 

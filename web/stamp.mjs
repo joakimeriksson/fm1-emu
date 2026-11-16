@@ -15,7 +15,7 @@ const RULES = [
   // module imports: import ... from "./x.js", import("./x.js")
   new RegExp(String.raw`(\bfrom\s*|\bimport\s*\(\s*)(["'])${OWN}\2`, "g"),
   // fetch("x.wasm"), addModule("worklet.js")
-  new RegExp(String.raw`(\bfetch\(\s*|\baddModule\(\s*)(["'])${OWN}\2`, "g"),
+  new RegExp(String.raw`(\bfetch\(\s*|\baddModule\(\s*|\bnew\s+Worker\(\s*)(["'])${OWN}\2`, "g"),
   // <script src="main.js">, <link rel="stylesheet" href="style.css">
   new RegExp(String.raw`(<script\b[^>]*\bsrc=|<link\b[^>]*\brel="stylesheet"[^>]*\bhref=)(["'])${OWN}\2`, "g"),
 ];

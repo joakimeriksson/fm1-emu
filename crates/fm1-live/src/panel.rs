@@ -801,6 +801,8 @@ pub fn base(theme: &Theme, look: &Look) -> Vec<u32> {
 pub struct State<'a> {
     pub lcd: &'a [u16],
     pub enc_clicks: &'a [i32; 7],
+    /// Visual encoder position in detents; firmware still receives integer physical detents.
+    pub positions: Option<&'a [f32; 7]>,
     pub pot: u16,
     pub down: &'a [bool; 41],
     pub leds: &'a [f32; 41],
@@ -847,12 +849,12 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State, theme: &Theme, look: &Loo
     let (g, p) = (look.geo(), Pen::new(look));
     let (lx, ly) = (p.x(g.bezel[0] + g.bezel[3]).round() as usize, p.y(g.bezel[1] + g.bezel[3]).round() as usize);
     blit_lcd(buf, st.lcd, lx, ly, p.s(g.bezel[2] - 2.0 * g.bezel[3]).round() as usize, cw);
-    // knobs: encoders turn 18 degrees a click; the pot sweeps 270 degrees
+    // knobs: encoders turn 6 degrees a click; the pot sweeps 270 degrees
     for (i, (cx, cy)) in g.knobs.iter().enumerate() {
         let (angle, turning) = if i == 0 {
             ((-135.0 + 270.0 * st.pot as f32 / 1023.0).to_radians(), st.turning[7])
         } else {
-            ((st.enc_clicks[i - 1] as f32 * 18.0).to_radians(), st.turning[i - 1])
+            ((st.positions.map_or(st.enc_clicks[i - 1] as f32, |p| p[i - 1]) * 6.0).to_radians(), st.turning[i - 1])
         };
         let (cx, cy, r) = (p.x(*cx), p.y(*cy), p.s(g.knob_r));
         let glow = (turning as f32 / 10.0).min(1.0);
@@ -1017,7 +1019,7 @@ mod tests {
             down[20] = true;
             let mut leds = [0.0; 41];
             leds[14] = 1.0;
-            let st = State { lcd: &lcd, enc_clicks: &[1; 7], pot: 512, down: &down, leds: &leds, turning: &[5; 8] };
+            let st = State { lcd: &lcd, positions: None, enc_clicks: &[1; 7], pot: 512, down: &down, leds: &leds, turning: &[5; 8] };
             draw(&mut buf, &b, &st, t, &look);
             if look.layout == Layout::Display {
                 assert!(buf.iter().all(|&p| p == 0xffffff));
@@ -1077,7 +1079,7 @@ fn render_samples() {
         let b = base(t, &look);
         let (w, h) = size(&look);
         let mut buf = vec![0; b.len()];
-        let st = State { lcd: &lcd, enc_clicks: &[2, 0, -3, 1, 4, -2, 6], pot: 700, down: &down, leds: &leds, turning: &[0, 0, 8, 0, 0, 0, 0, 0] };
+        let st = State { lcd: &lcd, positions: None, enc_clicks: &[2, 0, -3, 1, 4, -2, 6], pot: 700, down: &down, leds: &leds, turning: &[0, 0, 8, 0, 0, 0, 0, 0] };
         draw(&mut buf, &b, &st, t, &look);
         let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
         for p in buf {

@@ -103,6 +103,7 @@
       <section class="box" aria-labelledby="h-play-from">
         <h2 class="eyebrow" id="h-play-from">Play from</h2>
         <label id="midiin" title="A MIDI keyboard plays the SMK-37's keys (notes C3..C6, with velocity) and its wheels (pitch bend, mod wheel)">MIDI keyboard <span class="sel"><span id="midiact" aria-hidden="true"></span><select id="midi" aria-label="MIDI input"><option value="">off</option><option value="*">all inputs</option></select></span></label>
+        <label title="Auto maps factory MiniLab 3 controls to the FM-1 panel; Raw lets firmware interpret every message.">Controller <select id="controller-profile" aria-label="Controller profile"><option value="auto">Auto · MiniLab 3</option><option value="raw">Raw MIDI</option></select></label>
         <label id="midichl" hidden>Channel
           <select id="midich" aria-label="MIDI channel"><option value="0">as sent</option></select></label>
       </section>
@@ -145,7 +146,7 @@
             reboots the keyboard.</li>
           <li><b>Play</b>Use the computer keyboard, the mouse or a touch screen, or a MIDI keyboard
             (<a href="#midi-in">MIDI keyboard</a>). The status line shows the clock, how much faster than real
-            time the emulator runs the firmware on this device, and the load on the audio thread.</li>
+            time the emulator runs the firmware on this device, and the render-worker load.</li>
         </ol>
         <p>The SMK-37 Pro, SMK-37 Elite, MKE-P37 and Donner Starrykey 37 Play share this hardware; the packages here
           are the SMK-37 Pro builds.</p>
@@ -186,7 +187,7 @@
             emulator closes the key's second contact sooner, which is how the SMK-37 measures velocity.</li>
           <li>Press a pad to hit it. Drag a fader, or scroll over it. The pitch wheel springs back when you let go; the
             mod wheel stays.</li>
-          <li>Drag a knob up or down, or scroll over it.</li>
+          <li>Drag a knob up or down, or scroll over it. Hold Shift while dragging for fine adjustments.</li>
           <li>On a touch screen every finger counts. On a phone, turn it sideways.</li>
         </ul>
       </section>
@@ -239,7 +240,7 @@
       <section id="how" aria-labelledby="h-how">
         <h2 id="h-how">How it works</h2>
         <p>The same emulator as the <a href="../">FM-1 page</a>, written in Rust and running as WebAssembly in the
-          browser's audio thread, with the SMK-37's panel wired in: a 16×8 key matrix driven by four shift registers
+          browser’s render worker, with the SMK-37's panel wired in: a 16×8 key matrix driven by four shift registers
           (37 keys with two contacts each for velocity, 18 buttons, 8 encoders), three analog multiplexers for the pads,
           faders and wheels, and 16 RGB pads whose colour frames share the screen's SPI bus. Each package says which
           board it is for, so an SMK-37 package opened on the FM-1 page gets this panel.</p>

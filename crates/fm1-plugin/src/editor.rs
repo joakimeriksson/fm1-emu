@@ -29,6 +29,7 @@ struct Ui {
     tex: Option<egui::TextureHandle>,
     down: [bool; 64],
     enc_clicks: [i32; 8],
+    positions: [f32;7],
     turning: [u32; 9],
     /// SMK-37: its analog inputs as set (fm1_soc::smk's ANALOG_* indices)
     analog: [u16; 23],
@@ -56,6 +57,7 @@ impl Default for Ui {
             tex: None,
             down: [false; 64],
             enc_clicks: [0; 8],
+            positions: [0.0;7],
             turning: [0; 9],
             analog,
             grab: None,
@@ -229,10 +231,10 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     let ctl = g.ctl;
                     slide(ui, &link, ctl, y);
                 } else if g.ctl >= 0 && g.ctl < if smk { 8 } else { 7 } {
-                    // 12 px of drag a click
-                    g.acc += g.last_y - y;
-                    let clicks = (g.acc / 12.0).trunc();
-                    g.acc -= clicks * 12.0;
+                    // Fine dragging changes sensitivity, never the firmware encoder resolution.
+                    g.acc += (g.last_y - y) * if ctx.input(|i| i.modifiers.shift) {0.25} else {1.0};
+                    let clicks = (g.acc / 8.0).trunc();
+                    g.acc -= clicks * 8.0;
                     let ctl = g.ctl;
                     if clicks != 0.0 {
                         turn(ui, &link, smk, ctl, clicks as i32);
@@ -305,9 +307,14 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 };
                 panel_smk::draw(&mut ui.buf, &ui.base, &st);
             } else {
+                for i in 0..7 {
+                    let drag = ui.grab.as_ref().filter(|g| g.ctl == i as i32).map_or(0.0, |g|g.acc/8.0);
+                    ui.positions[i] += (ui.enc_clicks[i] as f32 + drag - ui.positions[i]) * 0.75;
+                }
                 let st = panel::State {
                     lcd: &lcd,
                     enc_clicks: &std::array::from_fn(|i| ui.enc_clicks[i]),
+                    positions: Some(&ui.positions),
                     pot: (params.master.value() * 1023.0).round() as u16,
                     down: &std::array::from_fn(|i| ui.down[i]),
                     leds: &leds,

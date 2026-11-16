@@ -1,0 +1,24 @@
+---
+load_when: "always — foundation; first orientation for any task"
+last_verified: <YYYY-MM-DD>
+source_refs:
+  - package.json
+  - <other manifests: pyproject.toml / go.mod / Cargo.toml …>
+---
+
+# Project overview
+
+## What this is & why
+<Intent and audience — from the interview, not inferable from code. What problem it solves, who it's for, the one thing a newcomer most needs to understand.>
+
+## Stack
+<Languages, frameworks, package manager, runtime — from the audit. Brief; the manifest has the rest.>
+
+## Layout
+<Top-level directories and what each is for. One line each. Don't restate the full tree.>
+
+## Conventions
+<Non-obvious project conventions: naming, test layout, patterns enforced by habit rather than config.>
+
+## Non-obvious rules
+<Things an agent must know that aren't visible from a glance. Deploy/release notes, in-flight rewrites to avoid documenting as permanent, etc.>
