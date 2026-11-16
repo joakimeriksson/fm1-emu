@@ -361,7 +361,7 @@ pub fn run(
                 l[..fm1_soc::smk::NLED].copy_from_slice(&mm.soc.periph.smk.led_take());
                 l
             } else {
-                mm.soc.periph.led_take()
+                mm.soc.periph.led_shown()
             };
             v.pads = mm.soc.periph.smk.pads;
             v.halted = mm.halted;
