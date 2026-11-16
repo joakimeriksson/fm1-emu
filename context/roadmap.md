@@ -1,6 +1,6 @@
 ---
 load_when: "phasing, acceptance gates or future work"
-last_verified: 2026-11-15
+last_verified: 2026-11-16
 source_refs:
   - context/status.md
   - context/product-specification.md
@@ -23,7 +23,7 @@ Prototype stock/DX7 and SLOOP adapters against emulated USB before physical tran
 
 ## Physical companion
 
-Prepare normal MIDI transfer coordination and recovery integration with protocol fixtures and simulated flash. Actual live editing, backups/restores, firmware installation and optional bootloader changes require real-device acceptance. Installation remains explicitly confirmed and is never a recall side effect.
+A project-only SLOOP 3.3.7 companion now uses shared browser/native-launch sources with protocol fixtures and simulated transfer tests. Next validate that adapter on physical hardware; sample/sound-bank transfer, additional firmware adapters and recovery integration remain future work. Actual live editing, backups/restores, firmware installation and optional bootloader changes require real-device acceptance. Installation remains explicitly confirmed and is never a recall side effect.
 
 ## Later
 

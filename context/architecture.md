@@ -1,6 +1,6 @@
 ---
 load_when: "architecture, runtime boundaries, storage or bridge changes"
-last_verified: 2026-11-15
+last_verified: 2026-11-16
 source_refs:
   - web/studio/**
   - web/main.js
@@ -11,6 +11,10 @@ source_refs:
   - web/render-runtime.js
   - web/worklet.js
   - crates/fm1-soc/src/controller.rs
+  - crates/fm1-host/src/lib.rs
+  - crates/fm1-live/src/main.rs
+  - crates/fm1-soc/src/fwsc.rs
+  - web/hardware/**
 ---
 # Architecture
 
@@ -32,7 +36,7 @@ The Studio IndexedDB database stores immutable imported firmware/setup records, 
 
 The device page owns its running flash and upstream save database. Studio exports its current persistent setup through the bridge; files can be imported back into the collection. Full CPU/RAM snapshotting is not implemented. Working storage is now scoped by the Studio instance UUID in its URL plus the immutable library item ID. A new base-URL visit creates a separate instance; retaining an instance URL permits persistent recall. Deliberately opening the same instance URL twice shares the same working scope and retains upstream revision conflict detection. Switching waits for a flush acknowledgement; timeout keeps the current device. Reopening a setup resumes its scoped working copy rather than reapplying its original imported baseline.
 
-There is no implicit native/browser storage synchronization. All hardware backup and recovery routes remain future work. Unknown formats cannot be converted into a firmware package simply by renaming a file.
+There is no implicit native/browser storage synchronization. The shared project-only Hardware Library is separate from emulation; hardware verification and full backup/recovery remain pending. See [hardware-library.md](hardware-library.md). Unknown formats cannot be converted into a firmware package simply by renaming a file.
 
 ## Offline boundary
 
@@ -45,3 +49,13 @@ Only the build’s same-origin asset allowlist is cached. Firmware comes from th
 Firmware-specific adapters should target the emulated USB interface and physical MIDI transport with the same protocol contract. Privileged recovery stays in a standalone coordinator/helper, never the audio callback. Full machine snapshots, silent-firmware progress, general MIDI/SysEx and host transport need dedicated feasibility work before expanding the editor.
 
 MIDI input routing uses exact port IDs; migration from a name is allowed only when unambiguous. Disconnect and route/channel changes send sustain-off, all-notes-off and all-sound-off for each channel. This is performance MIDI, not a hardware-transfer or SysEx implementation.
+
+## Standalone plain application areas
+
+`fm1_soc::fwsc::from_area` validates the m-bootloader `app_area_head`/`app.bin` records and payload CRC, retains original XIP bytes and installs an encrypted copy into blank emulated flash at 0x4000. The standalone loader supplies a boot stack for the original entry stub, then uses the existing SoC/SFC path. All three hosts call `firmware_from_bytes` for content detection and `boot_firmware` for the boot stack, board, flash and SFC handoff. Plugin and WASM restore through `Soc::restore_flash`; direct copies of raw saved flash into XIP bypass decryption and are forbidden. JS `appFromPackage` provides preflight validation only; Rust remains authoritative at execution. The existing WASM `fm1_boot_fwsc` ABI also accepts `.area` to preserve caller compatibility. Original bytes and their hash remain the save identity for either format. Browser collection exports infer the original extension from the bytes, including older records without format metadata.
+
+## Shared hardware companion
+
+Standalone F6 and the plugin toolbar use `fm1-host` to open the same embedded companion that Studio serves at `/hardware/`. It is a deliberately separate physical-device destination with one protocol adapter, a bounded Web MIDI session and explicit project-file operations. Device capabilities are version-gated; no emulator import, plugin state recall or firmware change calls hardware code. Browser and native-launch copies have separate origins, so their session locks do not coordinate across those origins. Close other editors before connecting. Details and limits live in [hardware-library.md](hardware-library.md).
+
+Standalone GUI recall stores launch arguments and a content-hashed working-flash file under the host session directory. Headless diagnostics remain explicit. Finder reopening restores that exact instrument, while DAW project recall remains instance-owned and browser selection is keyed by instance URL. Reset uses each host's existing restart/load path with initial flash; no CPU/RAM snapshot or hardware operation is implied.

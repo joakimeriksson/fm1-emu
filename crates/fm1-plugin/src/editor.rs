@@ -107,8 +107,23 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 let name = params.firmware.lock().unwrap().name.clone();
                 let idle = ui.picking.is_none() && ui.job.is_none();
                 if bar.add_enabled(idle, egui::Button::new("Load firmware / save…"))
-                    .on_hover_text("Open a .fwsc firmware package or a shared .fm1save setup").clicked() {
+                    .on_hover_text("Open a .fwsc / .area firmware package or a shared .fm1save setup").clicked() {
                     ui.picking = Some((FileAction::Load, pick(FileAction::Load, &name)));
+                }
+                if bar.button("Hardware Library ↗").on_hover_text("Open the shared USB project library in Chrome or Edge; separate from this emulated instrument").clicked() {
+                    std::thread::spawn(|| { if let Err(e)=fm1_host::open_hardware_library(){nih_log!("Hardware Library: {e}");} });
+                }
+                if bar.add_enabled(idle && !params.firmware.lock().unwrap().pkg.is_empty(), egui::Button::new("Reset Firmware State…")).clicked() {
+                    let params=params.clone();let link=link.clone();
+                    std::thread::spawn(move || {
+                        if rfd::MessageDialog::new().set_title("Reset Firmware State")
+                            .set_description("Restart this plugin's current firmware with initial saved memory? Export a save first to keep your work. Host settings and physical hardware are unchanged.")
+                            .set_buttons(rfd::MessageButtons::OkCancel).show()==rfd::MessageDialogResult::Ok {
+                            let firmware=params.firmware.lock().unwrap().clone();
+                            let (tx,_rx)=std::sync::mpsc::channel();
+                            let _=link.cmds.send(Cmd::Load{firmware,sectors:Vec::new(),reply:tx});
+                        }
+                    });
                 }
                 let has_firmware = !params.firmware.lock().unwrap().pkg.is_empty();
                 if bar.add_enabled(idle && has_firmware, egui::Button::new("Export save…"))
@@ -172,7 +187,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 let status = if !ui.msg.is_empty() {
                     ui.msg.clone()
                 } else if !booted {
-                    "Open a .fwsc firmware or shared .fm1save to start".into()
+                    "Open a .fwsc / .area firmware or shared .fm1save to start".into()
                 } else if halted {
                     "The firmware stopped: an instruction the emulator does not know".into()
                 } else {
@@ -384,7 +399,7 @@ fn pick(action: FileAction, name: &str) -> Answer {
         let dialog = match &owner { Some(o) => dialog.set_parent(o), None => dialog };
         let path = match action {
             FileAction::Load => dialog
-                .add_filter("FM-1 firmware or shared save", &["fwsc", "fm1save", "json"]).pick_file(),
+                .add_filter("FM-1 firmware or shared save", &["fwsc", "area", "fm1save", "json"]).pick_file(),
             FileAction::Export => dialog.add_filter("FM-1 shared save", &["fm1save"])
                 .set_file_name(format!("{}.fm1save", if name.is_empty() { "FM-1" } else { &name })).save_file(),
         };

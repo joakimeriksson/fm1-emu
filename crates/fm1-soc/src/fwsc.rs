@@ -679,3 +679,72 @@ mod tests {
         assert_eq!(&smk[usr + 4096 + 118..usr + 4096 + 128], b"INIT VOICE", "slot 32 kept");
     }
 }
+
+/// Load a plain m-bootloader application area, preserving its original XIP bytes.
+/// Header and payload CRCs follow the JLFS CRC16/XMODEM records.
+pub fn from_area(bytes: &[u8]) -> Result<crate::Stock, String> {
+    let invalid = || "invalid FM-1 application area (.area)".to_string();
+    if bytes.len() < 64 || bytes.len() > crate::FLASH_SIZE - crate::XIP_FLASH_OFFSET {
+        return Err(invalid());
+    }
+    for at in [0, 32] {
+        if crc16(&bytes[at + 2..at + 32]) != u16le(bytes, at) { return Err(invalid()); }
+    }
+    let area = head(bytes, 0);
+    let app = head(bytes, 32);
+    if area.name != "app_area_head" || area.flags != 0x83 || area.size != bytes.len()
+        || app.name != "app.bin" || app.flags != 0x82 || app.offset < 64
+        || app.offset.checked_add(app.size) != Some(bytes.len())
+        || area.offset != crate::XIP_BASE as usize + app.offset || area.offset & 1 != 0
+        || crc16(&bytes[app.offset..]) != u16le(bytes, 34)
+        || u16le(bytes, 2) != u16le(bytes, 34) {
+        return Err(invalid());
+    }
+    // Install into an emulated blank chip using a deterministic key. SFC reads then
+    // decrypt the same original area, including samples beyond the executable.
+    let mut flash = vec![0xff; crate::FLASH_SIZE];
+    let start = crate::XIP_FLASH_OFFSET;
+    flash[start..start + bytes.len()].copy_from_slice(bytes);
+    for (i, block) in flash[start..start + bytes.len()].chunks_mut(32).enumerate() {
+        unmask(block, (i * 8) as u16);
+    }
+    Ok(crate::Stock { format: crate::FirmwareFormat::ApplicationArea, xip: bytes.to_vec(), flash, entry: area.offset as u32,
+        board: crate::Board::Fm1, identity: "FM-1 application area".into(), key: 0,
+        app_end: start + bytes.len(), usr: None, usr_layout: UsrLayout::of(crate::Board::Fm1) })
+}
+
+#[cfg(test)]
+mod area_tests {
+    use super::*;
+    #[test]
+    fn plain_area_validates_headers_payload_and_flash_mapping() {
+        let mut b = vec![0xff; 0x140];
+        for (at, address, size, flags, name) in [
+            (0, crate::XIP_BASE + 0x120, 0x140u32, 0x83, "app_area_head"),
+            (32, 0x120, 0x20, 0x82, "app.bin"),
+        ] {
+            b[at..at+32].fill(0);
+            b[at+4..at+8].copy_from_slice(&address.to_le_bytes());
+            b[at+8..at+12].copy_from_slice(&size.to_le_bytes());
+            b[at+12] = flags;
+            b[at+16..at+16+name.len()].copy_from_slice(name.as_bytes());
+        }
+        let crc = crc16(&b[0x120..]);
+        for at in [0, 32] {
+            b[at+2..at+4].copy_from_slice(&crc.to_le_bytes());
+            let hcrc = crc16(&b[at+2..at+32]);
+            b[at..at+2].copy_from_slice(&hcrc.to_le_bytes());
+        }
+        let st = from_area(&b).unwrap();
+        assert_eq!(st.entry, crate::XIP_BASE + 0x120);
+        let mut plain = st.flash[crate::XIP_FLASH_OFFSET..crate::XIP_FLASH_OFFSET+b.len()].to_vec();
+        for (i, block) in plain.chunks_mut(32).enumerate() { unmask(block, (i*8) as u16); }
+        assert_eq!(plain, b);
+        assert_eq!(st.xip, b);
+        for at in [0, 4, 12, 34, 40, 0x120, 0x13f] {
+            let mut bad = b.clone(); bad[at] ^= 1;
+            assert!(from_area(&bad).is_err(), "corruption at {at}");
+        }
+        for len in [0, 32, 63, 0x120, b.len()-1] { assert!(from_area(&b[..len]).is_err()); }
+    }
+}

@@ -919,6 +919,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fm1-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "fm1-isa"
 version = "0.5.1"
 
@@ -930,6 +938,7 @@ dependencies = [
  "base64",
  "dispatch2",
  "fm1-core",
+ "fm1-host",
  "fm1-soc",
  "nih_plug",
  "nih_plug_egui",

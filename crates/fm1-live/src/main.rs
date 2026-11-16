@@ -37,6 +37,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use fm1_core::{Bus, Cpu};
 use fm1_soc::{machine, Action, Soc};
+mod app_icon;
+
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use panel::{Ctl, ENCS};
 
@@ -259,7 +261,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                 o.fwsc = Some(path);
                 o.name = format!("{name} {ver}");
             }
-            "--fwsc" => {
+            "--fwsc" | "--area" => {
                 let path = a.get(i + 1)?;
                 o.fwsc = Some(path.clone());
                 // (the window's title: the package's name, `FM-1` for M-VAVE's own FM-1.fwsc)
@@ -314,7 +316,7 @@ impl Machine {
             Some(path) => {
                 let syx = o.syx.as_ref().map(std::fs::read).transpose()?;
                 let pkg = std::fs::read(path)?;
-                let st = fm1_soc::stock_from_package(&pkg, syx.as_deref())
+                let st = fm1_soc::firmware_from_bytes(&pkg, syx.as_deref())
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {e}")))?;
                 Some(st)
             }
@@ -357,8 +359,7 @@ impl Machine {
         soc.write32(params, params + 0x40);
         cpu.regs[0] = params;
         if let Some(st) = &stock {
-            cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
-            soc.sfc_boot(st.key, st.app_end);
+            fm1_soc::boot_firmware(&mut soc, &mut cpu, st);
         }
         if let Some(path) = o.flash.as_ref().filter(|p| std::path::Path::new(p).exists()) {
             let f = std::fs::read(path)?;
@@ -1381,9 +1382,10 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInpu
 /// Pixels of vertical mouse drag per encoder click.
 const DRAG_PER_CLICK: f32 = 8.0;
 
-const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package: a community firmware, or M-VAVE's own)
+const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc (or --area FIRMWARE.area)   (a firmware package: a community firmware, or M-VAVE's own)
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
+F6 (Fn-F6 on some Macs): open Hardware Library in Chrome or Edge
 options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw] [--midi-ch N] [--flash FILE] [--usb]
          [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 by default)
                                  audio queued ahead of the device to start with; it grows by itself
@@ -1433,10 +1435,38 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
+/// Native menu actions share the same handlers as panel shortcuts.
+#[cfg(target_os = "macos")]
+fn install_menus(win: &mut Window) -> Vec<minifb::Menu> {
+    use minifb::{Menu, MENU_KEY_COMMAND, MENU_KEY_SHIFT};
+    let mut menus=Vec::new();
+    for (title, items) in [
+        ("File", vec![("Open Firmware…", 1001, Some((Key::O, MENU_KEY_COMMAND))),
+                       ("Close Window", 1002, Some((Key::W, MENU_KEY_COMMAND)))]),
+        ("Audio", vec![("Toggle WAV Recording", 1003, Some((Key::R, MENU_KEY_COMMAND | MENU_KEY_SHIFT)))]),
+        ("Instrument", vec![("Reset Firmware State…",1006,None)]),
+        ("Hardware", vec![("Open Hardware Library", 1004, Some((Key::L, MENU_KEY_COMMAND | MENU_KEY_SHIFT)))]),
+        ("Help", vec![("FM-1 Studio User Guide", 1005, None)]),
+    ] {
+        let mut menu=Menu::new(title).expect("native menu");
+        for (label,id,shortcut) in items {
+            let mut item=menu.add_item(label,id);
+            if let Some((key,modifiers))=shortcut { item=item.shortcut(key,modifiers); }
+            item.build();
+        }
+        win.add_menu(&menu);menus.push(menu);
+    }
+    menus
+}
+
+fn launch_hardware_library() {
+    std::thread::spawn(|| { if let Err(e)=fm1_host::open_hardware_library(){eprintln!("Hardware Library: {e}");} });
+}
+
 /// A firmware package from a file dialog (Windows, macOS).
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_firmware() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
+    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc", "area"]).set_title("Open an FM-1 firmware").pick_file()
 }
 
 /// Modal shortcuts trigger on release, after observing an idle key state.
@@ -1474,7 +1504,7 @@ fn open_another() -> Option<Vec<String>> {
 /// new one never loads or overwrites the old one's flash.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn carried_over(args: &[String]) -> Vec<String> {
-    const WITH_VALUE: [&str; 7] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
+    const WITH_VALUE: [&str; 8] = ["--theme", "--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
     const FLAGS: [&str; 4] = ["--usb", "--exclusive", "--midi-log", "--controller-raw"];
     let mut out = Vec::new();
     let mut i = 0;
@@ -1542,6 +1572,10 @@ fn double_clicked() -> bool {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--hardware-library") {
+        if let Err(e)=fm1_host::open_hardware_library(){eprintln!("Hardware Library: {e}");std::process::exit(1);}
+        return;
+    }
     fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", buildinfo::version("fm1-live"));
@@ -1558,8 +1592,10 @@ fn main() {
     // script: the usage, as before)
     #[cfg(any(windows, target_os = "macos"))]
     if std::env::args().len() == 1 && double_clicked() {
-        if let Some(path) = pick_firmware() {
-            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--fwsc").arg(&path).status());
+        let remembered=fm1_host::last_session().ok().filter(|args| parse_args(std::iter::once("fm1-live".to_string()).chain(args.clone()).collect()).is_some_and(|o| o.fwsc.as_ref().is_some_and(|p| std::path::Path::new(p).is_file())));
+        let startup=remembered.or_else(||pick_firmware().map(|p|vec!["--fwsc".into(),p.to_string_lossy().into_owned()]));
+        if let Some(args) = startup {
+            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
             // a firmware that would not load: its error stays readable, not gone with the console
             let failed = match run {
                 Ok(st) if st.success() => None,
@@ -1574,7 +1610,7 @@ fn main() {
         }
         return;
     }
-    let Some(o) = parse() else {
+    let Some(mut o) = parse() else {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
@@ -1608,6 +1644,23 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // GUI sessions persist by immutable firmware content. Explicit CLI flash paths still win.
+    if let Some(path)=o.fwsc.clone() {
+        let configured=(|| -> std::io::Result<()> {
+            if o.flash.is_none(){o.flash=Some(fm1_host::firmware_memory(&std::fs::read(&path)?)?.to_string_lossy().into_owned());
+                m=Machine::new(&o)?;}
+            let mut args=std::env::args().skip(1).collect::<Vec<_>>();
+            if !args.iter().any(|a|a=="--flash"){args.extend(["--flash".into(),o.flash.clone().unwrap()]);}
+            for i in 0..args.len().saturating_sub(1) {
+                if ["--fwsc","--area","--flash","--syx"].contains(&args[i].as_str()) {
+                    let p=std::path::Path::new(&args[i+1]);
+                    if p.is_relative(){args[i+1]=std::env::current_dir()?.join(p).to_string_lossy().into_owned();}
+                } else if args[i]=="--fw" {args[i]="--fwsc".into();args[i+1]=std::env::current_dir()?.join(&path).to_string_lossy().into_owned();}
+            }
+            fm1_host::remember_session(&args)
+        })();
+        if let Err(e)=configured{eprintln!("Session recall: {e}");}
+    }
     let mut pot = m.soc.periph.adc_value[4];
 
     let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
@@ -1782,6 +1835,7 @@ fn main() {
             WindowOptions::default()
         };
         let mut win = Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts)?;
+        app_icon::apply(&mut win);
         win.set_target_fps(120);
         if let Some((x, y)) = at {
             win.set_position(x, y);
@@ -1821,7 +1875,35 @@ fn main() {
     let mut firmware_shortcut = ReleaseShortcut::default();
     let mut open_chord = ReleaseShortcut::default();
     let mut suppress_o = false;
+    #[cfg(target_os = "macos")]
+    let _menus=install_menus(&mut win);
     while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
+        #[cfg(target_os = "macos")]
+        let menu_action=win.is_menu_pressed();
+        #[cfg(not(target_os = "macos"))]
+        let menu_action: Option<usize>=None;
+        match menu_action {
+            Some(1001) => { next=open_another(); continue; }
+            Some(1002) => break,
+            Some(1003) => toggle_record(&recorder, &o.name),
+            Some(1004) => launch_hardware_library(),
+            Some(1006) => {
+                #[cfg(target_os="macos")]
+                if rfd::MessageDialog::new().set_title("Reset Firmware State")
+                    .set_description("Restart the current firmware with its initial saved memory? Unsaved edits will be lost. A copy of the previous memory file will be kept. Host preferences and physical hardware are unchanged.")
+                    .set_buttons(rfd::MessageButtons::OkCancel).show()==rfd::MessageDialogResult::Ok {
+                    let mut args=std::env::args().skip(1).collect::<Vec<_>>();
+                    if !args.iter().any(|a|a=="--flash"){if let Some(p)=&o.flash{args.extend(["--flash".into(),p.clone()]);}}
+                    if let Some(i)=args.iter().position(|a|a=="--syx") {args.drain(i..(i+2).min(args.len()));}
+                    args.push("--reset-after-shutdown".into());next=Some(args);
+                }
+            },
+            Some(1005) => { std::thread::spawn(|| {
+                let _=fm1_host::open_user_guide();
+            }); },
+            _ => {}
+        }
+
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
             enc_clicks[i] += clicks;
             turning[i] = 10;
@@ -1950,9 +2032,12 @@ fn main() {
             }
         }
         let f4 = firmware_shortcut.update(win.is_key_down(Key::F4));
-        let open = open_chord.update(command && o_down);
+        let open = open_chord.update(command && o_down && !cfg!(target_os = "macos"));
         if f4 || open {
             next = open_another();
+        }
+        if win.is_key_pressed(Key::F6, KeyRepeat::No) {
+            launch_hardware_library();
         }
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
@@ -2032,7 +2117,11 @@ fn main() {
     }
     // F4: the new firmware, now that this one has stopped, with the window, the MIDI inputs
     // (WinMM's are one program's at a time) and the audio device let go of first
-    if let Some(args) = next {
+    if let Some(mut args) = next {
+        if args.iter().any(|a|a=="--reset-after-shutdown") {
+            args.retain(|a|a!="--reset-after-shutdown");
+            if let Some(path)=&o.flash { if let Err(e)=fm1_host::archive_memory(path){eprintln!("Reset cancelled: {e}");return;} }
+        }
         drop(win);
         drop(_midi);
         drop(_stream);

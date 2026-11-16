@@ -1,10 +1,14 @@
-import { cpSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../",import.meta.url));
 cpSync(root+"web/studio",root+"web/dist/studio",{recursive:true,filter:path=>!path.endsWith(".test.mjs")});
-const assets=["index.html","main.js","style.css","fm1_web.wasm","worklet.js","render-runtime.js","render-worker.js","jit.js","fwsc.js","persistence.js","midi-input.js","tryout.js","firmwares.json",
+cpSync(root+"web/hardware",root+"web/dist/hardware",{recursive:true,filter:path=>!path.endsWith(".test.mjs")});
+const assets=["hardware/index.html","hardware/protocol.js","hardware/transport.js","hardware/page.js","index.html","main.js","style.css","fm1_web.wasm","worklet.js","render-runtime.js","render-worker.js","jit.js","fwsc.js","persistence.js","midi-input.js","tryout.js","firmwares.json",
   "studio/index.html","studio/studio.css","studio/app.js","studio/library.js"];
+cpSync(root+"web/icons",root+"web/dist/icons",{recursive:true});
+for (const file of ["favicon.ico","site.webmanifest"]) cpSync(root+"web/"+file,root+"web/dist/"+file);
+assets.push("favicon.ico","site.webmanifest",...readdirSync(root+"web/icons").map(name=>"icons/"+name));
 const hash=createHash("sha256");
 for(const asset of assets) hash.update(asset).update(readFileSync(root+"web/dist/"+asset));
 const version=hash.digest("hex").slice(0,16);
@@ -22,7 +26,7 @@ self.addEventListener("fetch",event=>{
   if(event.request.method!=="GET" || url.origin!==self.location.origin) return;
   const base=new URL("./",self.location.href);
   const path=url.pathname.slice(base.pathname.length);
-  const asset=path==="" ? "./index.html" : path==="studio/" ? "./studio/index.html" : "./"+path;
+  const asset=path==="" ? "./index.html" : path==="hardware/" ? "./hardware/index.html" : path==="studio/" ? "./studio/index.html" : "./"+path;
   if(!ASSETS.includes(asset)) return;
   // All runtime query variants use this installed build's coherent cached assets.
   event.respondWith(caches.open(CACHE).then(cache=>cache.match(new URL(asset,base))).then(hit=>hit||fetch(event.request)));

@@ -14,9 +14,9 @@ const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // the panel follows it (an SMK-37 package opened on the FM-1 page gets the SMK-37's).
 const DEVICE = document.documentElement.dataset.device === "smk37" ? "smk37" : "fm1";
 const DEV = DEVICE === "smk37"
-  ? { product: "M-VAVE SMK-37", board: 1, key: "smk37.", stock: "SMK-37 Pro_016.fwsc", stockFile: /^SMK-37 (Pro|Elite)_\d+( \(\d+\))?\.fwsc$/i,
+  ? { product: "M-VAVE SMK-37", board: 1, key: "smk37.", stock: "SMK-37 Pro_016.fwsc", stockFile: /^SMK-37 (Pro|Elite)_\d+( \(\d+\))?\.(fwsc|area)$/i,
       other: { name: "FM-1", href: "../" } }
-  : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.fwsc$/i,
+  : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.(fwsc|area)$/i,
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
 const STUDIO = params.get("studio") === "1";
@@ -69,7 +69,7 @@ function linkedFirmware(q) {
   const raw = url.pathname.split("/").pop() || url.host;
   let file = raw;
   try { file = decodeURIComponent(raw); } catch { /* a malformed escape: the name as written */ }
-  file = file.replace(/\.fwsc$/i, "");
+  file = file.replace(/\.(fwsc|area)$/i, "");
   return { id: "link", name: q.get("name") || file, version: "", author: "", license: "", about: "",
     repo: url.href, package: url.href, link: true };
 }
@@ -461,7 +461,7 @@ async function openLocal(file) {
     else status.textContent = `${file.name} ready: click Start`;
     return;
   }
-  localFw = { id: "local", name: file.name.replace(/\.fwsc$/i, ""), version: "", bytes: new Uint8Array(await file.arrayBuffer()) };
+  localFw = { id: "local", name: file.name.replace(/\.(fwsc|area)$/i, ""), version: "", bytes: new Uint8Array(await file.arrayBuffer()) };
   let opt = [...fwSel.options].find((o) => o.value === "local");
   if (!opt) fwSel.add(opt = new Option("", "local"), 0);
   opt.text = `${localFw.name} (your file)`;
@@ -486,7 +486,7 @@ const stage = document.querySelector(".stage");
 stage.addEventListener("dragover", (e) => { e.preventDefault(); });
 stage.addEventListener("drop", (e) => {
   e.preventDefault();
-  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|syx)$/i.test(f.name));
+  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|area|syx)$/i.test(f.name));
   if (!file) return;
   if (/\.syx$/i.test(file.name)) {
     file.arrayBuffer().then((b) => { bank = new Uint8Array(b); bankName.textContent = file.name; if (node) boot(); });

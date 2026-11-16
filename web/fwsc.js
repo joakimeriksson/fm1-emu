@@ -81,7 +81,22 @@ function rawFlash(file) {
   throw new Error("no flash image in the package");
 }
 
+export function isApplicationArea(file) {
+  return String.fromCharCode(...file.subarray(16, 29)) === "app_area_head";
+}
+
 export function appFromPackage(file) {
+  if (isApplicationArea(file)) {
+    const fail = () => { throw new Error("Invalid FM-1 application area (.area)"); };
+    if (file.length < 64 || file.length > 0xfc000) fail();
+    for (const at of [0, 32]) if (crc16(file, at+2, 30) !== u16(file, at)) fail();
+    const off = u32(file, 36), len = u32(file, 40);
+    if (file[12] !== 0x83 || file[44] !== 0x82 || name(file, 48, 16) !== "app.bin" ||
+        u32(file, 8) !== file.length || off < 64 || off+len !== file.length ||
+        u32(file, 4) !== 0x02000000+off || (off & 1) ||
+        crc16(file, off, len) !== u16(file, 34) || u16(file, 2) !== u16(file, 34)) fail();
+    return file.slice(off);
+  }
   const flash = rawFlash(file);   // a copy: unpacking works on it in place
 
   // the JLFS directory: the chip key and where the app area starts

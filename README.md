@@ -4,7 +4,7 @@ An original-firmware FM-1 instrument for your Mac, DAW and browser, with room fo
 
 The aim is to run the same firmware you install on an M-VAVE FM-1: its sound, sequencer, screen and behavior. This fork builds on [Joakim Eriksson’s fm1-emu](https://github.com/joakimeriksson/fm1-emu). It adds a local-first workspace and library around the existing binary emulator.
 
-**Early development.** Native standalone and plugin targets retain the upstream device panel. The new Studio interface is currently in the browser. Full session snapshots, expanded firmware editors and physical-device transfers are still planned. There is no hardware available for verification yet.
+**Early development.** Native standalone and plugin targets retain the upstream device panel. The new Studio interface is currently in the browser. Full session snapshots and expanded firmware editors remain planned. A shared SLOOP 3 project Hardware Library is implemented with simulated transfer tests; physical-device verification remains pending. There is no hardware available for verification yet.
 
 **New here? Read the [beginner user guide](context/user-guide.md)** for firmware changes, HYP1, keyboard setup, DAWs, backups and offline use.
 
@@ -14,9 +14,10 @@ The aim is to run the same firmware you install on an M-VAVE FM-1: its sound, se
 - Build a static browser studio with the same WASM emulation core and playable hardware view.
 - Use a factory MiniLab 3 profile in standalone/browser, with all four FM-1 parameter knobs, navigation and master mapping.
 - Open native firmware with Cmd/Ctrl+O; Shift-drag encoders for fine adjustment.
-- Import original `.fwsc` firmware and `.fm1save` persistent setups into a local, hash-addressed collection.
+- Import original `.fwsc` packages, supported `.area` applications and `.fm1save` persistent setups into a local, hash-addressed collection.
 - Search, reopen and export items, and back up/restore the collection.
 - Cache browser runtime assets for offline use; imported firmware is stored locally.
+- Open the shared [Hardware Library](context/hardware-library.md) from Studio, standalone or plugins for supported SLOOP 3 project transfers; physical testing is pending.
 - Download Felucca explicitly from the UI to try the instrument.
 
 A firmware boot is not proof of sound or timing equivalence on hardware. Each firmware/version still needs compatibility testing. The browser and native/plugin targets have different MIDI capabilities; see [status](context/status.md).
@@ -107,4 +108,6 @@ Connect a class-compliant USB MIDI keyboard to the Mac. Traditional DIN MIDI con
 
 In native standalone, use `--midi NAME` to choose a controller (the default accepts all MIDI inputs). In a DAW, select/arm the keyboard as the track’s MIDI input and route it to the FM-1 plugin. The DAW owns the controller connection. A keyboard connected directly to the Mac does not require physical FM-1 hardware.
 
-Browser input now distinguishes identically named ports by ID and releases sustain/notes on disconnect or route/channel changes. Physical-controller acceptance remains pending; no keyboard was assumed present during automated tests.
+Browser input now distinguishes identically named ports by ID and releases sustain/notes on disconnect or route/channel changes. MiniLab 3 note/CC traffic was captured from the attached controller, and automated hotplug/release tests passed. Physical acceptance of every mapped gesture and real DAW routing remains pending.
+
+The [icon platform contract](context/icons.md) records the approved visual intent, platform-specific assets/build steps and acceptance checks; the [asset inventory](assets/icons/README.md) lists export formats.

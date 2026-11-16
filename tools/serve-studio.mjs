@@ -2,7 +2,7 @@ import {createServer} from "node:http";
 import {readFile,realpath,stat} from "node:fs/promises";
 import {resolve,extname,sep} from "node:path";
 const root=await realpath("web/dist");
-const mime={".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".wasm":"application/wasm",".json":"application/json",".png":"image/png",".pdf":"application/pdf"};
+const mime={".ico":"image/vnd.microsoft.icon",".webmanifest":"application/manifest+json",".html":"text/html; charset=utf-8",".js":"text/javascript; charset=utf-8",".css":"text/css; charset=utf-8",".wasm":"application/wasm",".json":"application/json",".png":"image/png",".pdf":"application/pdf"};
 createServer(async(req,res)=>{
   try {
     const pathname=decodeURIComponent(new URL(req.url,"http://localhost").pathname);

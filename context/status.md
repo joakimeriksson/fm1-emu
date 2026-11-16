@@ -1,12 +1,20 @@
 ---
 load_when: "current progress, next steps or known limitations"
-last_verified: 2026-11-15
+last_verified: 2026-11-16
 source_refs:
+  - assets/icons/README.md
+  - tools/generate-icons.swift
   - web/studio/**
   - web/main.js
   - context/development.md
+  - crates/fm1-host/src/lib.rs
+  - crates/fm1-live/src/main.rs
+  - crates/fm1-plugin/src/editor.rs
+  - web/hardware/**
 ---
 # Status
+
+Verification sections record individual increments, not cumulative current test counts. Later sections describe `.area` support, the project-only Hardware Library and standalone session recall; retain their explicit acceptance limits when summarizing current capability.
 
 ## Implemented in the first build increment
 
@@ -19,7 +27,7 @@ source_refs:
 - Build-generated offline asset cache; firmware bytes live separately in the library.
 - Native standalone and plugin build paths retained without replacing the existing native UI.
 
-## Verification
+## Initial verification (2026-11-15)
 
 Verified on 2026-11-15 on Apple M5 Pro, arm64, macOS 27.2, using Rust 1.100.0 and Node 24.21.0:
 
@@ -49,7 +57,7 @@ No physical hardware or real Ableton/Logic/Pro Tools session was tested. Current
 - Full volatile CPU/RAM snapshots are not implemented; unsaved edits need the firmware’s Save command.
 - Reusing the exact same Studio instance URL shares its working scope; open the base URL for an independent instance.
 - Native apps/plugins do not share Studio’s browser library or new UI yet.
-- Expanded editors, general MIDI/SysEx/clock/host transport and hardware transfers remain roadmap work.
+- Expanded editors, general MIDI/SysEx/clock/host transport and broad hardware transfers remain roadmap work. The project-only SLOOP 3 companion is implemented with physical verification pending.
 - Browser canvas keyboard accessibility needs a dedicated accessible layer.
 - Collection archives currently allow at most 256 items / 24 MiB of imported binary content.
 - Offline readiness is subject to browser storage policy; exported backups remain necessary.
@@ -91,3 +99,45 @@ The 1.5.65 original binary rendered 655,360 identical stereo frames in native an
 Downloaded latest published GR!MM release v2.0.2 (2026-11-03), original grimm.fwsc saved as reference/firmwares/grimm-2.0.2.fwsc. SHA-256 d85c0dd3d668f48157afad7b9a1eb2e49e376f931afd2349bebef9014eb1375d matches the release asset digest. Six-second original-binary boot/render completed with 257,280 audio frames. The package remains ignored; no hardware flash occurred.
 
 Validation: 32 native tests, 99 SoC/package tests, 30 plugin tests and 12 Studio tests pass; the separate macOS CoreMIDI hotplug/note-release/disconnect test passes too. Standalone and plugin bundles rebuilt without installing over existing plugins. Browser HYP1 playback at 240 MHz, save, firmware update check and clock-change reboot succeeded. In the final 93-second observation there was one early output underrun; the queue grew from 11.6 to 17.4 ms and no further underruns occurred between 22 and 93 seconds. This is a bounded observation, not a zero-dropout guarantee.
+
+## SLOOP 3 standalone application-area support
+
+The standalone picker accepts `.area` alongside `.fwsc`; CLI accepts `--area FILE`. SLOOP 3.3.7 beta's original application area passes header/payload CRC validation and boots through its own RAM unpacker. A 12-second headless native run displayed its five-track panel and captured 529,411 stereo frames, peak 5,081 (s16), with scripted PLAY/note input. This is boot/render/non-silent output evidence, not hardware or full musical correctness. Browser Studio and plugins now support `.area` using the same Rust format detector and boot handoff. WASM SLOOP smoke produced 528,640 frames and 57,600 lit pixels over 12 seconds; a MIDI note raised RMS from 0 to 0.0034. JS collection/setup round trips and WASM raw-flash/XIP recall passed. Rebuilt standalone, browser and CLAP/AU/VST3 bundles; real DAW acceptance remains pending. Downloads stay ignored in `reference/firmwares/`.
+
+## Hardware Library first increment
+
+Implemented shared file-based SLOOP 3.3.7 project capture/restore over Web MIDI, exposed from Studio, standalone F6 and plugin toolbar via an embedded companion. Includes protocol/version checks, current-project safety download, explicit restore review, unchanged-project check and full saved-project read-back comparison. It does not transfer samples/user sounds or raw flash. Eight simulated protocol/transport tests and the native embedding test pass; served page inspected visually with write controls disabled before connection. No physical FM-1 connection or write was performed. Source includes user-friendly host comparison and hardware workflows. Full hardware acceptance and real DAW interactions remain pending.
+
+Standalone session increment: last firmware/launch arguments and persistent flash restored on Finder launch, with content-hashed default memory files. Native reset archives previous memory after shutdown. Plugin reset reuses Cmd::Load with no saved sectors; browser selection resumes per instance without autoplay. Complete unsaved CPU/RAM recall and cross-host storage synchronization remain unimplemented.
+
+### Session/menu acceptance still pending
+
+Automated standalone/host tests pass (34 passed, one ignored), including preservation of pre-reset memory bytes; browser domain tests, builds and context checks passed. Finder last-session reopening, native menu interaction and plugin reset inside a real DAW still need manual acceptance. This does not establish capture of all live settings: unsaved RAM, held notes, playback position and window geometry are not checkpointed. Default standalone memory is shared by exact firmware hash; use separate explicit `--flash` paths for independent simultaneous runs.
+
+## App icon packaging
+
+The approved black FM-1 artwork is exported as macOS ICNS/iconset, Windows ICO, PNG sizes, browser favicons, opaque Apple touch icons and separate maskable web icons. Standalone and AU/VST3/CLAP local bundles build with icon resources attached before signing. Web builds copy the assets; Studio caches them offline. Windows standalone/CLAP/VST3 resource compilation and Linux X11/desktop integration are implemented but not runtime-verified on those platforms. Mobile home-screen appearance and real DAW artwork presentation remain unverified; DAWs own their plugin-list presentation.
+
+Verified locally: native standalone and three plugin bundles build; all four pass deep/strict signature verification and reference the expected ICNS bytes. PNG sizes, ICO frame directories, web icon links, manifest paths and offline asset coverage pass inspection. Both fm1-host tests pass, including the self-contained native companion favicon. Context checks pass. No plugin installation or publication was performed. Regeneration and Linux desktop setup are documented in the [icon asset guide](../assets/icons/README.md).
+
+### Flat charcoal icon revision
+
+Replaced the earlier glass-rim artwork with the approved smooth charcoal revision: flatter controls, gentle top lighting, soft contact shadows and crisper shallow outer bevels. All platform exports and the portable icon archive are regenerated from this source. Platform verification limits above still apply.
+
+macOS icon registration follow-up: the ICNS decoded correctly and CFBundleIconFile was present, but metadata-only checks missed the reported display issue. Re-registering the built app refreshed its resolved NSWorkspace artwork. Packaging now refreshes this one app after signing; no global icon cache reset is used. The resolved icon was rendered and visually inspected.
+
+### Blank screen and native macOS enclosure
+
+Replaced the icon display with blank unlit glass across exports. The native macOS Icon Composer source now separates isolated hardware from a solid charcoal body fill during export and omits any baked outer bevel/padding. Bundles include compiled Assets.car with CFBundleIconName plus ICNS fallback. This corrects the extra white system frame seen with the legacy-only icon. The earlier registration-only fix did not address that sizing issue. All icon formats and the reusable archive are regenerated; macOS artwork is checked through its resolved system rendering. Windows/Linux/mobile runtime appearance remains unverified.
+
+The final source passes raw PNG checks for a uniform #292a2b body and unlit screen. All four local macOS bundles and web assets were rebuilt; native artwork is checked without the legacy white enclosure, and no controls are clipped. The archive contains the Icon Composer document and compiled catalog alongside other platform exports.
+
+Final Finder acceptance: the rebuilt app was selected in Finder and its large preview visibly shows the blank-screen instrument filling the native rounded tile, with no extra white frame and no clipped controls. Native packaging derives CFBundleVersion from the compiled icon digest to invalidate stale artwork registration after changes.
+
+### Flat-control refinement and preserved platform intent
+
+Refined the isolated hardware master against the approved flat-charcoal UI reference, reducing glossy outlines and surface mottling on knobs, buttons and keyboard trays while retaining layout, ivory markers and a blank screen. The body remains a separate uniform #292a2b fill. All native, legacy, Windows, Linux and web exports are regenerated from the same master.
+
+[icons.md](icons.md) now records the durable user intent, distinct platform assets, exact regeneration/build/package commands, macOS container/cache pitfalls and platform verification limits. It is routed from AGENTS.md and linked from the design/build docs. The portable archive now has a source-controlled `tools/package_icons.py` command, including the platform guide; the extracted package is refreshed with the ZIP.
+
+Refinement acceptance: uniform-body/blank-screen checks, icon sizes/frames/links/offline coverage, archive/catalog byte comparisons, all four macOS bundle signatures, both fm1-host tests and context integrity passed. Finder Quick Look visibly shows the refined matte controls and blank screen filling the native enclosure without the extra white frame or cropped controls. Windows/Linux/mobile and real DAW presentation retain the unverified limits in icons.md.

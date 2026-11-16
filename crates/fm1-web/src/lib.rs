@@ -141,14 +141,9 @@ impl Machine {
     // Runtime SPI writes replace complete ranges in XIP, including bytes that happen
     // to equal the encrypted package. Restore must reproduce that same memory view.
     fn replace_flash(&mut self, at: usize, data: &[u8]) {
-        self.soc.flash.mem[at..at + data.len()].copy_from_slice(data);
-        let from = at.max(fm1_soc::XIP_FLASH_OFFSET);
-        let end = (at + data.len()).min(fm1_soc::XIP_FLASH_OFFSET + self.soc.xip.len());
-        if from < end {
-            self.soc.xip[from - fm1_soc::XIP_FLASH_OFFSET..end - fm1_soc::XIP_FLASH_OFFSET]
-                .copy_from_slice(&data[from - at..end - at]);
-        }
-        self.soc.flash.revision = self.soc.flash.revision.wrapping_add(1);
+        let mut image = self.soc.flash.mem.clone();
+        image[at..at + data.len()].copy_from_slice(data);
+        self.soc.restore_flash(&image);
     }
 
     fn restore(&mut self, bytes: &[u8]) -> bool {
@@ -239,9 +234,11 @@ pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u
     // SAFETY: as fm1_boot.
     let pkg = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     let bank = (syx_len != 0).then(|| unsafe { Vec::from_raw_parts(syx, syx_len as usize, syx_len as usize) });
-    match fm1_soc::stock_from_package(&pkg, None) {
+    match fm1_soc::firmware_from_bytes(&pkg, None) {
         Ok(st) => {
-            let mut m = Machine::new(st.xip, st.entry, mhz, Some((&st.flash, st.board)));
+            let mut m = Machine::new(st.xip.clone(), st.entry, mhz, None);
+            fm1_soc::boot_firmware(&mut m.soc, &mut m.cpu, &st);
+            m.flash0 = m.soc.flash.mem.clone();
             m.usr = st.usr;
             m.usr_layout = st.usr_layout;
             if bank.as_deref().is_some_and(|b| !m.load_syx(b)) { return 1; }

@@ -9,6 +9,8 @@
     "build:web": "bash tools/build_studio.sh",
     "serve": "node tools/serve-studio.mjs",
     "test:studio": "node --test web/studio/*.test.mjs",
-    "check:context": "python3 tools/check_context.py"
+    "check:context": "python3 tools/check_context.py",
+    "check:firmware": "bash tools/check_firmware_alignment.sh",
+    "test:hardware": "node --test web/hardware/*.test.mjs"
   }
 }

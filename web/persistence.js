@@ -80,7 +80,7 @@ export async function importSave(text, resolvePackage = async () => null) {
   if (typeof r.hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.hash)) throw new Error('invalid firmware hash');
   const byo = r.package == null;
   const pkg = byo ? await resolvePackage(r.hash) : decode(r.package, MAX_PACKAGE);
-  if (!pkg) throw new Error('open the matching .fwsc firmware first, then import this save again');
+  if (!pkg) throw new Error('open the matching .fwsc or .area firmware first, then import this save again');
   if (!(pkg instanceof Uint8Array) || pkg.length < 20 * 0x30 || pkg.length > MAX_PACKAGE || await packageHash(pkg) !== r.hash) throw new Error('firmware hash mismatch');
   const sectors = r.sectors.map(s => ({ at: s.at, data: decode(s.data, SECTOR_SIZE) }));
   validateSectors(sectors);

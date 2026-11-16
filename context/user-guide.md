@@ -1,6 +1,6 @@
 ---
 load_when: "using Studio, changing firmware, controller setup, backups or beginner troubleshooting"
-last_verified: 2026-11-15
+last_verified: 2026-11-16
 source_refs:
   - web/studio/app.js
   - web/studio/library.js
@@ -9,16 +9,76 @@ source_refs:
   - context/status.md
   - crates/fm1-live/src/main.rs
   - crates/fm1-soc/src/controller.rs
+  - crates/fm1-host/src/lib.rs
+  - crates/fm1-plugin/src/editor.rs
+  - web/hardware/**
 ---
 # FM-1 Studio user guide
 
 FM-1 Studio runs original FM-1 firmware on your computer. **Firmware** is the program that turns the FM-1 into an instrument; changing it can change the sounds, controls and sequencer completely. You do not need a physical FM-1 to use the emulator.
 
+## Choose a version
+
+All three versions run the same original firmware on your computer. The hardware FM-1 is optional for playing them.
+
+| | Standalone Mac app | DAW plugins | Browser Studio |
+|---|---|---|---|
+| Best for | Playing an instrument without a DAW | Using an FM-1 instrument on a DAW track | Browsing and backing up a local collection |
+| Where it runs | Its own Mac window | Inside a compatible DAW: VST3, AU or CLAP | A browser tab |
+| Firmware | Open `.fwsc` or supported `.area` | Open the same files in the plugin | Import the same files into the collection |
+| Keeping your work | Save in the firmware; automatic working flash and last-firmware recall are available; use explicit `--flash` files for independent setups | Save in the firmware, then save the DAW project; shared `.fm1save` import/export is available | Save in the firmware, then export a saved setup; back up the collection too |
+| Where it is stored | Files on your Mac | DAW project state and exported files | This browser profile, address and port; exported files are separate backups |
+| MIDI keyboard | Connect to the Mac; choose the performance input | Route MIDI through the DAW track | Choose a Web MIDI input and allow access |
+| Offline use | Yes, with local firmware | Yes, with local firmware and an installed compatible host | After caching Studio and importing firmware; keep exported backups |
+| USB hardware library | F6 / Fn-F6 opens the shared companion in Chrome or Edge | **Hardware Library ↗** opens that same companion | **Hardware Library ↗** opens the companion page |
+
+The browser's collection screen is not built into the native instrument windows. Files can be moved between versions, but their libraries do not synchronize automatically. `.fm1save` preserves original firmware bytes and saved flash; none of the three guarantees recovery of every unsaved edit or the exact playback position. Actual Ableton/Logic acceptance remains pending even though the plugin bundles and engine tests pass. CLAP needs a host that supports CLAP; Logic uses AU, not VST3.
+
+## Use your computer as the hardware FM-1's library
+
+**Yes, for firmware with a suitable USB editor protocol.** The computer keeps project files and the FM-1 holds the project you are using now. You can swap projects over a USB data cable. This does not add active sample memory, make the FM-1 a USB drive, or stream a bigger sample library into it.
+
+Our first shared Hardware Library supports **SLOOP 3.3.7 projects only**. It is implemented, with simulated transfer tests, but **has not been verified on a physical FM-1**. It does not currently back up samples, user sounds, FM6 banks, firmware or a whole device. A project that uses custom sounds or samples still needs those resources on the hardware. Keep them together in your computer backup folder; use the [official SLOOP 3 editor](https://isod89.github.io/sloop3-fm1/editor.html) for those resources and disconnect our companion first.
+
+### Open the same companion from any version
+
+- Standalone: restart the rebuilt Mac app, then press **F6** (or **Fn-F6**) in its instrument window. You can also launch the companion alone with `target/release/fm1-live --hardware-library`.
+- Plugin: click **Hardware Library ↗** in its window. This opens a browser; USB transfer does not run in the DAW audio engine.
+- Browser Studio: click **Hardware Library ↗**. With the local server running, the direct page is [Hardware Library](http://127.0.0.1:8642/hardware/).
+
+On Mac, the native buttons open Chrome, or Edge if Chrome is unavailable. They create a self-contained companion file in `~/Library/Application Support/FM-1 Studio/`. No server is needed for that file. The browser version uses the same code in Studio's offline cache. If a browser blocks USB MIDI from a local file, open the localhost page instead. Neither launch route automatically connects or sends a project.
+
+### Save a project from hardware
+
+1. Run SLOOP 3.3.7 normally on the FM-1. Do not enter bootloader mode.
+2. Connect a USB **data** cable. Stop playback and recording. Close other hardware editor tabs and applications.
+3. In the companion, click **Choose USB MIDI ports** and allow MIDI/SysEx access. Choose the FM-1 input and output, then **Connect and check firmware**.
+4. Name the project and click **Save project to computer**. Keep the downloaded `.fm1project` file in your backup folder. It includes the project as it is now, the firmware version and a checksum.
+
+You can keep many such files on the computer. Saving another one does not replace the project on the FM-1. Hardware project files are separate from emulator `.fm1save` files and cannot be imported as emulator setups.
+
+### Restore a project to hardware
+
+1. Choose a `.fm1project` file. Its firmware version must match the connected FM-1.
+2. Click **Prepare restore and save safety backup**. This downloads the hardware's current project without changing it.
+3. Keep that safety file. Read the destination and replacement description, tick the confirmation, then click **Replace hardware project**.
+4. Leave USB connected until read-back verification finishes. The project is replaced; samples and sound banks are not transferred.
+
+If the project changed since preparation, prepare again for a fresh safety backup. If a cable disconnects or a request times out, the companion stops and requires reconnection; it does not blindly repeat a write. Keep your safety backup and inspect the device before another restore. A project safety backup is not a full-device recovery image.
+
+Only one companion should control a device. Tabs from the same origin share a session lock; different browser profiles, browser origins and third-party editors cannot share that lock. Disconnect before changing editor. Loading a DAW project or emulator save never writes to hardware.
+
+### Can every firmware use this without source changes?
+
+No universal editor protocol exists for all FM-1 firmware. **No source changes are needed when the installed firmware already supplies the commands we need.** Each family still needs a small matching adapter and verification: SLOOP 2 and Felucca are not automatically compatible with SLOOP 3. Firmware without suitable read/write commands cannot gain this workflow just by connecting a cable. Never send SLOOP commands to stock firmware based on a port name.
+
+The simplest expansion is one tested adapter at a time, using the same companion screen and transport. Firmware installation and raw device recovery stay separate. For developer details and acceptance requirements, see [Hardware Library](hardware-library.md).
+
 ## Start here
 
 1. Start the local Studio server (instructions below).
 2. Open Studio in a supported browser.
-3. Click **Import firmware** and choose an original `.fwsc` file.
+3. Click **Import firmware** and choose an original `.fwsc` or supported `.area` file.
 4. Click **Start** on the emulated device.
 5. Play the panel or connect a MIDI keyboard.
 
@@ -52,6 +112,45 @@ Studio waits for saved flash to finish writing before switching. It cannot yet p
 Get packages from the firmware maker’s published download/installer page. Choose the firmware download, not a source-code ZIP, web simulator, or physical-device Install button. Updating Studio itself is a different operation from updating an instrument’s firmware.
 
 New package bytes get a new hash and library item. The old version stays available; importing an update does not silently replace it.
+
+## Get the correct firmware file for a project
+
+Keep downloaded firmware in **`reference/firmwares/`**, the single local firmware directory used by the downloader, native catalog and test fixtures. Keep original versioned filenames; related files such as SLOOP 3’s application area and installer can share a versioned subfolder. This directory is ignored by git: do not commit firmware binaries, user saves or device backups. Store project saves and hardware backups separately.
+
+1. Open the firmware author's official repository or download page. On GitHub, open **Releases**, choose the intended version, and expand **Assets**. Check prereleases explicitly: a beta may be newer than the release reached by a “latest” link.
+2. For **FM-1 Studio**, download the original **`.fwsc` firmware update package**, or a supported plain **`.area` application** such as SLOOP 3. Keep its original filename and version. Use the author's installer/download page if the release assets do not include it.
+3. Import that `.fwsc` with **Import firmware** (or choose it in the native app). For an existing saved project, keep the exact firmware version/package it used: setup recall checks the package hash, not just its name.
+4. Keep a local copy of the package alongside your project backups. A source-code ZIP/tarball, editor HTML, sample bank or working-flash `.bin` is not a substitute for firmware.
+
+**You do not need to compile a published firmware package.** Compile only when building from source or making your own changes, following that firmware project's build instructions and toolchain requirements. Compiling Studio is a separate task. Renaming a `.bin`, `.area` or ZIP to `.fwsc` does not convert it into a package.
+
+### SLOOP 3: a different firmware format
+
+Checked on **November 15, 2026 (Pacific time)**: the newest published SLOOP 3 release is [**3.3.7 public beta**](https://github.com/isod89/sloop3-fm1/releases/tag/v3.3.7-beta), in its own repository, separate from stable [SLOOP 2.8](https://github.com/isod89/sloop-fm1). The release includes older versions too; select files named **3.3.7**.
+
+Downloaded originals are in the project's ignored `reference/firmwares/sloop3-3.3.7-beta/` folder:
+
+| File | Purpose |
+|---|---|
+| `sloop3-3.3.7.area` | Precompiled plain application area for developers; not a `.fwsc` package |
+| `installer-sloop3-3.3.7.html` | Self-contained physical-device installer with firmware embedded |
+
+**Neither file needs compilation. The standalone Mac app now opens the original `.area` directly.** Restart the rebuilt `target/apps/FM-1 Studio.app`, press **Cmd+O**, and select `reference/firmwares/sloop3-3.3.7-beta/sloop3-3.3.7.area`. Allow several seconds for startup. The loader validates both record headers and the application checksum, installs a copy into emulated flash and executes the original entry stub. The original download stays unchanged.
+
+**Standalone, browser Studio and the rebuilt plugins now accept `.fwsc` and `.area`.** Import the same original `.area` in browser Studio or open it in the plugin. Studio collection downloads retain the `.area` extension, and shared `.fm1save` exports retain the exact firmware bytes and hash. Close old browser Studio tabs and reopen after a build so the updated offline cache activates. This release publishes no `.fwsc` asset. Do not rename the file or substitute an older SLOOP 2 package.
+
+For an explicit standalone launch with persistent saves:
+
+```sh
+target/release/fm1-live --area reference/firmwares/sloop3-3.3.7-beta/sloop3-3.3.7.area \
+  --flash target/sloop3-working-flash.bin
+```
+
+Save within SLOOP, then quit normally. Back up that working flash separately. Verified: a 12-second native run displayed the five-track panel and produced 529,411 stereo audio frames with peak 5,081 in 16-bit PCM after scripted PLAY/note input. Full feature, MIDI-controller and hardware compatibility are not established.
+
+For physical hardware, follow the [official SLOOP 3 instructions](https://github.com/isod89/sloop3-fm1#install): the HTML installer opens in Chrome/Edge and uses **m-bootloader MIDI MODE**, with a full device backup first. Upstream marks this as beta and asks users to expect bugs and keep backups. No physical hardware installation or verification was performed.
+
+The upstream [build instructions](https://github.com/isod89/sloop3-fm1#the-firmware) are only needed for source builds: they require the pi32v2 LLVM toolchain and `fw/build.sh`, producing `build/fw/fw.area` and an embedded HTML installer.
 
 ## HYP1: the tested example
 
@@ -87,7 +186,7 @@ Choose a specific input when possible; **all inputs** accepts every available co
 
 ## Use the native Mac app
 
-Open `target/apps/FM-1 Studio.app` in the project folder and choose a `.fwsc` package in its picker. This currently uses the original native device interface, not the browser library.
+Open `target/apps/FM-1 Studio.app` in the project folder and choose a `.fwsc` package or supported plain `.area` application in its picker. This currently uses the original native device interface, not the browser library.
 
 For explicit controller selection and persistent flash, use Terminal:
 
@@ -104,10 +203,10 @@ The default native input accepts all MIDI inputs. Use `--midi none` to disable t
 
 1. Click the emulator window so it has keyboard focus.
 2. Press **Cmd+O** on Mac, or **Ctrl+O**. **F4** also works; use **Fn-F4** if F4 invokes a system feature. Release the keys to open the picker.
-3. Select an original **.fwsc** package in the file picker. Cancel keeps the current firmware.
+3. Select an original **.fwsc** package or a plain **.area** application in the file picker. Cancel keeps the current firmware.
 4. The old run closes normally and the selected firmware starts in its place. Audio/MIDI connections are reopened.
 
-Changing firmware restarts the instrument and loses unsaved RAM edits. **The current native picker launch does not automatically create a persistent working-flash file.** For reliable native saving, launch from Terminal with the explicit `--flash` path shown above, save inside the firmware, then quit normally. Keep a different working-flash file for each firmware/setup. F4 preserves MIDI/channel/clock options but deliberately does not carry a flash file into another firmware, so use the explicit Terminal command when the destination needs persistent flash too.
+Changing firmware restarts the instrument and loses unsaved RAM edits. **Native launches now create a working-memory file automatically; explicit `--flash` selects your own.** For reliable native saving, launch from Terminal with the explicit `--flash` path shown above, save inside the firmware, then quit normally. Keep a different working-flash file for each firmware/setup. F4 preserves host options and selects the destination firmware’s automatic working-memory file; an explicit `--flash` path remains useful for independent setups.
 
 ### MiniLab 3 on macOS
 
@@ -129,7 +228,7 @@ Logic needs an Audio Unit rather than VST3; an AU bundle is built but real Logic
 
 | File | What it keeps | How to use it |
 |---|---|---|
-| `.fwsc` | Original firmware program | Import to create an instrument |
+| `.fwsc` / `.area` | Original firmware package / supported plain application area | Import to create an instrument |
 | `.fm1save` | Firmware identity and saved flash/settings/content | Import a saved setup; not a complete running-session snapshot |
 | `.fm1library` | Studio’s imported collection | Back up/restore library items |
 | Working flash `.bin` | Native instance’s persistent device memory | Keep with that native setup; not interchangeable with a browser setup file |
@@ -147,7 +246,7 @@ A new visit to Studio’s base URL creates an independent working instance. Its 
 
 Each library item has its own working flash within that instance. Reopening an item resumes its saved working copy. Opening the **exact same instance URL** twice intentionally addresses the same state and can produce a save conflict. Open the base URL for another independent instance.
 
-Current Studio starts with the collection view available but requires you to select the desired item and Start again. Unsaved edits and playback position are not yet restored automatically.
+Studio reselects the last item for a bookmarked instance; click Start again. Unsaved edits and playback position are not yet restored automatically.
 
 ## Work offline
 
@@ -177,7 +276,7 @@ Recording controls, sample/patch editors, MIDI-file playback, full volatile reca
 
 ## Physical hardware
 
-Hardware flashing, full-device backup/restore and live companion editing are planned but not verified or exposed as completed Studio workflows. Emulator imports do not perform those operations. Keep physical-device installation instructions separate until the companion has been implemented and tested.
+Hardware flashing, full-device backup/restore and general live companion editing remain planned. The project-only SLOOP 3 Hardware Library described above is implemented with hardware verification pending. Emulator imports do not perform those operations. Physical-device installation and recovery remain separate from the project librarian and require their own implementation and hardware validation.
 
 ## Audacity 4 and the macOS verification warning
 
@@ -276,3 +375,31 @@ For a persistent native setup, use a separate working file:
 ```
 
 Source: [GR!MM v2.0.2](https://github.com/GRiMMBIENT/grimm/releases/tag/v2.0.2). The release fixes missing factory samples after switching firmware. Its emulated six-second boot/render check passed; hardware and full feature acceptance remain pending.
+
+## Mac menu bar
+
+With the standalone instrument focused, use the menus at the top of the Mac screen:
+
+| Menu | Actions |
+|---|---|
+| File | Open Firmware… (Cmd+O); Close Window (Cmd+W) |
+| Audio | Toggle WAV Recording (Cmd+Shift+R; F3 also works) |
+| Instrument | Reset Firmware State… (confirmation required) |
+| Hardware | Open Hardware Library (Cmd+Shift+L; F6 also works) |
+| Help | Open the bundled user guide in TextEdit |
+
+Firmware Save, playback and editing commands still belong to the running firmware's panel. Closing follows normal shutdown and finishes recording; save inside the firmware first. Native menu shortcuts take precedence over musical keyboard shortcuts. The menu bar is separate from the right-hand macOS status icons; the app does not add a background status item.
+
+## Reopen a session and reset an instrument
+
+The Mac standalone now reopens its last successfully loaded firmware on Finder launch. It remembers launch preferences (MIDI input/channel, clock, theme and other supplied options) and uses an automatic working-memory file per exact firmware hash unless you supplied `--flash`. Save your edits inside the firmware and quit normally. Firmware downloads must remain at their original location; if missing, choose a file again. Keep only one standalone window using a given working-memory file at a time.
+
+Browser Studio remembers the selected item for the bookmarked instance URL and restores its saved working memory. Click Start again to enable sound. A new instance URL is deliberately independent. Plugins reopen the state saved in their DAW project; they must never replace it with the standalone's last instrument. Native and browser storage do not synchronize automatically.
+
+**This is saved-state recall, not a complete live-session snapshot.** Unsaved RAM edits, held notes and exact playback position are not recovered. The running firmware may also require its Save command before edits reach persistent memory.
+
+Choose **Instrument → Reset Firmware State…** in the standalone, **Reset Firmware State…** in the plugin toolbar, or the same action below the browser device panel. Reset restarts the selected emulator with its initial saved memory. Host preferences remain intact; physical hardware is never changed. Firmware may generate a new default project at boot, so defaults need not mean an empty screen.
+
+Standalone asks for confirmation and retains the previous working-memory file beside it, named `*.before-reset-<timestamp>.bin`, after a normal shutdown. Files live in `~/Library/Application Support/FM-1 Studio/sessions/`; `last.json` records reopening options. Plugin/browser reset asks for confirmation: export a `.fm1save` before resetting to keep your work. Reset only affects the active plugin/working setup. Save the DAW project again if you want its reset state retained.
+
+Firmware-owned Save and Undo remain on the firmware panel; host reset restarts the instrument rather than invoking firmware Undo.

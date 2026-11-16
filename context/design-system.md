@@ -1,13 +1,18 @@
 ---
 load_when: "UI work, styling, components, visual or design changes"
-last_verified: 2026-11-15
+last_verified: 2026-11-16
 source_refs:
+  - context/icons.md
+  - assets/icons/README.md
+  - tools/generate-icons.swift
   - web/studio/index.html
   - web/studio/studio.css
   - web/studio/app.js
   - web/main.js
   - crates/fm1-live/src/panel.rs
   - crates/fm1-plugin/src/editor.rs
+  - crates/fm1-live/src/main.rs
+  - web/hardware/index.html
 ---
 # Design system
 
@@ -106,3 +111,13 @@ For each new reusable control, record its purpose, available states, keyboard be
 ## Controller and encoder interaction increment
 
 The device page adds a labeled Controller select with Auto / Raw states, native keyboard selection and a 40 px minimum height, 8 px inset/radius. It changes host routing only. MiniLab page mapping follows the physical panel; pads retain note performance and never silently invoke Save/Record. Hardware canvas encoders use an 8 px drag detent, Shift for quarter sensitivity, and fractional visual positions with immediate discrete firmware input. Visual motion is decorative; it never reports finer firmware values. Native polling is up to 120 Hz, browser drawing follows requestAnimationFrame. Existing hardware artwork remains the documented geometry exception.
+
+## Hardware Library
+
+The companion is a separate, plainly labeled hardware destination. Its light neutral page uses base-8 spacing, 48 px minimum actions, native labeled port selectors and a status/progress region. Three sequential sections cover connection, project download and reviewed restore. Write controls stay disabled until identity, project selection and safety-backup acknowledgement permit them. No hardware connection status is inferred from an emulator. The browser and native embedded page share identical markup/styles.
+
+Native macOS menu bar uses File / Audio / Instrument / Hardware / Help, grouped by task. Open uses an ellipsis because it requests a file; standard Cmd+O/Cmd+W shortcuts are retained. No speculative Save/Undo actions are presented for firmware-owned state. Native menu actions reuse existing application handlers; no hardware writes occur on menu launch. Reference: https://developer.apple.com/design/human-interface-guidelines/menus
+
+## App identity and icons
+
+The user-approved icon uses the actual FM-1 control arrangement, no text, a blank unlit screen, ivory markers and smooth flat charcoal materials. Body fill is uniformly #292a2b; control faces and trays must also have no grain, mottling or metallic texture. Gentle top light and local contact shadows provide depth. Modern macOS artwork has no baked outer bevel or padding; the platform supplies the enclosure. Other platforms receive their required silhouette or masking variants. The full intent, asset distinctions and per-platform commands are maintained in [icons.md](icons.md); read it before changing artwork or packaging.
