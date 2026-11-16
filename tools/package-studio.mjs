@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../",import.meta.url));
 cpSync(root+"web/studio",root+"web/dist/studio",{recursive:true,filter:path=>!path.endsWith(".test.mjs")});
 cpSync(root+"web/hardware",root+"web/dist/hardware",{recursive:true,filter:path=>!path.endsWith(".test.mjs")});
-const assets=["hardware/index.html","hardware/protocol.js","hardware/transport.js","hardware/page.js","index.html","main.js","style.css","fm1_web.wasm","worklet.js","render-runtime.js","render-worker.js","jit.js","fwsc.js","persistence.js","midi-input.js","tryout.js","firmwares.json",
+const assets=["hardware/index.html","hardware/protocol.js","hardware/transport.js","hardware/page.js","index.html","main.js","style.css","fm1_web.wasm","InterTight.ttf","worklet.js","render-runtime.js","render-worker.js","jit.js","fwsc.js","persistence.js","midi-input.js","tryout.js","firmwares.json",
   "studio/index.html","studio/studio.css","studio/app.js","studio/library.js"];
 cpSync(root+"web/icons",root+"web/dist/icons",{recursive:true});
 for (const file of ["favicon.ico","site.webmanifest"]) cpSync(root+"web/"+file,root+"web/dist/"+file);
