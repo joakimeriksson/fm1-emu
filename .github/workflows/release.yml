@@ -210,13 +210,41 @@ jobs:
           name: ${{ matrix.platform }}
           path: target/release-apps/*.tar.gz
 
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Rust wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build the site
+        run: tools/build_site.sh _site
+
+      - name: Package
+        run: |
+          v=${GITHUB_REF_NAME#v}
+          cd _site && zip -r ../fm1-emu-web-v$v.zip . && cd ..
+          ls -la fm1-emu-web-v$v.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: fm1-emu-web-*.zip
+
   # Every catalog firmware, JIT and interpreted, with the audio in tests/catalog.json.
   catalog:
     uses: ./.github/workflows/catalog.yml
 
   release:
     if: github.ref_type == 'tag'
-    needs: [macos, windows, linux, catalog]
+    needs: [macos, windows, linux, wasm, catalog]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -238,6 +266,6 @@ jobs:
           ls -laR dist
           # the plugin's two zips (macOS, Windows) and four fm1-emu archives (three .tar.gz, the Windows .zip), as files (not folders)
           files=$(find dist -type f \( -name '*.zip' -o -name '*.tar.gz' \))
-          test "$(echo "$files" | wc -l)" -eq 6 || { echo "expected 6 files"; exit 1; }
+          test "$(echo "$files" | wc -l)" -eq 7 || { echo "expected 7 files"; exit 1; }
           gh release create "$GITHUB_REF_NAME" $files --title "fm1-emu $v" \
             --notes-file "docs/releases/v$v.md" --generate-notes
