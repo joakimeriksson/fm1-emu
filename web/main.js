@@ -701,13 +701,13 @@ const warnBox = document.getElementById("perfwarn");
 // fm1_starved), so the advice offers none of those clocks. Kept for the visit only: the clock the
 // user settles on is stored, and a firmware or emulator update can change where the floor is.
 const outOfTime = new Map();
-const fwKey = () => `${fw.id}@${fw.version || ""}`;
+const fwKey = () => `${fw.id}@${fw.version || fw.name}`;   // (every package from this computer is "local")
 const perf = {
   reset() {
     this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.idleShare = 0; this.worst = 0;
     this.secs = 0; this.bad = 0; this.drops = 0; this.loads = []; this.speeds = []; this.drift = 0;
     this.stamp = null; this.jit = null; this.dismissed = false;
-    this.starved = 0; this.starvedTotal = 0; this.starvedSecs = 0;
+    this.starved = 0; this.starvedTotal = 0; this.starvedSecs = 0; this.starvedRun = 0;
     warnBox.hidden = true;
   },
   add(m) {
@@ -749,10 +749,11 @@ const perf = {
       this.starvedSecs++;
       outOfTime.set(fwKey(), Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
     }
+    this.starvedRun = starved > 0 ? this.starvedRun + 1 : 0;
     const over = this.load() > 0.95, late = drift > 0.02;
     if (late) this.drops++;
     this.bad = over || late ? this.bad + 1 : 0;
-    const hungry = this.starvedSecs >= 2;
+    const hungry = this.starvedRun >= 2;
     if ((hungry || this.bad >= 3) && warnBox.hidden && !this.dismissed) this.warn(over, hungry);
   },
   // A lower clock that brings the load down to ~80%, if one does. The cost of emulating a
@@ -785,7 +786,8 @@ const perf = {
       // (a higher clock costs this device more; overloaded already, it would only trade one dropout for another)
       const up = over ? null : CLOCKS.find((c) => c > Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
       text.textContent = `${fw.name} runs out of time at ${mhz} MHz: the emulated chip is too slow for it, so its ` +
-        `own sound breaks up, on any device.` + (up ? " The real FM-1 runs at 240 MHz." :
+        `own sound breaks up, on any device.` + (up ? " The real FM-1 runs at 240 MHz." : !over ?
+          " No higher clock gives it enough, the desktop version too." :
           ` This device can't run it faster in real time. A faster device or the desktop version will play it.`);
       fix.hidden = !up;
       if (up) {

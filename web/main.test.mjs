@@ -239,13 +239,13 @@ test('a firmware out of time at its clock: the warning offers a higher one, and 
   };
   const warning = () => p.elements.get('perfwarn').hidden ? null : p.elements.get('perfwarn-text').textContent;
   for (let i = 0; i < 3; i++) second(9);             // (booting: not judged)
-  second(9);
-  assert.equal(warning(), null);                     // (one second is not enough)
+  second(9); second(0); second(9);
+  assert.equal(warning(), null);                     // (seconds apart are not enough)
   second(9);
   assert.match(warning(), /^a runs out of time at 100 MHz: .* on any device\. The real FM-1 runs at 240 MHz\./);
   assert.equal(p.elements.get('perfwarn-fix').hidden, false);
   assert.equal(p.elements.get('perfwarn-fix').textContent, 'Use 120 MHz');
-  assert.match(p.api.perf.report(), /^firmware out of time: 2 s, 18 audio blocks not computed in time/m);
+  assert.match(p.api.perf.report(), /^firmware out of time: 3 s, 27 audio blocks not computed in time/m);
   // later, on a device too slow at 240 MHz: the advice stays above the clock it ran out of time at
   await p.api.boot(); await settle();
   p.api.setMhz(240); p.api.perf.idleShare = 0.1;
@@ -257,6 +257,21 @@ test('a firmware out of time at its clock: the warning offers a higher one, and 
   for (let i = 0; i < 5; i++) second(9, 1000);
   assert.match(warning(), /^a runs out of time at 100 MHz: .* A faster device or the desktop version will play it\./);
   assert.equal(p.elements.get('perfwarn-fix').hidden, true);
+  // out of time at the top clock: no clock gives it enough, on any device
+  p.api.setMhz(240); await p.api.boot(); await settle();
+  for (let i = 0; i < 5; i++) second(9);
+  assert.match(warning(), /^a runs out of time at 240 MHz: .* No higher clock gives it enough, the desktop version too\.$/);
+  assert.equal(p.elements.get('perfwarn-fix').hidden, true);
+  // two packages from this computer: each its own clocks
+  const open = async (name) => {
+    p.elements.get('open').files = [{ name, arrayBuffer: async () => new ArrayBuffer(960) }];
+    p.elements.get('open').listeners.change(); await settle(); await settle();
+  };
+  await open('x.fwsc'); p.api.setMhz(100); await p.api.boot(); await settle();
+  for (let i = 0; i < 5; i++) second(9);
+  await open('y.fwsc'); p.api.setMhz(240);
+  assert.equal(p.api.fw.name, 'y');
+  assert.equal(p.api.perf.lowerClock(3), 60);
 });
 
 test("a try-out boots with its sectors and script from this origin, starts by itself and saves nothing", async () => {

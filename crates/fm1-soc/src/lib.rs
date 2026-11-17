@@ -773,11 +773,14 @@ impl Soc {
             if self.audio_trace {
                 eprintln!("half {} ms {}", self.periph.ms(), self.periph.cycles);
             }
-            let half: Vec<u32> = (0..words).map(|i| self.read32(adr.wrapping_add(i * 4))).collect();
+            let mut half = std::mem::take(&mut self.refill.buf);
+            half.clear();
+            half.extend((0..words).map(|i| self.read32(adr.wrapping_add(i * 4))));
             for &w in &half {
                 self.periph.audio.push(((w as i32) >> 8).clamp(-32768, 32767) as i16);
             }
             self.refill.half(adr, &half);
+            self.refill.buf = half;
         }
     }
 
