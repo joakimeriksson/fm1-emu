@@ -1736,6 +1736,7 @@ fn main() {
     let mut fit = fit::Fit::new(W, H);
     let base = panel::base(theme);
     let mut buf = vec![0u32; W * H];
+    let mut fb = Vec::new();
     let mut down = [false; 41];
     let mut enc_clicks = [0i32; 7];
     let mut turning = [0u32; 8];
@@ -1877,7 +1878,7 @@ fn main() {
         // ---- draw
         {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
-            let fb = lcd.lock().unwrap().clone();
+            fb.clone_from(&lcd.lock().unwrap());
             let lit = *leds.lock().unwrap();
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &lit, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme);
@@ -1957,6 +1958,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     win.set_target_fps(60);
     let base = panel_smk::base();
     let mut buf = vec![0u32; w * h];
+    let mut fb = Vec::new();
     let btn0 = fm1_soc::smk::BTN0;
     let (mut down, mut enc_clicks, mut turning) = ([false; 64], [0i32; 8], [0u32; 8]);
     let mut analog = [0u16; 23];
@@ -2083,7 +2085,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             *t = t.saturating_sub(1);
         }
         {
-            let fb = lcd.lock().unwrap().clone();
+            fb.clone_from(&lcd.lock().unwrap());
             let l = *leds.lock().unwrap();
             let pc = *pads.lock().unwrap();
             let st = panel_smk::State {
