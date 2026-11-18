@@ -283,8 +283,10 @@ if (DEVICE === "fm1") {
 
   // the opening: the catalog's counts, and the wall of its screens (those that show the firmware
   // itself: tools/firmware_shots.json keeps an error screen off it), in a fixed order so it looks
-  // the same at every visit; each column twice over, for the drift's loop
-  const all = catalog.firmwares.length, own = catalog.firmwares.filter((f) => f.byo).length;
+  // the same at every visit; each column twice over, for the drift's loop. The counts are of the
+  // firmwares that run here: not the Hub's newcomers, which nobody has run here yet.
+  const runs = catalog.firmwares.filter((f) => !f.untested);
+  const all = runs.length, own = runs.filter((f) => f.byo).length;
   document.getElementById("hero-count").textContent = String(all);
   document.getElementById("hero-community").textContent = String(all - own);
   const wall = document.getElementById("wall");
