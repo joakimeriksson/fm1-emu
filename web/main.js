@@ -105,12 +105,22 @@ const wasm = await (await fetch("fm1_web.wasm")).arrayBuffer();   // the worklet
 const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } })).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
-const fitPanel = () => document.documentElement.style.setProperty("--above",
-  `${Math.round(canvas.parentElement.getBoundingClientRect().top + scrollY)}px`);
+// --above: what sits over the panel in the player (its title, the screen's controls, a warning)
+// when the player is scrolled to the top of the window, as by the Play link. From the player, not
+// the page's top: the opening and the header above the player scroll away. The big screen does
+// not count: the panel goes below it at its full size.
+const player = document.getElementById("play");
+const fitPanel = () => {
+  const bigScreen = document.getElementById("big");
+  const big = bigScreen.hidden ? 0 : (bigScreen.getBoundingClientRect().height || 0) + 12;
+  const above = canvas.parentElement.getBoundingClientRect().top - player.getBoundingClientRect().top - big;
+  document.documentElement.style.setProperty("--above", `${Math.round(above + 12)}px`);   // (12: html's scroll-padding-top)
+};
 {
   const ro = new ResizeObserver(fitPanel);
-  ro.observe(document.querySelector("header"));
-  ro.observe(document.querySelector(".bar"));
+  ro.observe(document.querySelector(".deck-head"));
+  ro.observe(document.querySelector(".view"));
+  ro.observe(document.getElementById("perfwarn"));
 }
 fitPanel();
 
@@ -514,6 +524,7 @@ function setBig(on) {
   bigBtn.setAttribute("aria-pressed", String(on));
   document.documentElement.toggleAttribute?.("data-big", on);
   store("fm1.bigscreen", on ? "1" : "");
+  fitPanel();
   if (on && haveLcd) showLcd();
 }
 // the latest screen (lcdRaw) to the panel's, recoloured, and to the big screen when it shows

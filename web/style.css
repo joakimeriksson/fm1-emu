@@ -87,8 +87,8 @@ main { max-width: 1360px; margin: 0 auto; padding: 20px 24px 0; display: grid; g
 .stage { position: relative; padding: 16px; border: 1px solid var(--rule); border-radius: 18px;
          background: radial-gradient(120% 90% at 30% 0%, #26272b 0%, #1b1c1f 70%);
          box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 28px 60px -40px #000; }
-/* the whole synth in view on a laptop: as wide as the room allows below the header (--above,
-   --aspect: set by main.js; 84px: the stage's padding and the hint line), never narrower than 560px */
+/* the whole synth in view on a laptop: as wide as the room allows below what is over it in the player
+   (--above, --aspect: set by main.js; 84px: the stage's padding and the hint line), never narrower than 560px */
 canvas { display: block; width: 100%; height: auto; touch-action: none; user-select: none; margin: 0 auto;
          max-width: max(560px, calc((100svh - var(--above, 140px) - 84px) * var(--aspect, 1.56))); }
 #start { position: absolute; inset: 0; margin: auto; width: clamp(110px, 30%, 220px); height: clamp(36px, 9vw, 56px);
