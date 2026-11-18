@@ -91,7 +91,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
     startAudio, boot, flushRunning, setLatency, get running() { return running; },
     setFirmware(id) { fw = byId.get(id); fwSel.value = id; }, setBank(bytes) { bank = bytes; },
-    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, get bootSeq() { return bootSeq; }
+    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, get bootSeq() { return bootSeq; }, screen: { lcdRaw, showLcd }
   }; })()`);
   const api = await run(...Object.values(environment));
   return { api, disk, elements, location, expireBoot: () => bootTimer(), get audio() { return audio; } };
@@ -218,6 +218,24 @@ test('Shift+Space is REC, Space PLAY, and R presses nothing (a slip among the bl
   assert.equal(sent(), '13v 13^');
   key('keydown', ' ', 'Space'); key('keyup', ' ', 'Space', true);
   assert.equal(sent(), '12v 12^');
+});
+
+test('Big screen shows the screen again; Screen colours recolour it by brightness, on the panel too', async () => {
+  const memory = { buffer: new ArrayBuffer(240 * 240 * 2) };
+  const exports = { panel_board() {}, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1,
+    panel_theme_name: () => 0, panel_theme() {}, panel_lcd: () => 0, memory };
+  const p = await page(storage(), '', '', false, { WebAssembly: { instantiate: async () => ({ instance: { exports } }) } });
+  const big = p.elements.get('big'), button = p.elements.get('bigscreen'), colours = p.elements.get('colours');
+  assert.equal(big.hidden, true);
+  button.listeners.click(); assert.equal(big.hidden, false);
+  button.listeners.click(); assert.equal(big.hidden, true);
+  assert.deepEqual(colours.options.map(o => o.value), ['', 'yellow', 'white', 'paper']);
+  const { lcdRaw, showLcd } = p.api.screen, lcd = new Uint16Array(memory.buffer);
+  lcdRaw.set([0xffff, 0x0000, 0x07e0, 0x0841]);   // white, black, full green, a near-black grey
+  const show = (v) => { colours.value = v; colours.listeners.change(); showLcd(); return [...lcd.subarray(0, 4)]; };
+  assert.deepEqual(show(''), [0xffff, 0x0000, 0x07e0, 0x0841]);
+  assert.deepEqual(show('paper'), [0x0000, 0xffff, 0x0000, 0xffff]);
+  assert.deepEqual(show('yellow'), [0xfee0, 0x0000, 0xfee0, 0x0000]);
 });
 
 test('the status line and the report give the emulation speed and the JIT; idle firmwares get no lower clock', async () => {
