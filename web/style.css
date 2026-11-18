@@ -109,6 +109,21 @@ canvas { display: block; width: 100%; height: auto; touch-action: none; user-sel
   canvas { width: auto; max-width: 100%; height: calc(100svh - 12px); margin: 0 auto; }
 }
 
+/* the screen for eyes that need more (main.js): Big screen shows it again, large, above the panel;
+   Screen colours recolours both in two colours of strong contrast */
+.view { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.view button { min-height: 40px; padding: 0 16px; font-family: inherit; font-size: 15px; font-weight: 600; color: var(--ink);
+               background: var(--well); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
+.view button:hover { border-color: var(--faint); }
+.view button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--room); }
+.view label { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 14px; }
+.view select { min-height: 40px; }
+/* as wide as the deck, and short enough that the top of the panel shows below it */
+#big { width: min(100%, max(320px, calc(100svh - var(--above, 140px) - 140px))); max-width: none; height: auto;
+       aspect-ratio: 1; margin: 0 auto; image-rendering: pixelated; touch-action: auto; background: #000;
+       border-radius: 10px; box-shadow: 0 0 0 1px #000, 0 24px 50px -30px #000; }
+#big[hidden] { display: none; }
+
 /* under the synth: one line of the essentials, then the way into the guide */
 .hint { margin: 0; color: var(--dim); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
 .hint span { white-space: nowrap; background: var(--card); border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px; }

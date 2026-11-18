@@ -62,6 +62,11 @@
           <button type="button" id="perfwarn-close" aria-label="Dismiss">✕</button>
         </div>
       </div>
+      <div class="view" role="group" aria-label="The screen">
+        <button type="button" id="bigscreen" aria-pressed="false" title="The synth's screen again, large, above the panel">Big screen</button>
+        <label>Screen colours <select id="colours"></select></label>
+      </div>
+      <canvas id="big" width="240" height="240" hidden aria-label="The synth's screen, large"></canvas>
       <div class="stage">
         <canvas id="panel" aria-label="FM-1 front panel"></canvas>
         <button id="start">Start</button>

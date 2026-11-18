@@ -480,13 +480,73 @@ stage.addEventListener("drop", (e) => {
   }
 });
 
+// ---------------------------------------------------------------- the screen, for eyes that need more
+// Big screen: the LCD again above the panel, as large as the page allows. Colours: the screen's
+// pixels by their brightness in two colours of strong contrast, on the big screen and the panel's.
+// Both are remembered for both devices.
+const SCHEMES = { yellow: [[0, 0, 0], [255, 221, 0]], white: [[0, 0, 0], [255, 255, 255]], paper: [[255, 255, 255], [0, 0, 0]] };
+const bigBtn = document.getElementById("bigscreen");
+const big = document.getElementById("big");
+const colourSel = document.getElementById("colours");
+const lcdRaw = new Uint16Array(240 * 240), lcdOut = new Uint16Array(240 * 240);
+let haveLcd = false, recolour = null, bigImg = null, rgba = null;
+const rgb565 = (p) => [(p >> 11) * 255 / 31, ((p >> 5) & 63) * 255 / 63, (p & 31) * 255 / 31];
+function setColours(name) {
+  const sc = SCHEMES[name];
+  colourSel.value = sc ? name : "";
+  recolour = null;
+  if (sc) {
+    // brightness (the eye's, a quarter of the way to its brightest primary, so that blue text
+    // still shows): its darkest tenth to the background, anything over half lit the full colour
+    recolour = new Uint16Array(65536);
+    for (let p = 0; p < 65536; p++) {
+      const [r, g, b] = rgb565(p), luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const t = Math.min(1, Math.max(0, ((luma + (Math.max(r, g, b) - luma) / 4) / 255 - 0.1) / 0.45));
+      const [R, G, B] = sc[0].map((bg, i) => bg + (sc[1][i] - bg) * t);
+      recolour[p] = (Math.round(R * 31 / 255) << 11) | (Math.round(G * 63 / 255) << 5) | Math.round(B * 31 / 255);
+    }
+  }
+  store("fm1.colours", sc ? name : "");
+  if (haveLcd) showLcd();
+}
+function setBig(on) {
+  big.hidden = !on;
+  bigBtn.setAttribute("aria-pressed", String(on));
+  document.documentElement.toggleAttribute?.("data-big", on);
+  store("fm1.bigscreen", on ? "1" : "");
+  if (on && haveLcd) showLcd();
+}
+// the latest screen (lcdRaw) to the panel's, recoloured, and to the big screen when it shows
+function showLcd() {
+  const out = recolour ? lcdOut : lcdRaw;
+  if (recolour) for (let i = 0; i < out.length; i++) out[i] = recolour[lcdRaw[i]];
+  new Uint16Array(ui.memory.buffer, ui.panel_lcd(), 240 * 240).set(out);
+  if (big.hidden) return;
+  if (!rgba) {
+    rgba = new Uint32Array(65536);         // (ImageData's bytes: R, G, B, A, little-endian)
+    for (let p = 0; p < 65536; p++) { const [r, g, b] = rgb565(p).map(Math.round); rgba[p] = 0xff000000 | (b << 16) | (g << 8) | r; }
+    bigImg = new ImageData(240, 240);
+  }
+  const px = new Uint32Array(bigImg.data.buffer);
+  for (let i = 0; i < out.length; i++) px[i] = rgba[out[i]];
+  big.getContext("2d").putImageData(bigImg, 0, 0);
+}
+for (const [v, t] of [["", "As the firmware draws it"], ["yellow", "Yellow on black"], ["white", "White on black"], ["paper", "Black on white"]])
+  colourSel.add(new Option(t, v));
+setColours(stored("fm1.colours") || "");
+setBig(stored("fm1.bigscreen") === "1");
+bigBtn.addEventListener("click", () => setBig(big.hidden));
+colourSel.addEventListener("change", () => setColours(colourSel.value));
+
 // ---------------------------------------------------------------- drawing
 function draw() {
   const mem = () => ui.memory.buffer;
   if (frame) {
     if (frame.lcd) {
-      new Uint16Array(mem(), ui.panel_lcd(), 240 * 240).set(frame.lcd);
+      lcdRaw.set(frame.lcd);
+      haveLcd = true;
       frame.lcd = null;
+      showLcd();
     }
     new Float32Array(mem(), ui.panel_leds(), 41).set(frame.leds);
     if (frame.pads) for (let p = 0; p < 16; p++) ui.panel_set(5, p, frame.pads[p]);
