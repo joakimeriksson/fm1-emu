@@ -21,7 +21,7 @@ test('the page, its scripts and the worklet ask for one build', () => {
 });
 
 test('every own reference is stamped, and only those', () => {
-  for (const f of ['index.html', 'smk37/index.html', 'main.js', 'tryout.js', 'persistence.js', 'fwsc.js', 'worklet.js']) {
+  for (const f of ['index.html', 'smk37/index.html', 'dev/index.html', 'main.js', 'tryout.js', 'persistence.js', 'fwsc.js', 'worklet.js']) {
     const out = stamp(read(f), 'b1');
     // nothing left that loads a file of the page without the build
     assert.doesNotMatch(out, /\b(?:from|import\(|fetch\(|addModule\()\s*["'](?:\.\/)?[\w./-]+\.(?:js|wasm|json|css)["']/, f);
