@@ -32,18 +32,21 @@ cp web/index.html web/style.css web/main.js web/persistence.js web/tryout.js web
 mkdir -p "$OUT/smk37"
 cp web/smk37/index.html web/smk37/firmwares.json web/smk37/og.png "$OUT/smk37/"
 cp web/style.css web/main.js web/persistence.js web/tryout.js web/worklet.js web/jit.js web/fwsc.js "$OUT/fm1_web.wasm" "$OUT/smk37/"
+# the developer page: no script, its own copy of the stylesheet
+mkdir -p "$OUT/dev"
+cp web/dev/index.html web/style.css "$OUT/dev/"
 # the headline font, and the pictures of each catalog's screens (tools/firmware_shots.py), beside each page
-for d in "$OUT" "$OUT/smk37"; do mkdir -p "$d/fonts" && cp web/fonts/* "$d/fonts/"; done
+for d in "$OUT" "$OUT/smk37" "$OUT/dev"; do mkdir -p "$d/fonts" && cp web/fonts/* "$d/fonts/"; done
 [ -d web/shots ] && cp -R web/shots "$OUT/"
 [ -d web/smk37/shots ] && cp -R web/smk37/shots "$OUT/smk37/"
 # the release in the pages (the header's version, what's new, the downloads): from Cargo.toml's
 # version and its notes, docs/releases/v<version>.md; without node the pages keep the committed copy
 if command -v node >/dev/null; then
-  node web/release.mjs "$OUT/index.html" "$OUT/smk37/index.html"
+  node web/release.mjs "$OUT/index.html" "$OUT/smk37/index.html" "$OUT/dev/index.html"
   # every file the pages load under this build's name, so a browser's cached copy of one file is
   # never run with another build's (GitHub Pages lets each be kept 10 minutes): the commit, or
   # the time for a build outside git
-  node web/stamp.mjs "$(git rev-parse --short HEAD 2>/dev/null || date +%s)" "$OUT" "$OUT/smk37"
+  node web/stamp.mjs "$(git rev-parse --short HEAD 2>/dev/null || date +%s)" "$OUT" "$OUT/smk37" "$OUT/dev"
 else
   echo "warning: no node; the pages keep the release blocks committed in web/index.html, unstamped" >&2
 fi

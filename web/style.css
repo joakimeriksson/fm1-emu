@@ -354,7 +354,7 @@ section li { margin: 4px 0; }
   .hero-text { padding-block: 36px 40px; }
 }
 /* a phone held sideways, and a window on another site: the synth first */
-@media (max-height: 500px) and (orientation: landscape) { .hero { display: none; } }
+@media (max-height: 500px) and (orientation: landscape) { .hero:not(.dev-hero) { display: none; } }
 [data-embed] .hero { display: none; }
 
 /* ---------------------------------------------------------------- the firmware cards' pictures and the search */
@@ -368,3 +368,34 @@ section li { margin: 4px 0; }
 .cards .pic img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
 .cards li.has-pic:hover { border-color: #4a4b50; }
 .cards li[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- the developer page (dev/index.html) */
+.term { margin: 0; padding: 18px 20px; overflow-x: auto; background: #0f1011; border: 1px solid var(--rule); border-radius: 14px;
+        color: var(--ink); font: 13.5px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03), 0 24px 50px -34px #000; }
+.term .c { color: var(--faint); }
+.term .p { color: var(--amber); user-select: none; }
+.dev-hero .term { align-self: center; }
+main.dev { display: grid; gap: 0; padding-top: 0; }
+.devsec { display: grid; gap: 14px; padding-block: 48px; border-bottom: 1px solid var(--rule); }
+.devsec:last-child { border-bottom: 0; }
+.devsec .eyebrow { color: var(--amber); }
+.devsec h2 { margin: 0; font-family: "Archivo", -apple-system, "Helvetica Neue", Arial, sans-serif; font-weight: 800;
+             font-stretch: 112%; font-size: clamp(28px, 3.4vw, 40px); line-height: 1.05; letter-spacing: -.015em; }
+.devsec > p { max-width: 78ch; }
+.devsec .lead { margin: 0; color: var(--text) !important; }
+.devsec .more { color: var(--dim); font-size: 14px; }
+.devcards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); margin-top: 6px; }
+.devcards article { background: var(--card); border: 1px solid var(--rule); border-radius: 14px; padding: 16px 18px; }
+.devcards h3 { margin: 0 0 8px; font-size: 16px; color: var(--ink); }
+.devcards p { margin: 0; }
+.params { list-style: none; padding: 0 !important; margin: 0 !important; display: grid; gap: 8px; }
+.params li { margin: 0; }
+.params code { display: inline-block; margin-right: 4px; color: var(--amber-hi); }
+.crates { list-style: none; padding: 0 !important; margin: 4px 0 0 !important; display: grid; gap: 10px;
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.crates li { margin: 0; display: grid; gap: 2px; background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 12px 14px; }
+.crates li > code { color: var(--amber-hi); font-weight: 600; }
+.crates span { font-size: 14px; }
+@media (max-width: 900px) { .dev-hero .term { margin: -12px 0 36px; } }
+@media (max-width: 760px) { .devsec { padding-block: 36px; } .term { font-size: 12.5px; padding: 14px; } }
