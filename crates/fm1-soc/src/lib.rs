@@ -271,6 +271,11 @@ pub struct Soc {
     pub dbg_cause: u32,
     /// The PC limits were written: `machine::run_blocks` gives the core `pc_windows` again
     pub pc_guard_dirty: bool,
+    /// The PC limits have raised their exception and not been re-armed: on an FM-1 a trip after
+    /// the first sets DBG_MSG bit 12 but raises nothing until software writes DBG_CON (0x1EEE344)
+    /// bit 18, as the SDK's `debug_msg_clear()` does (pi32v2-isa hw/fm1-2026-11-15-excprobe, groups 6 and 8 to 11: a fresh address, rewritten limits,
+    /// windows opened and narrowed again, DBG_CON bit 17 alone: all quiet).
+    pub pc_guard_spent: bool,
     /// EMU_MSG's causes (0x1EEF0D4, write 1 to clear): bit 0 a misaligned access (`strict_align`)
     pub emu_cause: u32,
     /// The FM-1's LCD transfers take their time on the wire, as the SMK-37's (SPI1 at 60 MHz /
@@ -521,6 +526,7 @@ impl Soc {
             console: Vec::new(),
             dbg_cause: 0,
             pc_guard_dirty: false,
+            pc_guard_spent: false,
             emu_cause: 0,
             lcd_timed: false,
             strict_align: false,
@@ -628,7 +634,7 @@ impl Soc {
         cpu.set_plain_state(&boot.cpu);
         // the guards as at power-on: no causes, no PC limits (the restored SFRs hold none; the
         // runner gives the core `pc_windows` again before its next block)
-        (self.dbg_cause, self.emu_cause) = (0, 0);
+        (self.dbg_cause, self.emu_cause, self.pc_guard_spent) = (0, 0, false);
         (cpu.pc_win, cpu.pc_trip) = (None, false);
         self.pc_guard_dirty = true;
         // (core 1 is dropped: nothing it owes or stalled on carries over)
@@ -913,6 +919,13 @@ impl Soc {
     /// run from RAM outside the PC limits, 2026-10-24) ran on here.
     pub fn guard_trip(&mut self, bit: u32) {
         self.dbg_cause |= 1 << bit;
+        if bit == 12 {
+            // once per acknowledgement (`pc_guard_spent`)
+            if self.pc_guard_spent {
+                return;
+            }
+            self.pc_guard_spent = true;
+        }
         self.raise_exception();
     }
 
@@ -1552,6 +1565,13 @@ impl Soc {
                 self.sfr_set(addr, value);
             }
             Region::Guard => {
+                // DBG_CON bit 18 re-arms the PC limits' exception and reads back 0
+                let value = if addr == 0x1eee344 && value & 1 << 18 != 0 {
+                    self.pc_guard_spent = false;
+                    value & !(1 << 18)
+                } else {
+                    value
+                };
                 if (0x1eee380..=0x1eee38f).contains(&addr) {
                     // (the runner hands the core its new windows before the next block: the run
                     // stops at once, as for an event due now)

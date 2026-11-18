@@ -1118,6 +1118,38 @@ mod tests {
     }
 
     #[test]
+    fn the_pc_limits_trip_once_until_dbg_con_bit_18() {
+        // an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, groups 6 and 8 to 11): after a trip, code outside the limits sets DBG_MSG bit 12 again but
+        // raises nothing until DBG_CON bit 18 is written (it reads back 0)
+        let code = [0x20u8, 0x00].repeat(32); // csync x 32
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eef100, 0xf << 4);
+        soc.write32(0x1eee384, XIP_BASE + 0x1000);
+        soc.write32(0x1eee380, XIP_BASE + 0x2000);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert!(soc.periph.exc_pending, "the first trip");
+        // (the code inside the windows for a while, then the limits narrowed again)
+        let trip_again = |cpu: &mut fm1_core::Cpu, soc: &mut Soc| {
+            (soc.periph.exc_pending, soc.dbg_cause) = (false, 0);
+            cpu.pc = XIP_BASE;
+            soc.write32(0x1eee384, XIP_BASE);
+            let mut t = false;
+            run_blocks(cpu, soc, 4, &mut t).unwrap();
+            cpu.pc = XIP_BASE;
+            soc.write32(0x1eee384, XIP_BASE + 0x1000);
+            run_blocks(cpu, soc, 4, &mut t).unwrap();
+            (soc.periph.exc_pending, soc.dbg_cause & 1 << 12 != 0)
+        };
+        assert_eq!(trip_again(&mut cpu, &mut soc), (false, true), "spent: the cause only");
+        soc.write32(0x1eee344, 1 << 17);
+        assert_eq!(trip_again(&mut cpu, &mut soc), (false, true), "bit 17 alone does not re-arm");
+        soc.write32(0x1eee344, 1 << 18);
+        assert_eq!(soc.read32(0x1eee344), 0, "bit 18 reads back 0");
+        assert_eq!(trip_again(&mut cpu, &mut soc), (true, true), "re-armed");
+    }
+
+    #[test]
     fn null_page_access_raises_the_exception_once_armed() {
         let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
         soc.write32(0x1eef100, 0xf << 4); // IRQ 1 enabled
