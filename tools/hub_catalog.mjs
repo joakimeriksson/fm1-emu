@@ -22,7 +22,7 @@ const SKIP = {
   lsdjburrito: "boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do",
 };
 // first in the list (the page's default first), then by id
-const FIRST = ["mvave", "felucca", "felucca-salt"];
+const FIRST = ["mvave-v15", "mvave", "felucca", "felucca-salt"];
 
 const arg = process.argv.find((a) => a.startsWith("--catalog="));
 const hub = arg ? JSON.parse(readFileSync(arg.slice(10))) : await (await fetch(HUB + "catalog.json")).json();

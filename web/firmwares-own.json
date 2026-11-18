@@ -4,14 +4,24 @@
   "firmwares": [
     {
       "id": "mvave",
-      "name": "M-VAVE stock firmware",
+      "name": "M-VAVE stock firmware (your copy)",
       "version": "",
       "author": "M-VAVE",
       "license": "M-VAVE's own",
-      "about": "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. This page does not host it and cannot download it (M-VAVE's server does not allow other pages to): download FM-1.fwsc from M-VAVE, then open it here; this browser keeps it for next time. Its patches live in flash an update does not carry, so it starts with a small bank of the emulator's own; \"DX7 bank…\" loads a 32-voice .syx.",
+      "about": "M-VAVE's current version (V16 since October 2026), the one its update page installs: a DX7-style FM synth, both cores running. This page does not host it and cannot download it (M-VAVE's server does not allow other pages to): download FM-1.fwsc from M-VAVE, then open it here; this browser keeps it for next time. Its patches live in flash an update does not carry, so it starts with a small bank of the emulator's own; \"DX7 bank…\" loads a 32-voice .syx.",
       "repo": "https://github.com/joakimeriksson/fm1-emu/blob/master/docs/stock-firmware.md",
       "byo": true,
       "download": "https://yms-file-store.oss-cn-hongkong.aliyuncs.com/software/firmware/FM-1.fwsc"
+    },
+    {
+      "id": "mvave-v15",
+      "name": "M-VAVE stock firmware",
+      "version": "V15",
+      "author": "M-VAVE",
+      "license": "Apache-2.0 (M-VAVE's FM1 Open recovery image)",
+      "about": "The firmware the FM-1 ships with, version 15: a DX7-style FM synth, both cores running. M-VAVE publishes this version under the Apache License 2.0, as the recovery image of its FM1 Open SDK; it plays here from the FM-1 Firmware Hub's unchanged copy. Its patches live in flash an update does not carry, so it starts with a small bank of the emulator's own; \"DX7 bank…\" loads a 32-voice .syx.",
+      "repo": "https://github.com/m-vave/fm1_open",
+      "package": "https://thefirmwarehub.com/fw/mvave/FM-1_015.fwsc"
     },
     {
       "id": "april",

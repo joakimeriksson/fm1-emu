@@ -42,7 +42,9 @@ keeps USB, the installers and the rescue.
 The community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here (its packages, fetched from the Hub; `tools/hub_catalog.mjs` follows its catalog), and a
 few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/). Also FM-1 SID, and
-M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the Hub doesn't list
+M-VAVE's stock firmware with both CPU cores running (V13, V15 and V16 tested): V15 plays from the
+Hub's copy of the recovery image M-VAVE publishes under Apache-2.0 in its
+[FM1 Open](https://github.com/m-vave/fm1_open) SDK, the current one from your own `FM-1.fwsc`. The ones the Hub doesn't list
 are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. The page
 also lists, last and marked as not yet run here, whatever else the Hub has a package for, so a new
 firmware is playable the day it is published. **The list, each firmware with its author and a

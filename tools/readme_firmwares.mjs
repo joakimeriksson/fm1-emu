@@ -15,7 +15,7 @@ const blurb = (f) => (f.about.match(/^.*?\.(?=\s|$)/) || [f.about])[0];
 const TABLES = [
   // (count: the sentence before the table, "N community firmwares": the rows but M-VAVE's own and
   // FM-1 SID, which it names on their own)
-  { catalog: "../web/firmwares.json", page: SITE, stock: "FM-1.fwsc", marker: "firmwares", count: ["mvave", "sid"] },
+  { catalog: "../web/firmwares.json", page: SITE, stock: "FM-1.fwsc", marker: "firmwares", count: ["mvave-v15", "mvave", "sid"] },
   { catalog: "../web/smk37/firmwares.json", page: `${SITE}smk37/`, stock: "SMK-37 Pro_016.fwsc", marker: "smk37-firmwares" },
 ];
 

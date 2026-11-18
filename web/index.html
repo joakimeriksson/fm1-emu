@@ -36,7 +36,7 @@
   <div class="wrap hero-grid">
     <div class="hero-text">
       <p class="kicker">M-VAVE FM-1 · emulated</p>
-      <h1 id="hero-h"><span id="hero-count">202</span> FM-1 firmwares, <em>in your browser.</em></h1>
+      <h1 id="hero-h"><span id="hero-count">203</span> FM-1 firmwares, <em>in your browser.</em></h1>
       <p class="lead"><span id="hero-community">201</span> community firmwares and M-VAVE's own run here unchanged, on an
         emulation of the synth's own chip: grooveboxes, drum machines, trackers, ambient generators and FM synths. Play
         them from your computer's keyboard, a MIDI keyboard or a touch screen.</p>
@@ -326,12 +326,19 @@ Thanks to bask209, eubide and pcace.</textarea>
       <section id="stock" aria-labelledby="h-stock">
         <h2 id="h-stock">M-VAVE's own firmware</h2>
         <p>The firmware the FM-1 ships with: a DX7-style FM synth (a port of msfa, the Dexed engine), with both cores
-          running. Versions V13 and V15 have been tested here.</p>
-        <p class="note">This page hosts no firmware, and it cannot download M-VAVE's: their server does not let other
-          pages fetch it. Bring your own copy.</p>
+          running. Versions V13, V15 and V16 have been tested here.</p>
+        <h3>V15: plays from its card</h3>
+        <p>M-VAVE publishes V15 under the Apache License 2.0, as the recovery image of its
+          <a href="https://github.com/m-vave/fm1_open">FM1 Open</a> SDK
+          (<a href="https://github.com/m-vave/fm1_open/blob/main/THIRD_PARTY.md">its terms</a>). The page plays the
+          FM-1 Firmware Hub's unchanged copy of it, like the community firmwares: choose “M-VAVE stock firmware V15” and
+          press Start.</p>
+        <h3>V16, the current version: bring your own</h3>
+        <p class="note">This page hosts no firmware, and it cannot download M-VAVE's current one: their server does not
+          let other pages fetch it.</p>
         <ol>
           <li>Download <code>FM-1.fwsc</code> from <a href="https://yms-file-store.oss-cn-hongkong.aliyuncs.com/software/firmware/FM-1.fwsc">M-VAVE</a>.</li>
-          <li>Choose “M-VAVE stock firmware”, then click <b>Open .fwsc…</b>, or drop the file on the synth.</li>
+          <li>Choose “M-VAVE stock firmware (your copy)”, then click <b>Open .fwsc…</b>, or drop the file on the synth.</li>
           <li>Press Start. This browser keeps the copy for your next visit; open another one to replace it.</li>
         </ol>
         <h3>Patches</h3>
