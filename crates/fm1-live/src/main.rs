@@ -14,7 +14,8 @@
 //! LEDs follow the firmware's LED lines.
 //!
 //! Keyboard: A W S E D F T G Y H U J K O L P ; ' = C4..F5 (piano layout),
-//! Z / X = OCT- / OCT+, Space = PLAY, R = REC, 1..0 = FX SCL ENV LFO EDIT
+//! Z / X = OCT- / OCT+, Space = PLAY, Shift+Space = REC (not a key among the notes, where a slip
+//! would start a recording), 1..0 = FX SCL ENV LFO EDIT
 //! GLO HOME SAVE ARP SEQ, Left/Right = SELECT, Up/Down = PRESETS,
 //! , / . = ALGORITHM, Esc quits.
 //!
@@ -1286,9 +1287,10 @@ fn piano(k: Key) -> Option<u8> {
     Some(21 + semis)
 }
 
-fn button(k: Key) -> Option<u8> {
+/// `shift`: Space went down with Shift held, and is REC, PLAY's neighbour on the panel.
+fn button(k: Key, shift: bool) -> Option<u8> {
     Some(match k {
-        Key::Z => 0, Key::X => 1, Key::Space => 12, Key::R => 13,
+        Key::Z => 0, Key::X => 1, Key::Space if shift => 13, Key::Space => 12,
         Key::Key1 => 2, Key::Key2 => 3, Key::Key3 => 4, Key::Key4 => 5, Key::Key5 => 6,
         Key::Key6 => 7, Key::Key7 => 8, Key::Key8 => 9, Key::Key9 => 10, Key::Key0 => 11,
         _ => return None,
@@ -1748,8 +1750,9 @@ fn main() {
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
+    let mut space_rec = false;
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, Shift+Space REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
 
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
@@ -1839,8 +1842,13 @@ fn main() {
 
         // ---- held keys and buttons: computer keyboard + mouse
         let mut want = [false; 41];
+        // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
+        if win.is_key_pressed(Key::Space, KeyRepeat::No) {
+            space_rec = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
+        }
+        let shift = space_rec;
         for k in win.get_keys() {
-            if let Some(id) = piano(k).or_else(|| button(k)) {
+            if let Some(id) = piano(k).or_else(|| button(k, shift)) {
                 want[id as usize] = true;
             }
         }
@@ -1980,7 +1988,8 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     let vel = |f: f32| Action::Vel { us: (80_000f32.ln() + (2_000f32.ln() - 80_000f32.ln()) * f.clamp(0.0, 1.0)).exp() as u32 };
     let (mut grab, mut was_pressed, mut last_y, mut drag_acc, mut scroll_acc) = (None, false, 0f32, 0f32, [0f32; 8]);
     let mut last_title = Instant::now();
-    eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, R SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
+    let mut space_rec = false;
+    eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, Shift+Space SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = mouse_pos(&win) {
@@ -2040,11 +2049,16 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
         // held keys and buttons: the computer keyboard (as on the page) and the mouse
         let mut want = [false; 64];
         let mut pad_keys = [false; 8];
+        // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
+        if win.is_key_pressed(Key::Space, KeyRepeat::No) {
+            space_rec = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
+        }
+        let shift = space_rec;
         for k in win.get_keys() {
             if let Some(id) = piano(k) {
                 want[(id - 21 + 12) as usize] = true; // (piano() gives the FM-1's ids, C4 = 21)
             }
-            let b = match k { Key::Z => Some(4), Key::X => Some(5), Key::Space => Some(16), Key::R => Some(17), _ => None };
+            let b = match k { Key::Z => Some(4), Key::X => Some(5), Key::Space if shift => Some(17), Key::Space => Some(16), _ => None };
             if let Some(b) = b {
                 want[(btn0 + b) as usize] = true;
             }

@@ -202,6 +202,24 @@ test('a boot timeout cancels the machine and the next firmware selection recover
   assert.equal(await p.api.boot(), true);
 });
 
+test('Shift+Space is REC, Space PLAY, and R presses nothing (a slip among the black keys must not record)', async () => {
+  const on = {};
+  const p = await page(storage(), '', '', false, { addEventListener(type, fn) { on[type] = fn; }, HTMLSelectElement: class {} });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  const key = (type, key, code, shiftKey = false) => on[type]({ type, key, code, shiftKey, repeat: false, target: {}, preventDefault() {} });
+  const sent = () => {   // the key messages since the last call: id, v down, ^ up
+    const k = p.audio.messages.filter(m => m.type === 'key').map(m => `${m.id}${m.down ? 'v' : '^'}`);
+    p.audio.messages = p.audio.messages.filter(m => m.type !== 'key');
+    return k.join(' ');
+  };
+  key('keydown', 'r', 'KeyR'); key('keyup', 'r', 'KeyR');
+  assert.equal(sent(), '');
+  key('keydown', ' ', 'Space', true); key('keyup', ' ', 'Space');          // (Shift let go first)
+  assert.equal(sent(), '13v 13^');
+  key('keydown', ' ', 'Space'); key('keyup', ' ', 'Space', true);
+  assert.equal(sent(), '12v 12^');
+});
+
 test('the status line and the report give the emulation speed and the JIT; idle firmwares get no lower clock', async () => {
   const p = await page(); await p.api.startAudio(); await p.api.boot(); await settle();
   const jit = { regions: 812, failed: 1, error: 'CompileError: x', compileMs: 40, compileMaxMs: 1.5 };

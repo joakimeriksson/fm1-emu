@@ -570,19 +570,24 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // computer keyboard: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z X OCT- OCT+, Space PLAY,
-// R REC, 1..0 FX SCL ENV LFO EDIT GLO HOME SAVE ARP SEQ, arrows / , . encoders. SMK-37: the same
-// notes (keys 12..29), Z X OCTAVE- / +, Space SEQ PLAY, R SEQ REC, 1..8 the top pads, arrows K1 / K2,
-// , . K3
+// Shift+Space REC, 1..0 FX SCL ENV LFO EDIT GLO HOME SAVE ARP SEQ, arrows / , . encoders. SMK-37:
+// the same notes (keys 12..29), Z X OCTAVE- / +, Space SEQ PLAY, Shift+Space SEQ REC, 1..8 the top
+// pads, arrows K1 / K2, , . K3. (REC was R, in the gap of the black keys' row: a slip started a
+// recording.)
 const PIANO = "awsedftgyhujkolp;'";
 const BUTTONS = [
-  { z: 0, x: 1, " ": 12, r: 13, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 0: 11 },
-  { z: BTN0 + 4, x: BTN0 + 5, " ": BTN0 + 16, r: BTN0 + 17 },
+  { z: 0, x: 1, " ": 12, "shift ": 13, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 0: 11 },
+  { z: BTN0 + 4, x: BTN0 + 5, " ": BTN0 + 16, "shift ": BTN0 + 17 },
 ];
+// what each held key pressed, by its place on the keyboard: Space lets go of REC or PLAY, whichever it
+// pressed, whether or not Shift is still held
+const held = new Map();
 const ENC_KEYS = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowDown: [1, -1], ArrowUp: [1, 1], ",": [2, -1], ".": [2, 1] };
-function keyId(k) {
+function keyId(k, shift = false) {
   const i = PIANO.indexOf(k.toLowerCase());
   if (i >= 0) return (board === 1 ? 12 : 21) + i;
-  const b = BUTTONS[board === 1 ? 1 : 0][k.toLowerCase()];
+  const map = BUTTONS[board === 1 ? 1 : 0];
+  const b = (k === " " && shift ? map["shift "] : undefined) ?? map[k.toLowerCase()];
   return b === undefined ? -1 : b;
 }
 const padKey = (k) => (board === 1 && /^[1-8]$/.test(k) ? Number(k) - 1 : -1);
@@ -591,16 +596,18 @@ addEventListener("keydown", (e) => {
   if (ENC_KEYS[e.key]) { e.preventDefault(); turn(...ENC_KEYS[e.key]); return; }
   const pad = padKey(e.key);
   if (pad >= 0) { e.preventDefault(); if (!e.repeat) setAnalog(pad, 700); return; }
-  const id = keyId(e.key);
+  const id = keyId(e.key, e.shiftKey);
   if (id < 0 || e.repeat) return;
   e.preventDefault();
   if (board === 1 && id < NKEY) setVelocity(0.75);
+  held.set(e.code, id);
   setKey(id, true);
 });
 addEventListener("keyup", (e) => {
   const pad = padKey(e.key);
   if (pad >= 0) { setAnalog(pad, 0); return; }
-  const id = keyId(e.key);
+  const id = held.get(e.code) ?? keyId(e.key, e.shiftKey);
+  held.delete(e.code);
   if (id >= 0) setKey(id, false);
 });
 
