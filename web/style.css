@@ -1,4 +1,7 @@
 /* The emulator's page: the FM-1's (index.html) and the SMK-37's (smk37/index.html) */
+/* the headline face: Archivo (SIL Open Font License, fonts/OFL.txt), its Latin letters, served from here */
+@font-face { font-family: "Archivo"; font-style: normal; font-weight: 700 900; font-stretch: 100% 125%; font-display: swap;
+             src: url("fonts/archivo-latin.woff2") format("woff2"); }
 :root { --room: #18191b; --ink: #e9e6de; --dim: #a9a7a1; --faint: #8c8a85; --text: #c9c6be; --amber: #f2a33a;
         --amber-hi: #ffc56e; --green: #7cc48a; --well: #232427; --line: #3a3b3f; --rule: #2a2b2e; --card: #1e1f22;
         --bar: #161719; color-scheme: dark; }
@@ -31,6 +34,10 @@ header.site .wrap { padding-block: 12px; display: flex; flex-wrap: wrap; align-i
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 16px;
          letter-spacing: -.01em; }
 .brand:hover { color: var(--ink); }
+/* the name: fm1-emu, and what it is under it */
+.wordmark { display: flex; flex-direction: column; line-height: 1.1; }
+.wordmark b { font: 800 18px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: -.02em; }
+.wordmark small { font-size: 11.5px; font-weight: 400; color: var(--dim); letter-spacing: 0; }
 .logo { width: 26px; height: 26px; border-radius: 7px; color: #2a1a03; display: grid; place-items: center;
         background: linear-gradient(140deg, var(--amber-hi), var(--amber) 55%, #d8861d);
         box-shadow: 0 0 0 1px rgba(255, 197, 110, .25), 0 4px 14px -4px rgba(242, 163, 58, .55); }
@@ -75,7 +82,7 @@ main { max-width: 1360px; margin: 0 auto; padding: 20px 24px 0; display: grid; g
 .player { display: flex; flex-wrap: wrap; gap: 20px 24px; align-items: flex-start; }
 .deck { flex: 999 1 600px; min-width: 0; display: grid; gap: 12px; }
 .deck-head { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; }
-h1 { font-size: 17px; font-weight: 600; margin: 0; }
+#title { font-size: 17px; font-weight: 600; margin: 0; }
 #status { color: var(--dim); font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
 .stage { position: relative; padding: 16px; border: 1px solid var(--rule); border-radius: 18px;
          background: radial-gradient(120% 90% at 30% 0%, #26272b 0%, #1b1c1f 70%);
@@ -293,3 +300,56 @@ section li { margin: 4px 0; }
 
 /* (an element the page hides stays hidden whatever its display rule) */
 [hidden] { display: none !important; }
+
+/* ---------------------------------------------------------------- the opening: the claim, and a wall of real screens */
+.hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--rule); }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; }
+.hero-text { position: relative; z-index: 1; display: grid; gap: 18px; padding-block: 56px 60px; }
+.kicker { margin: 0; font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .12em;
+          text-transform: uppercase; color: var(--amber); }
+.hero h1 { margin: 0; font-family: "Archivo", -apple-system, "Helvetica Neue", Arial, sans-serif; font-weight: 900; font-stretch: 118%;
+           font-size: clamp(38px, 5.2vw, 72px); line-height: .98; letter-spacing: -.02em; text-wrap: balance; }
+.hero h1 em { font-style: normal; color: var(--amber); }
+.hero .lead { margin: 0; font-size: 18px; color: var(--text); max-width: 36em; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+.cta { display: inline-flex; align-items: center; min-height: 46px; padding: 0 22px; border-radius: 999px; border: 1px solid var(--line);
+       background: var(--well); color: var(--ink); font-weight: 600; text-decoration: none; }
+.cta:hover { color: var(--ink); border-color: #55565b; }
+.cta.primary { background: var(--amber); border-color: var(--amber); color: #2a1a03; }
+.cta.primary:hover { background: var(--amber-hi); border-color: var(--amber-hi); color: #2a1a03; }
+.facts { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--dim);
+         font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.facts b { color: var(--ink); font-weight: 600; }
+/* the wall: columns of screens drifting up and down, tilted, fading at its edges */
+.wall { position: relative; align-self: stretch; min-height: 440px;
+        -webkit-mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent);
+        mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent); }
+.wall { display: flex; gap: 14px; }
+.wall .col { flex: 0 0 136px; display: flex; flex-direction: column; gap: 14px; animation: drift 120s linear infinite; }
+.wall .col:nth-child(even) { animation-direction: reverse; animation-duration: 150s; }
+.wall .col:nth-child(3n) { margin-top: -60px; }
+.wall img { width: 136px; height: 136px; border-radius: 6px; image-rendering: pixelated;
+            box-shadow: 0 0 0 1px #000, 0 10px 26px rgba(0, 0, 0, .45); }
+.wall { transform: rotate(-8deg) scale(1.15); transform-origin: 30% 50%; }
+@keyframes drift { from { transform: translateY(0); } to { transform: translateY(-50%); } }
+@media (prefers-reduced-motion: reduce) { .wall .col { animation: none; } }
+@media (max-width: 900px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .wall { position: absolute; inset: 0; opacity: .18; min-height: 0; }
+  .hero-text { padding-block: 36px 40px; }
+}
+/* a phone held sideways, and a window on another site: the synth first */
+@media (max-height: 500px) and (orientation: landscape) { .hero { display: none; } }
+[data-embed] .hero { display: none; }
+
+/* ---------------------------------------------------------------- the firmware cards' pictures and the search */
+.finder { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 18px; }
+.search { flex: 0 1 420px; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-radius: 999px;
+          background: var(--card); border: 1px solid var(--line); color: var(--dim); }
+.search:focus-within { border-color: var(--amber); }
+.search input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--ink); font: inherit; }
+.cards li.has-pic { padding-top: 0; overflow: hidden; }
+.cards .pic { margin: 0 -16px 8px; aspect-ratio: 1; background: #000; cursor: pointer; }
+.cards .pic img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.cards li.has-pic:hover { border-color: #4a4b50; }
+.cards li[hidden] { display: none; }
