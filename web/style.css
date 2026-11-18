@@ -335,8 +335,11 @@ section li { margin: 4px 0; }
 .facts { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--dim);
          font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .facts b { color: var(--ink); font-weight: 600; }
-/* the wall: columns of screens drifting up and down, tilted, fading at its edges */
-.wall { position: relative; align-self: stretch; min-height: 440px;
+/* the wall: columns of screens drifting up and down, tilted, fading at its edges. Out of the
+   layout at every width (its columns are thousands of pixels tall): beside the text from the
+   middle of the hero to its right edge, and behind the text on a narrow screen (below) */
+.hero-grid { position: relative; }
+.wall { position: absolute; top: -80px; bottom: -80px; left: calc(50% + 20px); right: -24px;
         -webkit-mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent);
         mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent); }
 .wall { display: flex; gap: 14px; }
@@ -350,7 +353,7 @@ section li { margin: 4px 0; }
 @media (prefers-reduced-motion: reduce) { .wall .col { animation: none; } }
 @media (max-width: 900px) {
   .hero-grid { grid-template-columns: 1fr; }
-  .wall { position: absolute; inset: 0; opacity: .18; min-height: 0; }
+  .wall { inset: 0; opacity: .18; }
   .hero-text { padding-block: 36px 40px; }
 }
 /* a phone held sideways, and a window on another site: the synth first */
