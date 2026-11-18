@@ -696,11 +696,18 @@ midiChSel.addEventListener("change", () => {
 // The speed shown is the emulator's own: emulated time per time spent emulating (as
 // `node web/bench.mjs` and `fm1-live --bench` print it); at 1x a device just keeps up.
 const warnBox = document.getElementById("perfwarn");
+// The highest clock each firmware (id@version) ran out of time at during this visit: below it the
+// emulated chip is too slow for the firmware, on any device (the audio blocks it leaves unfilled,
+// fm1_starved), so the advice offers none of those clocks. Kept for the visit only: the clock the
+// user settles on is stored, and a firmware or emulator update can change where the floor is.
+const outOfTime = new Map();
+const fwKey = () => `${fw.id}@${fw.version || fw.name}`;   // (every package from this computer is "local")
 const perf = {
   reset() {
     this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.idleShare = 0; this.worst = 0;
     this.secs = 0; this.bad = 0; this.drops = 0; this.loads = []; this.speeds = []; this.drift = 0;
     this.stamp = null; this.jit = null; this.dismissed = false;
+    this.starved = 0; this.starvedTotal = 0; this.starvedSecs = 0; this.starvedRun = 0;
     warnBox.hidden = true;
   },
   add(m) {
@@ -708,6 +715,7 @@ const perf = {
     this.span += (m.quanta * m.frames) / 44.1;     // ms of audio those quanta stand for
     this.emulated += m.emulated ?? 0;              // ms of emulated time they ran
     this.idle += m.idle ?? 0;                      // of which idle skipping jumped over
+    this.starved += m.starved ?? 0;                // audio blocks the firmware left unfilled
     if (m.worst > this.worst) this.worst = m.worst;
     this.jit = m.jit;
   },
@@ -723,7 +731,8 @@ const perf = {
     if (this.emulated > 0) this.idleShare = Math.min(1, this.idle / this.emulated);
     if (this.loads.length > 30) this.loads.shift();
     if (this.speeds.length > 30) this.speeds.shift();
-    this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0;
+    const starved = this.starved;
+    this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.starved = 0;
     const ts = ac.getOutputTimestamp?.();
     let drift = 0;
     if (ts && ts.contextTime > 0) {
@@ -735,10 +744,17 @@ const perf = {
     }
     this.drift = drift;
     if (++this.secs <= 3 || m.halted) return;      // (the first seconds: booting, compiling)
+    if (starved > 0) {
+      this.starvedTotal += starved;
+      this.starvedSecs++;
+      outOfTime.set(fwKey(), Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
+    }
+    this.starvedRun = starved > 0 ? this.starvedRun + 1 : 0;
     const over = this.load() > 0.95, late = drift > 0.02;
     if (late) this.drops++;
     this.bad = over || late ? this.bad + 1 : 0;
-    if (this.bad >= 3 && warnBox.hidden && !this.dismissed) this.warn(over);
+    const hungry = this.starvedRun >= 2;
+    if ((hungry || this.bad >= 3) && warnBox.hidden && !this.dismissed) this.warn(over, hungry);
   },
   // A lower clock that brings the load down to ~80%, if one does. The cost of emulating a
   // second is a fixed part (about a quarter at the clocks offered: the peripherals, the audio, the
@@ -750,26 +766,42 @@ const perf = {
   lowerClock(load) {
     const FIXED = 0.25, busy = mhz * (1 - this.idleShare);   // MHz of cycles the firmware runs
     const at = (c) => load * (FIXED + (1 - FIXED) * Math.min(busy, c) / Math.max(busy, 1));
-    const lower = CLOCKS.filter((c) => c < mhz && at(c) <= 0.8);
-    const pick = lower.length ? lower[lower.length - 1] : CLOCKS.find((c) => c < mhz);
+    const clocks = this.lowerClocks();
+    const lower = clocks.filter((c) => at(c) <= 0.8);
+    const pick = lower.length ? lower[lower.length - 1] : clocks[0];
     return pick && at(pick) < 0.85 * load ? pick : null;     // only where it clearly helps
   },
-  warn(over) {
+  lowerClocks() {
+    return CLOCKS.filter((c) => c < mhz && c > (outOfTime.get(fwKey()) ?? 0));
+  },
+  warn(over, hungry) {
     const load = this.load();
-    const pick = over ? this.lowerClock(load) : null;
+    const pick = over && !hungry ? this.lowerClock(load) : null;
     const text = document.getElementById("perfwarn-text");
     const fix = document.getElementById("perfwarn-fix");
     // (a debugger attached, as DevTools open, runs the WebAssembly 3-4x slower)
     const devtools = " If the browser's developer tools are open, close them: they slow the emulator down 3-4x.";
     fix.hidden = false;
-    if (over && pick) {
+    if (hungry) {
+      // (a higher clock costs this device more; overloaded already, it would only trade one dropout for another)
+      const up = over ? null : CLOCKS.find((c) => c > Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
+      text.textContent = `${fw.name} runs out of time at ${mhz} MHz: the emulated chip is too slow for it, so its ` +
+        `own sound breaks up, on any device.` + (up ? " The real FM-1 runs at 240 MHz." : !over ?
+          " No higher clock gives it enough, the desktop version too." :
+          ` This device can't run it faster in real time. A faster device or the desktop version will play it.`);
+      fix.hidden = !up;
+      if (up) {
+        fix.textContent = `Use ${up} MHz`;
+        fix.onclick = () => { setClock(up); };
+      }
+    } else if (over && pick) {
       text.textContent = `This device can't run ${fw.name} at ${mhz} MHz in real time (it needs ${Math.round(100 * load)}% ` +
         `of the audio thread), so the sound breaks up. It needs less at a lower clock.` + devtools;
       fix.textContent = `Use ${pick} MHz`;
       fix.onclick = () => { setClock(pick); };
     } else if (over) {
       // (a lower clock exists but would not help: say why)
-      const why = !CLOCKS.some((c) => c < mhz) ? "" : this.idleShare >= 0.3
+      const why = !this.lowerClocks().length ? "" : this.idleShare >= 0.3
         ? " A lower clock would not help: the emulator skips the time this firmware idles, so it costs about the same at any clock."
         : " A lower clock would help only a little.";
       text.textContent = `This device can't run ${fw.name} at ${mhz} MHz in real time (it needs ` +
@@ -802,6 +834,8 @@ const perf = {
       `speed (emulated time per time spent emulating, last ${this.speeds.length} s): ${this.speeds.map((v) => r(v, 2)).join(" ")}x real time`,
       `load (last ${loads.length} s): ${loads.join(" ")}% · worst quantum since the audio started ${r(this.worst, 1)} ms of ${r(128 / 44.1, 1)}`,
       `audio clock drift: ${r(100 * this.drift, 1)}% · seconds with drops: ${this.drops} · idle skipped: ${r(100 * this.idleShare)}% of the time`,
+      `firmware out of time: ${this.starvedSecs} s, ${this.starvedTotal} audio blocks not computed in time (its own sound ` +
+        `breaks up at this clock, on any device)`,
       `jit: ${jit ? `${jit.regions} regions compiled, ${jit.failed} failed${jit.error ? ` (${jit.error})` : ""} · ` +
         `compiling took ${r(jit.compileMs)} ms, the longest ${r(jit.compileMaxMs, 1)} ms` : "?"}`,
       `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"}`,
