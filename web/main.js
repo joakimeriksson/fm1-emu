@@ -180,6 +180,18 @@ if (themeSel) {
   });
 }
 
+// pictures of the firmwares' screens beside this page (tools/firmware_shots.py): each card's, and
+// the wall at the top; by the start of the picture's hash, so a new picture is fetched again
+let shots = {};
+try { shots = await (await fetch("shots/shots.json")).json(); } catch { /* (no pictures here: cards without) */ }
+const shotUrl = (id) => (shots[id]?.v ? `shots/${encodeURIComponent(id)}.webp?v=${shots[id].v}` : null);
+const picture = (id, cls) => {
+  const img = document.createElement("img");
+  Object.assign(img, { src: shotUrl(id), alt: "", loading: "lazy", decoding: "async", width: 240, height: 240 });
+  if (cls) img.className = cls;
+  return img;
+};
+
 // the guide's firmware list, one card per catalog entry; "Play" picks it like the select does
 const NO_NOTE = "MIDI: no sound from a plain note-on";
 const MIDI_NOTES = {
@@ -229,7 +241,10 @@ if (DEVICE === "fm1") {
     const twin = DEVICE === "smk37" ? f.fm1 : twins.get(f.id);
     if (twin) links.append(link(`${DEV.other.href}?fw=${twin}`, `also on the ${DEV.other.name}`));
     const by = [f.author + (f.base ? ` (${f.base})` : ""), f.porter && `SMK-37 port: ${f.porter}`].filter(Boolean).join(" · ");
-    const card = el("li", "",
+    // its screen, clicked like Play (for the mouse; the keyboard has the Play button)
+    const pic = shotUrl(f.id) ? [el("div", "pic", picture(f.id))] : [];
+    if (pic.length) pic[0].addEventListener("click", () => play.click());
+    const card = el("li", pic.length ? "has-pic" : "", ...pic,
       el("div", "head", el("b", "", f.name), el("span", "dim", f.version), play),
       el("div", "by", by),
       el("p", "what", f.byo && DEVICE === "fm1" ? "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. " +
@@ -237,10 +252,43 @@ if (DEVICE === "fm1") {
     if (DEVICE === "fm1" && MIDI_NOTES[f.id]) card.append(el("div", "midi", MIDI_NOTES[f.id]));
     if (f.untested) card.append(el("div", "untested", UNTESTED));
     card.append(links);
+    card.dataset.find = [f.name, f.version, f.author, f.base, f.porter, f.about].filter(Boolean).join(" ").toLowerCase();
     list.append(card);
     cards.set(f.id, card);
   }
+
+  // the search over the cards: every word somewhere in a card's name, version, author or description
+  const search = document.getElementById("fwsearch"), found = document.getElementById("fwcount");
+  const count = (n) => `${n} firmware${n === 1 ? "" : "s"}`;
+  found.textContent = count(catalog.firmwares.length);
+  search.addEventListener("input", () => {
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    let n = 0;
+    for (const card of cards.values()) {
+      card.hidden = !words.every((w) => card.dataset.find.includes(w));
+      if (!card.hidden) n++;
+    }
+    found.textContent = words.length ? `${count(n)} of ${catalog.firmwares.length}` : count(n);
+  });
+
+  // the opening: the catalog's counts, and the wall of its screens (those that show the firmware
+  // itself: tools/firmware_shots.json keeps an error screen off it), in a fixed order so it looks
+  // the same at every visit; each column twice over, for the drift's loop
+  const all = catalog.firmwares.length, own = catalog.firmwares.filter((f) => f.byo).length;
+  document.getElementById("hero-count").textContent = String(all);
+  document.getElementById("hero-community").textContent = String(all - own);
+  const wall = document.getElementById("wall");
+  const onWall = catalog.firmwares.filter((f) => shotUrl(f.id) && shots[f.id].wall !== false)
+    .map((f, i) => [(i * 37) % 101, f]).sort((a, b) => a[0] - b[0]).map(([, f]) => f);
+  const COLS = 6, PER = 8;
+  if (onWall.length >= COLS * 2) {
+    for (let c = 0; c < COLS; c++) {
+      const mine = onWall.filter((_, i) => i % COLS === c).slice(0, PER);
+      wall.append(el("div", "col", ...[...mine, ...mine].map((f) => picture(f.id))));
+    }
+  } else wall.hidden = true;
 }
+const heroPlay = document.getElementById("hero-play");
 
 // Cached packages are pinned to their exact bytes. Checking for updates is explicit.
 const packages = new Map();
@@ -297,6 +345,7 @@ let loadedUrl = null;                      // the package the running machine ca
 
 function showFirmware() {
   title.textContent = `${DEV.product} · ${fw.name} (emulated)`;
+  heroPlay.textContent = `Play ${fw.name}`;
   for (const [id, card] of cards) {
     card.classList.toggle("on", id === fw.id);
     card.querySelector("button").textContent = id === fw.id ? "Selected" : "Play";

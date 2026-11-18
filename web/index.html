@@ -21,7 +21,7 @@
 <body>
 <header class="site">
   <div class="wrap">
-    <a class="brand" href="./"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span>FM-1 Emulator</a>
+    <a class="brand" href="./"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span><span class="wordmark"><b>fm1-emu</b><small>the M-VAVE FM-1 and SMK-37, emulated</small></span></a>
     <!-- release:pill --><a class="ver" href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1" title="Release notes and downloads for 0.5.1">v0.5.1</a><!-- /release:pill -->
     <nav class="devices" aria-label="Device"><span aria-current="page">FM-1</span><a href="smk37/">SMK-37</a></nav>
     <nav class="sitenav" aria-label="Site">
@@ -31,11 +31,26 @@
     <a class="embed-only" id="fullpage" href="./" target="_blank" rel="noopener">FM-1 emulator, full page ↗</a>
   </div>
 </header>
+<!-- the opening: what this is, and a wall of the catalog's screens (main.js fills it from shots/shots.json) -->
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero-grid">
+    <div class="hero-text">
+      <p class="kicker">M-VAVE FM-1 · emulated</p>
+      <h1 id="hero-h"><span id="hero-count">202</span> FM-1 firmwares, <em>in your browser.</em></h1>
+      <p class="lead"><span id="hero-community">201</span> community firmwares and M-VAVE's own run here unchanged, on an
+        emulation of the synth's own chip: grooveboxes, drum machines, trackers, ambient generators and FM synths. Play
+        them from your computer's keyboard, a MIDI keyboard or a touch screen.</p>
+      <div class="ctas"><a class="cta primary" id="hero-play" href="#play">Play</a><a class="cta" href="#firmwares">Browse the firmwares</a></div>
+      <p class="facts"><span><b>The real firmware</b>, not a copy of its sound</span><span><b>No install</b>, free and open source</span></p>
+    </div>
+    <div class="wall" id="wall" aria-hidden="true"></div>
+  </div>
+</section>
 <main>
-  <div class="player">
+  <div class="player" id="play">
     <div class="deck">
       <div class="deck-head">
-        <h1 id="title">M-VAVE FM-1 (emulated)</h1>
+        <h2 id="title">M-VAVE FM-1 (emulated)</h2>
         <span id="status">click Start to boot</span>
       </div>
       <div id="perfwarn" role="alert" hidden>
@@ -187,6 +202,11 @@ Thanks to bask209, eubide and pcace.</textarea>
       start it. Each card links its source; the Hub has the full story of each firmware and installs it on your
       own FM-1. Firmwares the Hub has that nobody has run here yet come last, marked so: they may not work
       yet, and the next refresh of the list moves them up or says why not.</p>
+    <div class="finder">
+      <label class="search"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" fill="none" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+        <input type="search" id="fwsearch" placeholder="Search name, author or sound" aria-label="Search the firmwares"></label>
+      <span id="fwcount" class="dim" role="status"></span>
+    </div>
     <ul class="cards" id="fwlist"></ul>
   </section>
 
