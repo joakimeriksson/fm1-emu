@@ -206,6 +206,7 @@ const picture = (id, cls) => {
 const NO_NOTE = "MIDI: no sound from a plain note-on";
 const MIDI_NOTES = {
   mvave: "MIDI: channel 2 in the emulator (not yet checked on a real FM-1)",
+  "mvave-v15": "MIDI: channel 2 in the emulator (not yet checked on a real FM-1)",
   felucca: "MIDI: its parts play on channels 1–4",
   choralroot: NO_NOTE, hortator: NO_NOTE, "sloop-alg": NO_NOTE, x0x: NO_NOTE,
 };
@@ -257,8 +258,8 @@ if (DEVICE === "fm1") {
     const card = el("li", pic.length ? "has-pic" : "", ...pic,
       el("div", "head", el("b", "", f.name), el("span", "dim", f.version), play),
       el("div", "by", by),
-      el("p", "what", f.byo && DEVICE === "fm1" ? "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. " +
-        "Bring your own copy (see below)." : f.about));
+      el("p", "what", f.byo && DEVICE === "fm1" ? "M-VAVE's current version (V16 since October 2026), the one its update page " +
+        "installs. Bring your own copy (see below); V15 plays from the card before this one." : f.about));
     if (DEVICE === "fm1" && MIDI_NOTES[f.id]) card.append(el("div", "midi", MIDI_NOTES[f.id]));
     if (f.untested) card.append(el("div", "untested", UNTESTED));
     card.append(links);
@@ -286,7 +287,7 @@ if (DEVICE === "fm1") {
   // the same at every visit; each column twice over, for the drift's loop. The counts are of the
   // firmwares that run here: not the Hub's newcomers, which nobody has run here yet.
   const runs = catalog.firmwares.filter((f) => !f.untested);
-  const all = runs.length, own = runs.filter((f) => f.byo).length;
+  const all = runs.length, own = runs.filter((f) => f.byo || f.author === "M-VAVE").length;
   document.getElementById("hero-count").textContent = String(all);
   document.getElementById("hero-community").textContent = String(all - own);
   const wall = document.getElementById("wall");

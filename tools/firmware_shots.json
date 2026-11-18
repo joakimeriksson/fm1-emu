@@ -7,7 +7,8 @@
     "fmdj": { "wall": false, "why": "shows NO LSDJ ROM: the ROM is the user's, added on its install page" },
     "fm1dock": { "wall": false, "why": "an almost empty screen" },
     "midimon": { "wall": false, "why": "an almost empty screen until MIDI arrives" },
-    "pulhra": { "wall": false, "why": "an almost empty screen" }
+    "pulhra": { "wall": false, "why": "an almost empty screen" },
+    "mvave-v15": { "keys": "1500:C4,1500:E4,1500:G4,4500:C4^,4500:E4^,4500:G4^", "why": "PLAY brings up its \"Enable SEQ first\" pop-up: the chord alone" }
   },
   "smk37": {}
 }
