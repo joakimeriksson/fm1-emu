@@ -578,6 +578,10 @@ impl Soc {
         // off under any other clock. `take_boot` keeps them for a reset.
         soc.sfr_set(PLL0_CON0, PLL0_BOOT.0);
         soc.sfr_set(PLL0_CON1, PLL0_BOOT.1);
+        // Both PC limit windows as an FM-1 starts them, 0..0x07FFFFFF (pi32v2-isa
+        // hw/fm1-2026-11-15-excprobe, group 6, read from a RAM app the ROM started)
+        soc.sfr_set(0x1eee380, 0x07ff_ffff);
+        soc.sfr_set(0x1eee388, 0x07ff_ffff);
         soc
     }
 
@@ -633,8 +637,8 @@ impl Soc {
         self.flash.chip_reset();
         self.refill.chip_reset();
         cpu.set_plain_state(&boot.cpu);
-        // the guards as at power-on: no causes, no PC limits (the restored SFRs hold none; the
-        // runner gives the core `pc_windows` again before its next block)
+        // the guards as at power-on: no causes, the PC limits as `new` sets them (the restored
+        // SFRs; the runner gives the core `pc_windows` again before its next block)
         (self.dbg_cause, self.emu_cause, self.pc_guard_spent) = (0, 0, false);
         (cpu.pc_win, cpu.pc_trip) = (None, false);
         self.pc_guard_dirty = true;
@@ -967,7 +971,7 @@ impl Soc {
 
     /// The PC limits (0x1EEE380 / 84: window 0 high / low, 88 / 8C: window 1): code may run inside
     /// either window and an instruction fetched outside both raises the exception (DBG_MSG bit
-    /// 12). None until a firmware sets them.
+    /// 12).
     pub fn pc_windows(&mut self) -> Option<[(u32, u32); 2]> {
         let w = [(self.sfr_get(0x1eee384), self.sfr_get(0x1eee380)), (self.sfr_get(0x1eee38c), self.sfr_get(0x1eee388))];
         (w[0].1 != 0 || w[1].1 != 0).then_some(w)
