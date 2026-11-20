@@ -217,7 +217,7 @@
  "demake": {
   "package": "b496d0efdfc403db",
   "bytes": 1377280,
-  "audio": "659a253cced1918a"
+  "audio": "96003f1c0966f747"
  },
  "dinghy": {
   "package": "139da045ea20eb5e",
@@ -381,8 +381,8 @@
  },
  "frodhes": {
   "package": "9524a3cff24aae8b",
-  "bytes": 524800,
-  "audio": "3f5acc4d73df7197"
+  "bytes": 1377280,
+  "audio": "0e3c8948a2fd3157"
  },
  "fumi": {
   "package": "211db1c2efc379b0",
@@ -617,7 +617,7 @@
  "mono2k": {
   "package": "4fb65f626d079539",
   "bytes": 1377280,
-  "audio": "990998999dfb9b56"
+  "audio": "83fdd3e831ea1989"
  },
  "monohull": {
   "package": "6ed6e01d76066f1e",

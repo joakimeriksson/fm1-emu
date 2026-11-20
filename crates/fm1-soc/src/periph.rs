@@ -187,6 +187,14 @@ pub struct Periph {
     pub skip_idle: bool,
     /// Set by the runner while cpu0 is inside an ISR (no skipping there).
     pub in_isr: bool,
+    /// Set while core 1 loads (`Soc::core1_read32`): its polls never skip. Its run is paced by
+    /// core 0's cycles, so a skip would run the shared clock ahead of core 0.
+    pub core1_load: bool,
+    /// Core 1's TIMER4 reads in its current run (the clock stands still within one: `c1_cnt_at`);
+    /// the third sets `core1_polls`, and `run_cpu1` ends the run.
+    c1_cnt_at: u64,
+    c1_cnt_reads: u32,
+    pub core1_polls: bool,
     last_cnt_read: u64,
     /// Consecutive close TIMER4 reads outside ISRs (a poll needs 3).
     cnt_streak: u32,
@@ -371,6 +379,10 @@ impl Default for Periph {
             cycle_ticks: 1,
             skip_idle: false,
             in_isr: false,
+            core1_load: false,
+            c1_cnt_at: u64::MAX,
+            c1_cnt_reads: 0,
+            core1_polls: false,
             last_cnt_read: 0,
             cnt_streak: 0,
             next_due: 0,
@@ -939,7 +951,13 @@ impl Periph {
                 // (Reads inside an ISR neither count nor trigger: a single
                 // main-loop read right after the tick ISR's own read once
                 // skipped time in ui_input and the notes went silent.)
-                if self.skip_idle && !self.in_isr {
+                if self.skip_idle && self.core1_load {
+                    // a third read in one run of core 1 reads the same count: a poll that gets
+                    // nowhere before its next run
+                    self.c1_cnt_reads = if self.cycles == self.c1_cnt_at { self.c1_cnt_reads + 1 } else { 0 };
+                    self.c1_cnt_at = self.cycles;
+                    self.core1_polls |= self.c1_cnt_reads >= 2;
+                } else if self.skip_idle && !self.in_isr {
                     if self.cycles - self.last_cnt_read < 64 {
                         self.cnt_streak += 1;
                     } else {
