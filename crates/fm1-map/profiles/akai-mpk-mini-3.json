@@ -3,8 +3,7 @@
   "device": "MPK mini 3",
   "pass_unmapped": true,
   "keys_mode": "auto",
-  "midi_ch": 16,
-  "notes": "Factory settings (program 1): keys on channel 1, pads on channel 10 (bank A notes 36-43, bank B 44-51), knobs CC 70-77 (absolute). Pads, bank A: top row FX ENV LFO GLO, bottom row PLAY REC SEQ ARP. Bank B: top row SCL EDIT SAVE HOME, bottom row OCT- OCT+, keys mode (panel / MIDI / auto), record. Knobs 1-4: KNOB1-4, 5 SELECT, 6 PRESETS, 7 ALGORITHM, 8 MASTER. For endless turning, set knobs 1-7 to Relative in Akai's MPK mini 3 editor and their mode here to relative. The joystick and the sustain pedal go to the firmware's MIDI IN.",
+  "notes": "Factory settings (program 1): keys on channel 1, pads on channel 10 (bank A notes 36-43, bank B 44-51), knobs CC 70-77 (absolute). Pads, bank A: top row FX ENV LFO GLO, bottom row PLAY REC SEQ ARP. Bank B: top row SCL EDIT SAVE HOME, bottom row OCT- OCT+, keys mode (panel / MIDI / auto), record. Knobs 1-4: KNOB1-4, 5 SELECT, 6 PRESETS, 7 ALGORITHM, 8 MASTER. For endless turning, set knobs 1-7 to Relative in Akai's MPK mini 3 editor and their mode here to relative. The joystick and the sustain pedal go to the firmware's MIDI IN. The keys go to MIDI IN on channel 1, as played; for SLOOP's selected track, move them to channel 16 (fm1-live --midi-ch 16, the plugin's MIDI channel 16).",
   "bindings": [
     { "src": { "ch": 1, "cc": 70 }, "to": "KNOB1", "label": "K1" },
     { "src": { "ch": 1, "cc": 71 }, "to": "KNOB2", "label": "K2" },

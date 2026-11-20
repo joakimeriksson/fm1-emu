@@ -420,7 +420,8 @@ pub fn pick(profiles: &[Profile], device: &str) -> Option<Profile> {
         .cloned()
 }
 
-/// The profile made for a MIDI input named `device`, if there is one: its `device` in the name,
+/// The profile made for a MIDI input named `device`, if there is one (yours before a built-in):
+/// its `device` in the name,
 /// however a system writes it ("MPK mini 3", "MPK Mini Mk3", "AKAI MPKmini3 MIDI 1"): case,
 /// spaces, punctuation and a "mk" before a number make no difference.
 pub fn pick_named<'a>(profiles: &'a [Profile], device: &str) -> Option<&'a Profile> {
@@ -439,7 +440,8 @@ pub fn pick_named<'a>(profiles: &'a [Profile], device: &str) -> Option<&'a Profi
         out
     }
     let d = norm(device);
-    profiles.iter().find(|p| {
+    // (the last that matches: a profile of yours, loaded after the built-ins, wins)
+    profiles.iter().rev().find(|p| {
         let n = norm(&p.device);
         !n.is_empty() && d.contains(&n)
     })
@@ -468,11 +470,12 @@ pub enum Out {
 
 /// Whether a message of `kind` (0x90 a note, 0xb0 a CC, 0xe0 pitch bend) learned onto `t`
 /// makes a binding that does something: the keys play from notes; the buttons, encoders and
-/// MASTER from notes and CCs; pitch bend only goes on to MIDI IN.
+/// MASTER from notes and CCs; pitch bend only goes on to MIDI IN. Program changes and
+/// aftertouch are not learned (a binding has no source for them).
 fn learnable(t: Target, kind: u8) -> bool {
     match (t, kind) {
         (Target::Keys | Target::Key(_), k) => k == 0x90,
-        (Target::Midi | Target::Ignore, _) => true,
+        (Target::Midi | Target::Ignore, k) => matches!(k, 0x90 | 0xb0 | 0xe0),
         (_, k) => k == 0x90 || k == 0xb0,
     }
 }
@@ -551,11 +554,19 @@ impl Mapper {
     }
     /// Remove what is bound to `t`.
     pub fn unbind(&mut self, t: Target) {
+        self.own_copy();
         let keep: Vec<bool> = self.profile.bindings.iter().map(|b| b.to != t).collect();
         let mut i = 0;
         self.profile.bindings.retain(|_| { i += 1; keep[i - 1] });
         let mut i = 0;
         self.frac.retain(|_| { i += 1; keep[i - 1] });
+    }
+    /// A built-in profile changed by learning or unbinding becomes "<name> (mine)", so the file
+    /// saved for it sits next to the built-in instead of hiding it for good.
+    fn own_copy(&mut self) {
+        if builtin().iter().any(|b| b.name == self.profile.name) {
+            self.profile.name = format!("{} (mine)", self.profile.name);
+        }
     }
     pub fn set_keys_mode(&mut self, k: KeysMode, out: &mut dyn FnMut(Out)) {
         if k != self.keys_mode {
@@ -827,6 +838,7 @@ impl Mapper {
     }
 
     fn learn_from(&mut self, t: Target, kind: u8, ch: u8, d1: u8) {
+        self.own_copy();
         // learning one panel key learns the key zone: the note pressed plays that key
         let (t, at) = match t {
             Target::Key(n) => (Target::Keys, n),
@@ -837,13 +849,14 @@ impl Mapper {
         match kind {
             0x90 if t == Target::Keys => src.notes = Some([0, 127]),
             0x90 => src.note = Some(d1),
+            0xe0 => src.bend = true,
             0xb0 => {
                 src.cc = Some(d1);
                 if matches!(t, Target::Button(_)) {
                     mode = Mode::Momentary;
                 }
             }
-            _ => src.bend = true,
+            _ => return, // (not learnable, see `learnable`)
         }
         // one binding per single target, and one target per source
         let single = !matches!(t, Target::Midi | Target::Ignore);

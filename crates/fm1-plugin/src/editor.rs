@@ -5,7 +5,7 @@
 
 use crate::engine::Cmd;
 use crate::{map, panel, panel_smk, Clock, Fm1Params, Lead, Link};
-use fm1_map::{KeysMode, Profile};
+use fm1_map::{KeysMode, Profile, Target};
 use fm1_soc::Board;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, widgets};
@@ -175,13 +175,17 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
         });
 
         // the MIDI controller: its profile, learning, labels, the keys' mode
-        let (keys_mode, learning, map_down, map_enc, map_pot, map_labels, map_msg) = {
+        let (keys_mode, learning, map_down, map_enc, map_save, map_labels, map_msg) = {
             let mut v = params.map.lock().unwrap();
             if v.rev != ui.map_rev {
                 ui.map_rev = v.rev;
-                ui.map_profile = v.profile.clone();
+                // (MASTER is the host's parameter here: the labels leave its bindings out)
+                ui.map_profile = v.profile.clone().map(|mut p| {
+                    p.bindings.retain(|b| b.to != Target::Master);
+                    p
+                });
             }
-            (v.keys_mode, v.learning, v.down, v.enc, v.pot.take(), v.labels, v.msg.take())
+            (v.keys_mode, v.learning, v.down, v.enc, v.save.take(), v.labels, v.msg.take())
         };
         if map_labels != ui.map_labels {
             ui.map_labels = map_labels;
@@ -191,11 +195,13 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
             ui.msg = msg;
             ui.msg_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
         }
-        if let Some(p) = map_pot {
-            // the controller turned MASTER: the host's parameter follows
-            setter.begin_set_parameter(&params.master);
-            setter.set_parameter(&params.master, p as f32 / 1023.0);
-            setter.end_set_parameter(&params.master);
+        if let Some(p) = map_save {
+            // a learned profile, to the user's profiles (here, not on the machine's thread)
+            match fm1_map::save_user(&p) {
+                Ok(_) => ui.msg = format!("Learned: saved as {}", p.name),
+                Err(e) => ui.msg = format!("Learned, not saved: {e}"),
+            }
+            ui.msg_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
         }
         if ui.profiles.is_empty() {
             ui.profiles = fm1_map::all_profiles().0;

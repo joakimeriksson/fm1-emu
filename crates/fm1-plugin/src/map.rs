@@ -63,8 +63,9 @@ pub struct MapView {
     pub down: [bool; 41],
     /// encoder clicks the controller turned, all told, by panel::ENCS index
     pub enc: [i32; 7],
-    /// the MASTER pot as the controller set it last
-    pub pot: Option<u16>,
+    /// a learned profile for the window to save to the user's profiles (off the machine's
+    /// thread, which fills the audio)
+    pub save: Option<Profile>,
     /// counts the controller's "labels" presses
     pub labels: u32,
     /// a line for the status bar
@@ -80,7 +81,7 @@ impl Default for MapView {
             learning: None,
             down: [false; 41],
             enc: [0; 7],
-            pot: None,
+            save: None,
             labels: 0,
             msg: None,
         }
@@ -117,7 +118,7 @@ pub fn remember(p: Option<&Profile>) {
 pub fn target_of_hit(code: i32) -> Option<Target> {
     match code {
         0..=6 => Some(Target::Enc(crate::panel::ENCS[code as usize].1)),
-        7 => Some(Target::Master),
+        7 => None, // MASTER: the host's Master parameter (see engine.rs)
         100..=113 => Some(Target::Button((code - 100) as u8)),
         114..=140 => Some(Target::Key((code - 114) as u8)),
         _ => None,

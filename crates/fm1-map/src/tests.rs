@@ -14,9 +14,14 @@ fn mpk() -> Mapper {
 
 #[test]
 fn mpk_keys_play_at_their_pitch_on_the_selected_track() {
-    // as shipped: auto, MIDI IN on channel 16 (SLOOP: the selected track)
+    // as shipped: auto, MIDI IN on the channel played (1), so firmwares that listen on 1 hear it
     let mut m = Mapper::new(mpk_profile());
     assert_eq!(m.keys_mode(), KeysMode::Auto);
+    assert_eq!(run(&mut m, &[&[0x90, 48, 90]]), vec![Out::Midi { bytes: [0x90, 48, 90], len: 3 }]);
+    // with midi_ch 16 (SLOOP: the selected track)
+    let mut p = mpk_profile();
+    p.midi_ch = 16;
+    let mut m = Mapper::new(p);
     // a C major scale from C3 goes up, note for note, on channel 16
     let v = run(&mut m, &[&[0x90, 48, 90], &[0x80, 48, 0], &[0x90, 52, 90], &[0x90, 53, 90], &[0xe0, 0, 80]]);
     assert_eq!(v, vec![
@@ -274,4 +279,31 @@ fn notes_beyond_a_zone_that_does_not_fold_go_to_midi_in() {
         Out::Midi { bytes: [0x80, 30, 0], len: 3 },
         Out::Key { id: KEY0, down: true, vel: 90 },
     ]);
+}
+
+#[test]
+fn learning_into_a_built_in_makes_your_own_copy() {
+    let mut m = Mapper::new(mpk_profile());
+    m.learn(Some(Target::Enc(2)));
+    run(&mut m, &[&[0xb3, 20, 5]]);
+    assert_eq!(m.profile().name, "Akai MPK mini 3 (mine)");
+    // your copy is the one an MPK picks; the built-in is still there
+    let mut all = builtin();
+    all.push(m.profile().clone());
+    assert_eq!(pick_named(&all, "MPK mini 3").map(|p| p.name.as_str()), Some("Akai MPK mini 3 (mine)"));
+    assert!(all.iter().any(|p| p.name == "Akai MPK mini 3"));
+    // a profile of your own keeps its name
+    let mut m = Mapper::new(Profile { name: "Mine".into(), ..Profile::default() });
+    m.learn(Some(Target::Enc(2)));
+    run(&mut m, &[&[0xb0, 21, 5]]);
+    assert_eq!(m.profile().name, "Mine");
+}
+
+#[test]
+fn program_changes_and_aftertouch_are_not_learned() {
+    let mut m = mpk();
+    m.learn(Some(Target::Midi));
+    assert!(run(&mut m, &[&[0xc0, 5], &[0xd0, 40], &[0xa0, 60, 40]]).is_empty());
+    assert_eq!(m.learning(), Some(Target::Midi));
+    assert!(!m.profile().bindings.iter().any(|b| b.src.bend));
 }

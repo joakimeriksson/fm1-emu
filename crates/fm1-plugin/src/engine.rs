@@ -64,7 +64,6 @@ struct Ctl {
     record: bool,
     down: [bool; 41],
     enc: [i32; 7],
-    pot: Option<u16>,
     labels: u32,
     msg: Option<String>,
     /// the profile changed: to the window
@@ -75,14 +74,16 @@ struct Ctl {
 
 impl Ctl {
     fn new() -> Ctl {
-        Ctl { mapper: None, outs: Vec::with_capacity(32), record: false, down: [false; 41], enc: [0; 7], pot: None,
+        Ctl { mapper: None, outs: Vec::with_capacity(32), record: false, down: [false; 41], enc: [0; 7],
               labels: 0, msg: None, changed: true, learned: false }
     }
 
     /// A MIDI message that is due, through the profile (or straight to the jack, its channel
-    /// moved by the parameter).
+    /// moved by the parameter). A profile is the FM-1's panel: an SMK-37 firmware takes the
+    /// host's MIDI as it comes, as in fm1-live.
     fn feed(&mut self, bytes: &[u8], m: &mut Machine, params: &crate::Fm1Params) {
-        let Some(mp) = self.mapper.as_mut() else {
+        let fm1 = m.soc.board == Board::Fm1;
+        let Some(mp) = self.mapper.as_mut().filter(|_| fm1) else {
             let ch = params.channel.value() as u8;
             for (i, &b) in bytes.iter().enumerate() {
                 let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
@@ -95,8 +96,10 @@ impl Ctl {
         self.run(Some(m), params);
     }
 
-    /// What the profile asked for: to the machine (if one runs), the window, the recorder.
-    fn run(&mut self, mut m: Option<&mut Machine>, params: &crate::Fm1Params) {
+    /// What the profile asked for: to the machine (if one runs, and is an FM-1), the window, the
+    /// recorder.
+    fn run(&mut self, m: Option<&mut Machine>, params: &crate::Fm1Params) {
+        let mut m = m.filter(|m| m.soc.board == Board::Fm1);
         let ch = params.channel.value() as u8;
         let outs = std::mem::take(&mut self.outs);
         for o in &outs {
@@ -120,14 +123,9 @@ impl Ctl {
                         self.enc[i] += clicks;
                     }
                 }
-                Out::Adc { ch: c, value } => {
-                    if let Some(m) = m.as_deref_mut() {
-                        m.soc.periph.apply(&Action::Adc { ch: c, value });
-                    }
-                    if c == fm1_map::POT_ADC {
-                        self.pot = Some(value);
-                    }
-                }
+                // MASTER is the host's Master parameter: in the plugin it moves only through that
+                // (automation, the host's own MIDI learn), never from the profile directly
+                Out::Adc { .. } => {}
                 Out::Midi { mut bytes, len } => {
                     if ch != 0 && (0x80..0xf0).contains(&bytes[0]) {
                         bytes[0] = (bytes[0] & 0xf0) | (ch - 1);
@@ -150,6 +148,18 @@ impl Ctl {
         }
         self.outs = outs;
         self.outs.clear();
+    }
+
+    /// A new machine (a firmware loaded, booted again on another clock): what the profile held is
+    /// let go of (in the window; the new machine holds nothing) and latched buttons are off.
+    fn reset(&mut self, params: &crate::Fm1Params) {
+        let outs = &mut self.outs;
+        if let Some(mp) = self.mapper.as_mut() {
+            mp.release_all(&mut |o| outs.push(o));
+        }
+        self.run(None, params);
+        self.down = [false; 41];
+        self.publish(params);
     }
 
     fn command(&mut self, c: Cmd, m: Option<&mut Machine>, params: &crate::Fm1Params) {
@@ -190,19 +200,19 @@ impl Ctl {
     /// To the window (and, for a learned profile, the project and the user's profiles).
     fn publish(&mut self, params: &crate::Fm1Params) {
         // a learned profile: to the project, and to a file, with no lock the window takes held
+        let mut save = None;
         if std::mem::take(&mut self.learned) {
             if let Some(p) = self.mapper.as_ref().map(|mp| mp.profile().clone()) {
-                {
-                    let mut c = params.controller.lock().unwrap();
-                    c.chosen = true;
-                    c.profile = Some(p.clone());
-                }
-                if let Err(e) = fm1_map::save_user(&p) {
-                    self.msg = Some(format!("Learned, not saved: {e}"));
-                }
+                let mut c = params.controller.lock().unwrap();
+                c.chosen = true;
+                c.profile = Some(p.clone());
+                save = Some(p);
             }
         }
         let mut v = params.map.lock().unwrap();
+        if save.is_some() {
+            v.save = save;
+        }
         if self.changed {
             self.changed = false;
             v.rev += 1;
@@ -216,9 +226,6 @@ impl Ctl {
         }
         v.down = self.down;
         v.enc = self.enc;
-        if self.pot.is_some() {
-            v.pot = self.pot.take();
-        }
         v.labels = self.labels;
         if let Some(msg) = self.msg.take() {
             v.msg = Some(msg);
@@ -416,6 +423,8 @@ pub fn run(
                     speed_ms = 0;
                     busy = Duration::ZERO;
                     v.board = m.as_ref().map_or(Board::Fm1, |m| m.soc.board);
+                    drop(v);
+                    ctl.reset(&params);
                     saved = sectors;
                     due.clear();
                     if let Some((firmware, reply)) = loaded {
@@ -463,6 +472,7 @@ pub fn run(
                     m = Some(next);
                     pot = u16::MAX;
                     due.clear();
+                    ctl.reset(&params);
                     let mut v = shared.view.lock().unwrap();
                     (v.halted, v.speed) = (false, 0.0);
                     starved0 = v.starved;

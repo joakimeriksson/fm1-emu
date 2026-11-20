@@ -24,9 +24,12 @@ it off, `--map "Generic keyboard"` or another name picks one for every input `--
 
 **Plugin**: the *Controller* bar picks the profile (the project keeps it; new projects take your
 last choice, and projects saved before profiles existed start with none), sets the keys' mode, turns on *Learn* (click a panel control, then move one of
-yours), and shows *Labels*. (*Record* in the bar above writes a WAV.)
+yours), and shows *Labels*. (*Record* in the bar above writes a WAV.) MASTER is the plugin's
+*Master* parameter, so there a profile leaves it alone: automate it, or map it with your host's
+MIDI learn. An SMK-37 firmware takes the host's MIDI as it comes.
 
-Learned bindings are saved as your own profile in `%APPDATA%\fm1-emu\controllers` (Windows),
+Learned bindings are saved as your own profile (a built-in one as "<name> (mine)", which then
+is the one picked for that controller, the built-in still there) in `%APPDATA%\fm1-emu\controllers` (Windows),
 `~/Library/Application Support/fm1-emu/controllers` (macOS) or `~/.config/fm1-emu/controllers`.
 A profile there replaces a built-in one of the same name.
 
@@ -54,7 +57,7 @@ scale played from the bottom jumps. *MIDI IN* and *auto* play every note at its 
 | pads bank A, bottom row | PLAY, REC, SEQ, ARP |
 | pads bank B, top row | SCL, EDIT, SAVE, HOME |
 | pads bank B, bottom row | OCT−, OCT+, keys mode, record |
-| keys | *auto*: MIDI IN at their own pitch, on channel 16 (SLOOP: the selected track); the panel's keys while a function pad is held |
+| keys | *auto*: MIDI IN at their own pitch, on channel 1 as played (SLOOP's selected track: `--midi-ch 16`, or the plugin's MIDI channel 16); the panel's keys while a function pad is held |
 | joystick, sustain | the firmware's MIDI IN |
 
 The knobs are absolute out of the box, so a knob stops turning an encoder at its end. For endless
