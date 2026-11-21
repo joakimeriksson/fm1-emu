@@ -1514,9 +1514,16 @@ impl Cpu {
         let x = self.icache_x[slot].expect("decoded line");
         if self.profile {
             self.route_hist[(x.pre.route as usize).min(30)] += 1;
-            let tag = format!("{}{}{}{}", if l.fast.is_some() {"F"} else {"-"}, if l.pair_head {"H"} else {"-"}, if self.pair_pending.is_some() {"P"} else {"-"}, x.entry.name);
-            let tag: &'static str = Box::leak(tag.into_boxed_str());
-            *self.slow_hist.entry(tag).or_insert(0) += 1;
+            // (the key on the stack, and kept only when it is a new one: this is every slow instruction)
+            let (mut key, name) = ([0u8; 96], x.entry.name.as_bytes());
+            let n = name.len().min(key.len() - 3);
+            key[..3].copy_from_slice(&[if l.fast.is_some() { b'F' } else { b'-' }, if l.pair_head { b'H' } else { b'-' }, if self.pair_pending.is_some() { b'P' } else { b'-' }]);
+            key[3..3 + n].copy_from_slice(&name[..n]);
+            let tag = std::str::from_utf8(&key[..3 + n]).unwrap_or("?");
+            match self.slow_hist.get_mut(tag) {
+                Some(count) => *count += 1,
+                None => drop(self.slow_hist.insert(Box::leak(tag.into()), 1)),
+            }
         }
         let insn = Instruction { addr: self.pc, raw: x.win, entry: x.entry };
         let is_pair_head = x.pre.pair_head;
@@ -4876,6 +4883,27 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.pc, 4, "lockclr");
         assert_eq!(ram.calls, vec![(1, true), (1, true), (1, false)]);
+    }
+
+    /// `Cpu::slow_hist` (with `profile`): an instruction off the micro-op path under its class
+    /// name, after F (it has a micro-op), H (a pair's head) and P (a pair is in flight).
+    #[test]
+    fn slow_path_histogram_keys() {
+        // `41 00` lockset, `40 00` lockclr, `94 f1 13 13` r1 = r1 & ~(1 << r3) #, a nop (the
+        // pair's second), `ff ea f9 ff` goto the lockset
+        let code = [0x41u8, 0x00, 0x40, 0x00, 0x94, 0xf1, 0x13, 0x13, 0x00, 0x00, 0xff, 0xea, 0xf9, 0xff, 0, 0, 0, 0];
+        let head = decode_any(0x1313_f194, 4).unwrap().entry.name;
+        let mut ram = FlatRam::new(code.to_vec());
+        let mut cpu = Cpu::new(0);
+        cpu.profile = true;
+        for _ in 0..5 * 1000 {
+            cpu.step(&mut ram).unwrap();
+        }
+        let mut got: Vec<(&str, u64)> = cpu.slow_hist.iter().map(|(k, n)| (*k, *n)).collect();
+        got.sort();
+        let head = format!("FH-{head}");
+        assert_eq!(got, [("---lockclr", 1000), ("---lockset", 1000), ("F-Pnop", 1000), (head.as_str(), 1000)]);
+        assert_eq!(cpu.route_hist[31], 1000, "the goto, a micro-op");
     }
 
     #[test]
