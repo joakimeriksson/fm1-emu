@@ -205,6 +205,7 @@ mod tests {
     /// Each encoding against `llvm-mc -triple=x86_64 -show-encoding` (Intel syntax), run once
     /// and pasted here.
     #[test]
+    #[allow(clippy::type_complexity)]
     fn encodings_match_llvm_mc() {
         let cases: Vec<(&str, Box<dyn Fn(&mut Asm)>, &[u8])> = vec![
             ("mov eax, 0x12345678", Box::new(|a| a.mov_ri(RAX, 0x1234_5678)), &[0xb8, 0x78, 0x56, 0x34, 0x12]),
