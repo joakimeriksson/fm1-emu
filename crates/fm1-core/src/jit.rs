@@ -2106,10 +2106,25 @@ mod tests {
     /// next tick due when `due_on_mmio` (a peripheral touched, as the Soc does).
     /// (`irq`: an interrupt pending; a write at `MMIO` and up sets it from the value's bit 0)
     /// (`quiet`: writes don't count as code writes, which would end a block after each)
-    struct Memory { data: Vec<u8>, flags: Vec<u8>, version: u64, mmio: u32, due_on_mmio: bool, due: bool, irq: bool, quiet: bool }
+    /// (`window`: the bytes of it compiled code is shown as RAM, `xip`: all of it shown as an XIP
+    /// window as well, at 0 too: `Paths`)
+    struct Memory { data: Vec<u8>, flags: Vec<u8>, version: u64, mmio: u32, due_on_mmio: bool, due: bool, irq: bool, quiet: bool, window: u32, xip: bool }
     const MMIO: u32 = 0x1000;
+    /// How a lockstep test's loads and stores reach `Memory`, which the interpreter always reads
+    /// and writes through the bus: all in line, as RAM (no word flagged); every word flagged as
+    /// code, so each store takes the bus (`h_write`); the RAM window over the block's own code
+    /// only and the data an XIP window, so loads read it there in line and stores take the bus;
+    /// no window over the data at all, loads and stores both through the helpers.
+    #[derive(Clone, Copy, Debug)]
+    enum Paths { Inline, Flagged, Xip, Bus }
     impl Memory {
-        fn new() -> Self { Self { data: vec![0; 256], flags: vec![1; 65], version: 0, mmio: 0, due_on_mmio: false, due: false, irq: false, quiet: false } }
+        fn new() -> Self { Self { data: vec![0; 256], flags: vec![1; 65], version: 0, mmio: 0, due_on_mmio: false, due: false, irq: false, quiet: false, window: 256, xip: false } }
+        /// (the tests' blocks lie in bytes 0..32, their data from 32 up)
+        fn paths(&mut self, paths: Paths) {
+            self.flags.iter_mut().for_each(|f| *f = matches!(paths, Paths::Flagged) as u8);
+            self.window = if matches!(paths, Paths::Xip | Paths::Bus) { 32 } else { 256 };
+            self.xip = matches!(paths, Paths::Xip);
+        }
         fn wrote(&mut self) { if !self.quiet { self.version += 1; } }
     }
     impl Bus for Memory {
@@ -2138,8 +2153,8 @@ mod tests {
         fn add_ticks(&mut self, _: u64) {}
         fn code_writes(&self) -> Option<u64> { Some(self.version) }
         fn jit_mem(&mut self) -> Option<JitMem> {
-            Some(JitMem { ram: self.data.as_mut_ptr(), ram_base: 0, ram_len: 256,
-                ram_code: self.flags.as_ptr(), xip: std::ptr::null(), xip_base: 0x02000000, xip_len: 0 })
+            let (xip, xip_base, xip_len) = if self.xip { (self.data.as_ptr(), 0, 256) } else { (std::ptr::null(), 0x02000000, 0) };
+            Some(JitMem { ram: self.data.as_mut_ptr(), ram_base: 0, ram_len: self.window, ram_code: self.flags.as_ptr(), xip, xip_base, xip_len })
         }
     }
     fn op(fast: Fast) -> BOp { BOp { fast, len: 2, careful: false, pair_head: false, glue: false } }
@@ -2514,7 +2529,7 @@ mod tests {
             (cpu.regs[8], cpu.regs[9], cpu.regs[2]) = (64 + 4 * (rnd() % 16), MMIO, rnd());
             let mut e = Cpu::new(0);
             e.regs = cpu.regs;
-            let mut reference = Memory { data: bus.data.clone(), flags: bus.flags.clone(), version: 0, mmio: 0, due_on_mmio: bus.due_on_mmio, due: false, irq: bus.irq, quiet: false };
+            let mut reference = Memory { data: bus.data.clone(), flags: bus.flags.clone(), version: 0, mmio: 0, due_on_mmio: bus.due_on_mmio, due: false, irq: bus.irq, quiet: false, ..Memory::new() };
             // the careful path: the if (nothing in progress), then its then-part while one is
             let (mut k, mut stop) = (1, false);
             let (mut still, _) = e.exec_careful(&mut reference, block[0].fast, false, false, 2);
@@ -2545,6 +2560,18 @@ mod tests {
     /// against the interpreter running the same ops one after another.
     #[test]
     fn compiled_blocks_match_interpreter() {
+        blocks_match_interpreter(Paths::Inline);
+    }
+    /// The same blocks with their stores, or their loads and stores, through the bus's helpers
+    /// (in mid-block, with registers held in host registers across each call), and with their
+    /// loads through the XIP window.
+    #[test]
+    fn compiled_blocks_match_interpreter_off_the_inline_ram_paths() {
+        for paths in [Paths::Flagged, Paths::Xip, Paths::Bus] {
+            blocks_match_interpreter(paths);
+        }
+    }
+    fn blocks_match_interpreter(paths: Paths) {
         use crate::Op;
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
@@ -2585,7 +2612,7 @@ mod tests {
             let mut bus = Memory::new(); let mut reference = Memory::new();
             bus.quiet = true;
             for i in 32..256 { let v = rnd() as u8; bus.data[i] = v; reference.data[i] = v; }
-            bus.flags.iter_mut().for_each(|f| *f = 0);
+            bus.paths(paths);
             let mem = bus.jit_mem().unwrap();
             let mut cpu = Cpu::new(0);
             for r in 0..16 { cpu.regs[r] = rnd(); }
@@ -2598,10 +2625,10 @@ mod tests {
             for &f in &block { pc = expected.exec_fast(&mut reference, f, pc + 2).unwrap_or(pc + 2); }
             expected.pc = pc;
             let code = hot(&mut jit, case, 0, &ops_b, &mem);
-            assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, block.len() as u32, false) }.0, block.len() as u32, "{block:?}");
+            assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, block.len() as u32, false) }.0, block.len() as u32, "{paths:?}: {block:?}");
             let regs = |c: &Cpu| c.regs.map(|r| format!("{r:08x}"));
-            assert_eq!((regs(&cpu), cpu.pc), (regs(&expected), expected.pc), "case {case}: {block:?}");
-            assert_eq!(bus.data, reference.data, "case {case}: {block:?}");
+            assert_eq!((regs(&cpu), cpu.pc), (regs(&expected), expected.pc), "{paths:?} case {case}: {block:?}");
+            assert_eq!(bus.data, reference.data, "{paths:?} case {case}: {block:?}");
         }
     }
     #[test]
@@ -2741,6 +2768,18 @@ mod tests {
     /// state (`ie`, icfg).
     #[test]
     fn compiled_ops_match_interpreter_from_random_state() {
+        ops_match_interpreter_from_random_state(Paths::Inline);
+    }
+    /// The same ops with their stores, or their loads and stores, through the bus's helpers
+    /// (a store there counts as a code write: the code leaves after the op), and with their
+    /// loads through the XIP window.
+    #[test]
+    fn compiled_ops_match_interpreter_off_the_inline_ram_paths() {
+        for paths in [Paths::Flagged, Paths::Xip, Paths::Bus] {
+            ops_match_interpreter_from_random_state(paths);
+        }
+    }
+    fn ops_match_interpreter_from_random_state(paths: Paths) {
         use crate::{Cond, Op, RmwOp};
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
@@ -2839,7 +2878,7 @@ mod tests {
                 let mut bus = Memory::new(); let mut reference = Memory::new();
                 // (bytes 0..32 stay 0: the block's own code, which its RAM guard checks)
                 for i in 32..256 { let v = rnd() as u8; bus.data[i] = v; reference.data[i] = v; }
-                bus.flags.iter_mut().for_each(|f| *f = 0); // no watched code words
+                bus.paths(paths);
                 let mem = bus.jit_mem().unwrap();
                 let mut cpu = Cpu::new(0);
                 for r in 0..8 {
@@ -2861,12 +2900,12 @@ mod tests {
                 (expected.ie, expected.sreg_store, expected.irq_levels) = (cpu.ie, cpu.sreg_store, cpu.irq_levels.clone());
                 expected.pc = expected.exec_fast(&mut reference, fast, 2).unwrap_or(2);
                 let code = hot(&mut jit, j * 24 + round, 0, &[op(fast)], &mem);
-                assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 1, false) }.0, 1, "{fast:?}");
+                assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 1, false) }.0, 1, "{paths:?}: {fast:?}");
                 let regs = |c: &Cpu| c.regs.map(|r| format!("{r:08x}"));
                 assert_eq!((regs(&cpu), cpu.sp, cpu.rets, cpu.pc, cpu.ie), (regs(&expected), expected.sp, expected.rets, expected.pc, expected.ie),
-                    "case {j} round {round}: {fast:?}");
-                assert_eq!((cpu.ie, cpu.sreg_store), (expected.ie, expected.sreg_store), "case {j} round {round}: {fast:?}");
-                assert_eq!(bus.data, reference.data, "case {j} round {round}: {fast:?}");
+                    "{paths:?} case {j} round {round}: {fast:?}");
+                assert_eq!((cpu.ie, cpu.sreg_store), (expected.ie, expected.sreg_store), "{paths:?} case {j} round {round}: {fast:?}");
+                assert_eq!(bus.data, reference.data, "{paths:?} case {j} round {round}: {fast:?}");
             }
         }
     }
