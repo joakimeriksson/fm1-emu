@@ -57,7 +57,11 @@ impl Bus for Core1Bus<'_> {
         self.soc.core1_read16(a)
     }
     fn read32(&mut self, a: u32) -> u32 {
-        self.soc.core1_read32(a)
+        let v = self.soc.core1_read32(a);
+        if self.soc.periph.core1_polls {
+            self.budget = self.budget.min(1); // (`run_cpu1` ends the run there)
+        }
+        v
     }
     fn fetch32(&mut self, a: u32) -> u32 {
         self.soc.fetch32(a)
@@ -780,6 +784,9 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
         }
         if soc.cpu1_idle {
             break; // asleep (`Core1Bus::idle`)
+        }
+        if std::mem::take(&mut soc.periph.core1_polls) {
+            break; // polling TIMER4, which stands still while core 1 runs
         }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
@@ -1881,6 +1888,29 @@ mod tests {
         assert_eq!(bus.read32(RAM_BASE), MISREAD_BIT);
         assert_eq!(bus.fetch32(RAM_BASE), 0, "an instruction fetch is right");
         assert_eq!(soc.flaky_core1.as_ref().unwrap().loads, 1);
+    }
+
+    #[test]
+    fn core_1_polling_timer4_ends_its_run() {
+        // the count stands still within core 1's run: a deadline loop on it gets nowhere before
+        // the next run, and would spin through the whole budget (Frodhes' c1_pause)
+        let mut soc = Soc::new(1 << 20, vec![0; 0x1000]);
+        soc.periph.skip_idle = true;
+        soc.write32(0x10800, 1);
+        let c = soc.periph.cycles;
+        let mut bus = Core1Bus { soc: &mut soc, budget: 1 << 20, until: None, spent: 0 };
+        bus.read32(0x10804);
+        bus.read32(0x10804);
+        assert!(bus.budget > 1, "two reads are not a poll");
+        bus.read32(0x10804);
+        assert!(bus.budget <= 1, "the run goes on polling");
+        assert_eq!(bus.soc.periph.cycles, c);
+        // the next run (the clock moved on, `run_cpu1` took the poll) starts counting again
+        assert!(std::mem::take(&mut bus.soc.periph.core1_polls));
+        bus.soc.periph.cycles += 1000;
+        bus.budget = 1 << 20;
+        bus.read32(0x10804);
+        assert!(bus.budget > 1);
     }
 
     #[test]

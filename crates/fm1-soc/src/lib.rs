@@ -724,18 +724,25 @@ impl Soc {
     }
 
     /// A load by core 1: what `read32` returns, unless a flaky core 1 misreads it (RAM only).
+    /// Its TIMER4 polls skip no time (`Periph::core1_load`).
     pub fn core1_read32(&mut self, addr: u32) -> u32 {
+        self.periph.core1_load = true;
         let v = self.read32(addr);
+        self.periph.core1_load = false;
         self.core1_misread(addr, 4, v)
     }
 
     pub fn core1_read16(&mut self, addr: u32) -> u16 {
+        self.periph.core1_load = true;
         let v = self.read16(addr);
+        self.periph.core1_load = false;
         self.core1_misread(addr, 2, v as u32) as u16
     }
 
     pub fn core1_read8(&mut self, addr: u32) -> u8 {
+        self.periph.core1_load = true;
         let v = self.read8(addr);
+        self.periph.core1_load = false;
         self.core1_misread(addr, 1, v as u32) as u8
     }
 
@@ -1722,6 +1729,25 @@ pub fn write_boot_info(soc: &mut Soc, at: u32, flash: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_1_polling_timer4_does_not_move_the_clock() {
+        // Frodhes' dual-core build: core 1 waits for jobs reading TIMER4's count in a loop
+        // (fm1_core1.h c1_pause). Its run is paced by core 0's cycles, so a skip there runs the
+        // shared clock ahead of core 0, and the watchdog fires before core 0 has booted.
+        let mut soc = Soc::new(1 << 20, vec![0; 0x1000]);
+        soc.periph.skip_idle = true;
+        soc.write32(0x10800, 1);
+        let c = soc.periph.cycles;
+        for _ in 0..8 {
+            soc.core1_read32(0x10804);
+        }
+        assert_eq!(soc.periph.cycles, c, "core 1's polls moved the clock");
+        for _ in 0..8 {
+            soc.read32(0x10804);
+        }
+        assert!(soc.periph.cycles > c, "core 0's polls skip as before");
+    }
 
     #[test]
     fn sfr_table_matches_ranges() {
