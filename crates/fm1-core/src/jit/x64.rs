@@ -82,7 +82,7 @@ impl Gen<'_> {
             self.a.alu_ri(Alu::Add, r, imm);
         }
     }
-    /// eax = op(eax, ecx) (ecx may be clobbered)
+    /// eax = op(eax, ecx) (ecx and edx may be clobbered)
     fn alu(&mut self, op: Op) {
         let a = &mut self.a;
         match op {
@@ -100,10 +100,23 @@ impl Gen<'_> {
             Op::Or => a.alu_rr(Alu::Or, RAX, RCX),
             Op::Xor => a.alu_rr(Alu::Xor, RAX, RCX),
             Op::Mul => a.imul(RAX, RCX),
-            // (x86 takes a 32-bit shift count mod 32, as the interpreter does)
-            Op::Shl => a.sh_cl(Sh::Shl, RAX),
-            Op::Shr => a.sh_cl(Sh::Shr, RAX),
-            Op::Sar => a.sh_cl(Sh::Sar, RAX),
+            // the count is ecx's low 8 bits, and 32 and up shift everything out (`shift32`); x86
+            // takes a 32-bit count mod 32, so a larger count gives 0, or for >>> shifts by 31
+            // (edx clobbered)
+            Op::Shl | Op::Shr => {
+                a.alu_ri(Alu::And, RCX, 0xff);
+                a.sh_cl(if matches!(op, Op::Shl) { Sh::Shl } else { Sh::Shr }, RAX);
+                a.alu_rr(Alu::Xor, RDX, RDX);
+                a.alu_ri(Alu::Cmp, RCX, 31);
+                a.cmov(Cc::A, RAX, RDX);
+            }
+            Op::Sar => {
+                a.alu_ri(Alu::And, RCX, 0xff);
+                a.mov_ri(RDX, 31);
+                a.alu_ri(Alu::Cmp, RCX, 31);
+                a.cmov(Cc::A, RCX, RDX);
+                a.sh_cl(Sh::Sar, RAX);
+            }
         }
     }
     /// ecx = an A4/BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg` (edx clobbered)
@@ -298,13 +311,12 @@ impl Gen<'_> {
     fn f2i(&mut self, signed: bool) {
         let (done, zero, max) = (self.a.label(), self.a.label(), self.a.label());
         self.a.movd_xr(0, RAX);
+        // (a NaN goes as the infinity of its sign, `fpu`)
         if signed {
             // 0x8000_0000: out of range or NaN, or exactly -2^31
             self.a.cvttss2si(RAX, 0, false);
             self.a.alu_ri(Alu::Cmp, RAX, 0x8000_0000);
             self.a.jcc(Cc::Ne, done);
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, done); // negative: i32::MIN
@@ -321,9 +333,7 @@ impl Gen<'_> {
             self.a.jcc(Cc::Ne, max);
             self.a.jmp(done);
             self.a.bind(neg);
-            // NaN or below zero: 0; 2^63 and up: u32::MAX
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
+            // below zero or a negative NaN: 0; 2^63 and up or a positive NaN: u32::MAX
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, zero);
@@ -582,7 +592,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.a.bind(taken);
             g.chain(next_pc, count);
         }
-        // (the multiply-accumulates 7 / 8 read d too, min / max are Rust's, and the rounding
+        // (the multiply-accumulates 7 / 8 read d too, min / max are `fminmax`, and the rounding
         // conversions other than trunc have no single SSE instruction here: through the
         // interpreter's executor)
         Fast::FOp { d, a, b, op } if matches!(op, 0..=3 | 0x1f | 0x5f | 0x8f | 0x9f) => {
@@ -595,6 +605,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     let f = match op { 0 => Fop::Add, 1 => Fop::Sub, 2 => Fop::Mul, _ => Fop::Div };
                     g.a.fop(f, 0, 1);
                     g.a.movd_rx(RAX, 0);
+                    // every NaN is 0x7f800001 (`fnan`)
+                    g.a.mov_rr(RCX, RAX);
+                    g.a.alu_ri(Alu::And, RCX, 0x7fff_ffff);
+                    g.a.alu_ri(Alu::Cmp, RCX, 0x7f80_0000);
+                    g.a.mov_ri(RCX, 0x7f80_0001);
+                    g.a.cmov(Cc::A, RAX, RCX);
                 }
                 0x1f => g.f2i(true),
                 0x5f => g.f2i(false),
@@ -817,7 +833,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                 }
                 k += 1;
             }
-            if post {
+            // (a load into its own base keeps the loaded word, as the interpreter)
+            if post && (store || mask >> (base & 15) & 1 == 0) {
                 g.a.ld(RAX, m(RSP, KEEP));
                 if !down {
                     g.add_imm(RAX, 4 * n);
@@ -866,19 +883,21 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             if p != 0 {
                 g.a.sh_i(Sh::Shr, RAX, p);
             }
-            if l != 0 {
-                if signed {
-                    g.a.sh_i(Sh::Shl, RAX, 32 - l);
-                    g.a.sh_i(Sh::Sar, RAX, 32 - l);
-                } else {
-                    g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
-                }
+            if l == 0 {
+                // (a width of 0 gives 0, `bit_extract`)
+                g.a.mov_ri(RAX, 0);
+            } else if signed {
+                g.a.sh_i(Sh::Shl, RAX, 32 - l);
+                g.a.sh_i(Sh::Sar, RAX, 32 - l);
+            } else {
+                g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
             }
             g.st_reg(RAX, d);
         }
         Fast::BitIns { d, s, p, l } => {
+            // (a width of 0 changes nothing, `bit_insert`)
             let (p, l) = (p as u32 & 31, l as u32 & 31);
-            let mask = if l == 0 { u32::MAX } else { (1u32 << l) - 1 };
+            let mask = (1u32 << l) - 1;
             g.ld_reg(RAX, s);
             g.ld_reg(RCX, d);
             g.a.alu_ri(Alu::And, RAX, mask);
@@ -924,6 +943,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::PopRets => {
             g.ld_sp(RAX);
             g.load(4, false, idx);
+            g.a.alu_ri(Alu::And, RAX, crate::RETS_MASK);
             g.a.st(m(CPU, off_rets() as i32), RAX);
             g.ld_sp(RAX);
             g.a.alu_ri(Alu::Add, RAX, 4);

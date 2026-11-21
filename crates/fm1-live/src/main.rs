@@ -306,6 +306,94 @@ struct Machine {
     /// FM1_WATCH_LEDPUT=after_ms: report led_put(…, 25, on) calls (debug)
     watch_call: Option<(u32, u64)>,
     watch_hits: u32,
+    /// FM1_FLAG_AUDIT=file (with FM1_NO_BLOCKS=1): every flag read against the writer it got its
+    /// flags from (`FlagAudit`)
+    flag_audit: Option<FlagAudit>,
+}
+
+/// FM1_FLAG_AUDIT: while the reference loop steps cpu0, every instruction that reads the psr flags is
+/// matched with the instruction they came from. Compiled code runs some flag-writing micro-ops off the
+/// careful path without their flags (`flags_read_later` found no reader within its window), so a read
+/// whose flags came from one of those would see stale flags there: `stale` lists them. A psr push and
+/// its pop carry the flags' origin across (an interrupt's prologue and epilogue, a context switch): a
+/// read after the pop counts against the instruction that wrote them before the push. Also the reads
+/// by distance from their writer, and the `ifeq` / `ifne` whose flags did not come from the
+/// instruction just before.
+#[derive(Default)]
+struct FlagAudit {
+    /// the flags' origin: writer pc, compiled without its flags, syntax; instructions since
+    last: Option<(u32, bool, &'static str)>,
+    since: u64,
+    /// the origin a psr push saved, by the sp it left
+    saved: std::collections::HashMap<u32, (Option<(u32, bool, &'static str)>, u64)>,
+    /// what each pc does with the flags (`Cpu::flag_audit`)
+    uses: std::collections::HashMap<u32, Option<fm1_core::FlagUse>>,
+    steps: u64,
+    reads: u64,
+    /// reads by distance from their writer: 1, 2..8, 9..32, 33..256, more
+    dist: [u64; 5],
+    /// (writer pc, reader pc) -> (reads, farthest, writer syntax, reader syntax)
+    stale: std::collections::BTreeMap<(u32, u32), (u64, u64, &'static str, &'static str)>,
+    /// `ifeq` / `ifne`: right after their writer; else (writer syntax, distance) -> reads
+    if_next: u64,
+    if_other: std::collections::BTreeMap<(&'static str, u64), u64>,
+}
+
+impl FlagAudit {
+    fn use_at(&mut self, cpu: &mut Cpu, soc: &mut Soc, pc: u32) -> Option<fm1_core::FlagUse> {
+        *self.uses.entry(pc).or_insert_with(|| cpu.flag_audit(soc, pc))
+    }
+
+    fn step(&mut self, pc: u32, u: Option<fm1_core::FlagUse>, flags: (u32, u32), sp: (u32, u32)) {
+        self.steps += 1;
+        self.since += 1;
+        let Some(u) = u else { return };
+        if u.psr_push {
+            self.saved.insert(sp.1, (self.last, self.since));
+            return;
+        }
+        if u.psr_pop {
+            if let Some((last, since)) = self.saved.remove(&sp.0) {
+                (self.last, self.since) = (last, since);
+            }
+            return;
+        }
+        if u.reads {
+            self.reads += 1;
+            let k = match self.since { 0..=1 => 0, 2..=8 => 1, 9..=32 => 2, 33..=256 => 3, _ => 4 };
+            self.dist[k] += 1;
+            if let Some((w, dropped, ws)) = self.last {
+                if dropped {
+                    let e = self.stale.entry((w, pc)).or_insert((0, 0, ws, u.syntax));
+                    e.0 += 1;
+                    e.1 = e.1.max(self.since);
+                }
+                if u.syntax.starts_with("ifeq") || u.syntax.starts_with("ifne") {
+                    if self.since == 1 {
+                        self.if_next += 1;
+                    } else {
+                        *self.if_other.entry((ws, self.since.min(1000))).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        // (a write of the value the flags held shows only when the form says it writes them)
+        if u.writes || flags.0 & 15 != flags.1 & 15 {
+            self.last = Some((pc, u.dropped, u.syntax));
+            self.since = 0;
+        }
+    }
+
+    fn report(&self) -> String {
+        let stale: Vec<String> = self.stale.iter().map(|((w, r), (n, far, ws, rs))| {
+            format!("{{\"writer\": \"{w:#010x}\", \"reader\": \"{r:#010x}\", \"reads\": {n}, \"farthest\": {far}, \"writer_syntax\": {ws:?}, \"reader_syntax\": {rs:?}}}")
+        }).collect();
+        let other: Vec<String> = self.if_other.iter().map(|((ws, d), n)| {
+            format!("{{\"writer_syntax\": {ws:?}, \"distance\": {d}, \"reads\": {n}}}")
+        }).collect();
+        format!("{{\"steps\": {}, \"reads\": {}, \"distance\": {:?}, \"stale\": [{}], \"if_right_after\": {}, \"if_other\": [{}]}}\n",
+                self.steps, self.reads, self.dist, stale.join(", "), self.if_next, other.join(", "))
+    }
 }
 
 impl Machine {
@@ -375,7 +463,8 @@ impl Machine {
         let blocks = std::env::var("FM1_NO_BLOCKS").is_err();
         let watch_call = std::env::var("FM1_WATCH_LEDPUT").ok().and_then(|v| v.parse().ok()).map(|ms| (0x0201_ad60u32, ms));
         let blocks = blocks && watch_call.is_none();
-        Ok(Self { cpu, cpu1: None, soc, skip_log, blocks, pending_tick: false, watch_call, watch_hits: 0 })
+        let flag_audit = std::env::var_os("FM1_FLAG_AUDIT").map(|_| FlagAudit::default());
+        Ok(Self { cpu, cpu1: None, soc, skip_log, blocks, pending_tick: false, watch_call, watch_hits: 0, flag_audit })
     }
 
     /// Run n instructions of cpu0, and of cpu1 alongside once it is running
@@ -409,7 +498,14 @@ impl Machine {
                 }
             }
             let (pc, sk) = (self.cpu.pc, self.soc.periph.skipped);
+            let audit = match self.flag_audit.as_mut() {
+                Some(a) => Some((a.use_at(&mut self.cpu, &mut self.soc, pc), self.cpu.flags, self.cpu.sp)),
+                None => None,
+            };
             machine::cpu0_step(&mut self.cpu, &mut self.soc)?;
+            if let (Some(a), Some((u, f0, sp0))) = (self.flag_audit.as_mut(), audit) {
+                a.step(pc, u, (f0, self.cpu.flags), (sp0, self.cpu.sp));
+            }
             if self.skip_log.is_some() && self.soc.periph.skipped != sk {
                 *self.skip_log.as_mut().unwrap().entry(pc).or_insert(0) += 1;
             }
@@ -579,6 +675,9 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         std::fs::write(path, json).expect("write benchmark JSON");
     }
     println!("icache: {} decodes for {} instructions", m.cpu.decodes, insns);
+    if let (Some(path), Some(a)) = (std::env::var_os("FM1_FLAG_AUDIT"), m.flag_audit.as_ref()) {
+        let _ = std::fs::write(&path, a.report());
+    }
     if let Some(c1) = &m.cpu1 {
         println!("cpu1: {} instructions ({:.1} M per emulated s)", c1.insn_count, c1.insn_count as f64 / 1e3 / ms as f64);
     }
@@ -1013,6 +1112,9 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         m.soc.periph.hz / 1_000_000
     );
     let leds = m.soc.periph.led_take();
+    if let (Some(path), Some(a)) = (std::env::var_os("FM1_FLAG_AUDIT"), m.flag_audit.as_ref()) {
+        let _ = std::fs::write(&path, a.report());
+    }
     if let (Some(path), Some(h)) = (std::env::var_os("FM1_ISA_HIST"), m.cpu.isa_hist.as_ref()) {
         // executed instructions by ISA form, as JSON {syntax: count} (FM1_NO_BLOCKS: every step)
         let mut v: Vec<_> = h.iter().collect();

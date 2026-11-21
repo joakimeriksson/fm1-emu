@@ -127,6 +127,11 @@ impl Bus for Core1Bus<'_> {
     fn service(&mut self) {
         self.budget = self.budget.min(1);
     }
+    fn swi(&mut self, n: u32) -> bool {
+        // (pending now: the run ends after the instruction, so the cores' loops look at it)
+        self.budget = self.budget.min(1);
+        self.soc.swi(n)
+    }
     fn idle(&mut self, _core: u32) {
         // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
         // only once an interrupt from its bank is pending
@@ -196,6 +201,9 @@ impl Bus for Core1Loads<'_> {
     }
     fn service(&mut self) {
         self.0.service()
+    }
+    fn swi(&mut self, n: u32) -> bool {
+        self.0.swi(n)
     }
     fn code_writes(&self) -> Option<u64> {
         self.0.code_writes()
@@ -411,6 +419,10 @@ impl Bus for ProbeBus<'_> {
     }
     fn service(&mut self) {
         self.bad = true; // (an rti: not a polling round)
+    }
+    fn swi(&mut self, _n: u32) -> bool {
+        self.bad = true; // (a software interrupt raised: not a polling round)
+        true
     }
 }
 
@@ -1662,13 +1674,14 @@ mod tests {
         assert_eq!(&cpu1[18..20], &testset(2));
         let regs = [(2, WORD), (3, PASSES), (6, XIP_BASE)];
         let mut last = None;
-        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0x80)], false, 8, |s, cpu, c1, soc| {
+        // (a taken byte is 0xff: testset leaves 0xff, an FM-1)
+        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0xff)], false, 8, |s, cpu, c1, soc| {
             if let Some((i0, i1)) = last {
                 assert_eq!(cpu.insn_count - i0, SLICE as u64, "cpu0's instructions in slice {s}");
                 assert!(c1.insn_count - i1 >= SLICE as u64 - 64, "cpu1 ran {} instructions in slice {s}", c1.insn_count - i1);
             }
             last = Some((cpu.insn_count, c1.insn_count));
-            assert_eq!(word(soc, WORD) & 0xff, 0x80, "the byte stays taken");
+            assert_eq!(word(soc, WORD) & 0xff, 0xff, "the byte stays taken");
         });
     }
 
