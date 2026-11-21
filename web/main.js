@@ -1221,6 +1221,13 @@ function backTo(session) {
   fwSel.value = fw.id;
   mhzSel.value = mhz;
   loadedUrl = session.record.url;
+  // (a link is its package and name in the address, which the pick that failed took out of it)
+  if (fw.link) {
+    const q = new URLSearchParams(location.search);
+    q.set("package", fw.package);
+    q.set("name", fw.name);
+    history.replaceState(null, "", `?${q}`);
+  }
   showFirmware();
 }
 

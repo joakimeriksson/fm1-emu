@@ -299,6 +299,25 @@ test("M-VAVE's entry picked without its file stays picked while the machine befo
   assert.deepEqual([p.api.fw.id, p.elements.get('fw').value, kept.get('fm1.fw')], ['mv', 'mv', 'mv']);
 });
 
+test("going back to a machine from a ?package= link puts the link back in the address and in the full page's", async () => {
+  const fetchPackage = async f => {
+    if (f.id === 'b') throw new Error('b.fwsc: 503');
+    return { bytes: new Uint8Array(960).fill(3), url: f.package };
+  };
+  const p = await page(storage(), '?package=https://x.example/l-2.fwsc&name=L&jit=0', '', false, { fetchPackage });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  const address = () => Object.fromEntries(new URLSearchParams(p.location.search));
+  const linked = { package: 'https://x.example/l-2.fwsc', name: 'L', jit: '0', fw: 'link', mhz: '100' };
+  assert.deepEqual(address(), linked);
+  p.elements.get('fw').value = 'b'; p.elements.get('fw').listeners.change();
+  assert.deepEqual(address(), { jit: '0', fw: 'b', mhz: '100' });       // (the pick: no link's)
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(p.elements.get('status').textContent, 'b: b.fwsc: 503');
+  assert.equal(p.api.fw.id, 'link');
+  assert.deepEqual(address(), linked);
+  assert.equal(p.elements.get('fullpage').href, './?fw=link&package=https%3A%2F%2Fx.example%2Fl-2.fwsc&name=L');
+});
+
 test('a machine that booted while a later pick waited is gone back to with its own stored pick, board and MASTER', async () => {
   const cat = { default: 'a', firmwares: ['a', 'b', 'c'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) };
   const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
