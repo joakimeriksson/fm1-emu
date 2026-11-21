@@ -1,6 +1,9 @@
-//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) op for op, with the
-//! System V calling convention (Linux, and Windows too: jit.rs declares the entry and the helpers
-//! `extern "sysv64"`).
+//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) for prefixes, chains,
+//! RAM guards and a runner's stops, with the System V calling convention (Linux, and Windows too:
+//! jit.rs declares the entry and the helpers `extern "sysv64"`). Not op for op: a guest register
+//! is read and written in the Cpu at each use (jit.rs keeps them in host registers within a
+//! block, its `RegCache`), and `Un`, `Div`, the pair loads and stores, `sti` / `cli` and the
+//! byte reversals, which jit.rs has code for, go through the interpreter's executor here.
 //!
 //! Register plan (callee-saved, so helpers may be called freely):
 //!   rbx = &Cpu, rbp = &Ctx, r12 = RAM host base, r13 = XIP host base, r14d = instructions done
@@ -14,7 +17,7 @@
 //! host (the interpreter); conversions to integers saturate as Rust's `as` does (cvttss2si alone
 //! gives 0x8000_0000 for NaN and out of range); min / max through the interpreter's executor.
 
-use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_probe, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
+use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_probe, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, Kept, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
 use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Mem, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
 use crate::{Base, Bus, Cond, Fast, Op, RmwOp};
 
@@ -41,6 +44,7 @@ struct Gen<'a> {
     h_pair: u64,
     /// `Jit::itab`'s address
     itab: u64,
+    kept: &'a mut Kept,
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
     /// emitting a probe copy (`emit_ops`): the block's instructions
@@ -165,10 +169,10 @@ impl Gen<'_> {
     /// Continue at a fixed pc: straight into its compiled body when the slot holds one,
     /// else back to Rust, which fills the slot once that block is compiled.
     fn chain(&mut self, pc: u32, count: u32) {
-        let slot: &'static mut u64 = Box::leak(Box::new(0u64));
+        let slot = self.kept.slot();
         let back = self.a.label();
         self.add_imm(DONE, count);
-        self.a.mov_ri64(R10, slot as *mut u64 as u64);
+        self.a.mov_ri64(R10, slot as u64);
         self.a.ld64(R11, m(R10, 0));
         self.a.test_rr64(R11, R11);
         self.a.jcc(Cc::E, back);
@@ -198,8 +202,10 @@ impl Gen<'_> {
             if w == 2 {
                 self.a.alu_ri(Alu::And, RSI, !1u32); // a halfword is the one at addr & !1 (Soc read16)
             }
+            // (a window shorter than the access holds none of it: every offset is at or above
+            // the 0 the length less the width then gives, as the AArch64 code)
             self.a.alu_ri(Alu::Cmp, RSI, len.saturating_sub(w as u32));
-            self.a.jcc(Cc::A, miss);
+            self.a.jcc(if len < w as u32 { Cc::Ae } else { Cc::A }, miss);
             // (esi was written as 32 bits: rsi is the zero-extended offset)
             match (w, signed) {
                 (4, _) => self.a.ld(RAX, mx(base_reg, RSI)),
@@ -234,8 +240,9 @@ impl Gen<'_> {
         }
         self.a.mov_rr(RSI, RAX);
         self.a.alu_ri(Alu::Sub, RSI, mem.ram_base);
+        // (RAM shorter than the access: none of it inline, as `load`)
         self.a.alu_ri(Alu::Cmp, RSI, mem.ram_len.saturating_sub(w as u32));
-        self.a.jcc(Cc::A, slow);
+        self.a.jcc(if mem.ram_len < w as u32 { Cc::Ae } else { Cc::A }, slow);
         if !mem.ram_code.is_null() {
             self.a.mov_rr(RDX, RSI);
             self.a.sh_i(Sh::Shr, RDX, 2);
@@ -956,9 +963,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         // ---- everything else: the interpreter's executor for this one op
         other => {
-            let p: &'static Fast = Box::leak(Box::new(other));
+            let p = g.kept.op(other);
             g.a.mov_rr64(RDI, CTX);
-            g.a.mov_ri64(RSI, p as *const Fast as u64);
+            g.a.mov_ri64(RSI, p as u64);
             g.idx(RDX, idx);
             g.a.mov_ri(RCX, next_pc);
             g.call(op_helper::<B>(&other, profile));
@@ -1043,14 +1050,14 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
         }
     }
     // fell off the end of the prefix
-    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
+    if !ops.last().is_some_and(|o| o.fast.may_jump()) {
         g.chain(pc, ins);
     }
 }
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
+#[allow(clippy::too_many_arguments, clippy::vec_box)]
+pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
     let mut a = Asm::new();
     let exit = a.label();
     let mut g = Gen {
@@ -1061,6 +1068,7 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], th
         h_write: h_write::<B> as *const () as u64,
         h_pair: h_pair::<B> as *const () as u64,
         itab,
+        kept,
         stops: stops.is_some(),
         probe_copy: None,
     };
