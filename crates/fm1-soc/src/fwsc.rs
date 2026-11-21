@@ -853,13 +853,15 @@ mod tests {
 
     /// The same of a firmware's own package, cut short and with a byte changed in its header, in the
     /// image's heads, in the chip key's file, in the app area's head and directory and here and there
-    /// in the rest. Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs); skipped
-    /// without it.
+    /// in the rest. The package is FM-1 SID's, in the tree as a submodule: skipped where that is
+    /// not checked out, but not in CI, which checks it out and must not pass on nothing.
     #[test]
     fn a_firmwares_package_cut_short_or_changed_is_an_error_or_unpacks() {
-        let pkg = match std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc")) {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fm1-sid/web/sidplayer.fwsc");
+        let pkg = match std::fs::read(path) {
             Ok(p) => p,
-            Err(_) => return eprintln!("no reference/firmwares/felucca.fwsc: skipped"),
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no fm1-sid/web/sidplayer.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
         };
         let u = unpack(&pkg).unwrap();
         // the image in the file: its entry's offset in the stream, plus the header's 20 markers
