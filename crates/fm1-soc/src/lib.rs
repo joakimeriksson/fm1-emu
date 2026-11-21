@@ -1327,15 +1327,16 @@ impl Soc {
                 let g = |i: usize| self.xip.get(i).copied().unwrap_or(0);
                 u32::from_le_bytes([g(o), g(o + 1), g(o + 2), g(o + 3)])
             }
-            Region::Ram => self.ram.read32(addr - RAM_BASE),
+            // (here only a word that ends past the RAM: the rest took `read32`'s fast path)
+            Region::Ram => self.ram.read32_end(addr - RAM_BASE),
             Region::Sfcenc => self.sfr_get(addr),
             Region::XipFlash => {
                 let o = (addr - XIP_BASE) as usize + XIP_FLASH_OFFSET;
                 let g = |i: usize| self.flash.mem.get(i).copied().unwrap_or(0xff);
                 u32::from_le_bytes([g(o), g(o + 1), g(o + 2), g(o + 3)])
             }
-            Region::Ovl => self.ovl.read32(addr - OVL_BASE),
-            Region::Sram2 => self.sram2.read32(addr - SRAM2_BASE),
+            Region::Ovl => self.ovl.read32_end(addr - OVL_BASE),
+            Region::Sram2 => self.sram2.read32_end(addr - SRAM2_BASE),
             Region::Irqc => {
                 // 0x1eee008 bit 14: controller ready (the early init spins on it);
                 // 0x1eee000 / 0x1eee004 (C0_CON / C1_CON): see `core_paused`
@@ -1454,9 +1455,9 @@ impl Soc {
     fn write32_slow(&mut self, addr: u32, value: u32) {
         match self.region(addr) {
             Region::Xip | Region::XipFlash => self.log_unknown(addr, 4, true, value), // flash writes go via the ROM
-            Region::Ram => self.ram.write32(addr - RAM_BASE, value),
-            Region::Ovl => self.ovl.write32(addr - OVL_BASE, value),
-            Region::Sram2 => self.sram2.write32(addr - SRAM2_BASE, value),
+            Region::Ram => self.ram.write32_end(addr - RAM_BASE, value),
+            Region::Ovl => self.ovl.write32_end(addr - OVL_BASE, value),
+            Region::Sram2 => self.sram2.write32_end(addr - SRAM2_BASE, value),
             Region::Irqc => {
                 if addr == 0x1eee000 || addr == 0x1eee004 {
                     // C0_CON / C1_CON: writing bit 2 pauses that core (bit 4 reads "paused");
@@ -2047,6 +2048,25 @@ mod tests {
         soc.write32(0x11d0c, RAM_BASE);
         soc.write32(0x11d10, 0x800);
         assert_eq!(soc.read32(0x11d00) & 0x8000, 0, "the DMA is still on the wire");
+    }
+
+    #[test]
+    fn a_word_over_the_end_of_a_ram_moves_the_bytes_that_are_there() {
+        // an unaligned load or store over the last 1-3 bytes of the RAM, the overlay and the SRAM
+        // banks: the bytes inside, 0 read for the rest (as bytes past them read), nothing stored
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for (base, len) in [(RAM_BASE, 1u32 << 16), (OVL_BASE, 512 * 1024), (SRAM2_BASE, 256 * 1024)] {
+            let end = base + len;
+            soc.write32(end - 4, 0x4433_2211);
+            for k in 1..4 {
+                assert_eq!(soc.read32(end - 4 + k), 0x4433_2211 >> (8 * k), "{base:#x}: {k} past the last word");
+            }
+            soc.write32(end - 2, 0xddcc_bbaa);
+            assert_eq!(soc.read32(end - 4), 0xbbaa_2211, "{base:#x}: the two bytes inside stored");
+            soc.write32(end - 1, 0x77);
+            assert_eq!(soc.read32(end - 4), 0x77aa_2211);
+            assert_eq!(soc.read32(end), 0, "{base:#x}: nothing past it");
+        }
     }
 }
 
