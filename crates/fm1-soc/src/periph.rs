@@ -792,7 +792,7 @@ impl Periph {
             u.dropped += 1;
             return None;
         }
-        let at = u.rxsadr + u.wr % len;
+        let at = u.rxsadr.wrapping_add(u.wr % len); // (a ring across the top of the address space wraps)
         u.wr = (u.wr + 1) % len;
         u.since += 1;
         if u.rxcnt != 0 && u.since >= u.rxcnt {
@@ -988,7 +988,9 @@ impl Periph {
             0x10904 => {
                 if self.t5_con & 1 != 0 && self.t5_next != u64::MAX {
                     let period = self.t5_period();
-                    let into = period - (self.t5_next - self.cycles).min(period);
+                    // (a tick the clock has run past before it is serviced, FM1_STRICT's fetch
+                    // costs: the difference wraps to more than a period, the count has started over)
+                    let into = period - self.t5_next.wrapping_sub(self.cycles).min(period);
                     ((into * T5_HZ / self.hz) % self.t5_prd.max(1) as u64) as u32
                 } else {
                     0
@@ -1373,8 +1375,14 @@ impl Periph {
     pub fn spi2_start(&mut self, bytes: u32, baud: u32, irq: bool) {
         self.next_due = 0;
         if irq {
-            let clocks = bytes.max(1) as u64 * 16 * (baud as u64 + 1);
-            self.spi2_next = self.cycles + (clocks * self.hz / 48_000_000).max(1);
+            // (the count and BAUD are the firmware's words, any 32 bits: past what 64 hold, the
+            // transfer's end is never)
+            let clocks = (bytes.max(1) as u64 * 16).saturating_mul(baud as u64 + 1);
+            let dur = match clocks.checked_mul(self.hz) {
+                Some(p) => p / 48_000_000,
+                None => (clocks as u128 * self.hz as u128 / 48_000_000).min(u64::MAX as u128) as u64,
+            };
+            self.spi2_next = self.cycles.saturating_add(dur.max(1));
         }
     }
 
@@ -1806,5 +1814,37 @@ mod tests {
             p.spi1_start(1, baud, false);
             assert_eq!(p.spi1_done_at, 8 * CPU_HZ, "BAUD {baud:#x}");
         }
+    }
+
+    #[test]
+    fn the_firmwares_words_at_their_ends_overflow_nothing() {
+        // SPI2: 2 bytes at BAUD 0 (48 MHz / 16 a byte) end 160 cycles on; a count and a BAUD of all
+        // ones, 2^68 clocks, never
+        let mut p = Periph::default();
+        p.spi2_start(2, 0, true);
+        assert_eq!(p.spi2_next, 160);
+        p.spi2_start(u32::MAX, u32::MAX, true);
+        assert_eq!(p.spi2_next, u64::MAX);
+        p.spi2_start(u32::MAX, 0x1000, true);
+        assert_eq!(p.spi2_next, (u32::MAX as u128 * 16 * 0x1001 * CPU_HZ as u128 / 48_000_000) as u64, "past 64 bits in between only");
+        // UART1's ring across the top of the address space: its bytes wrap to 0
+        let mut p = Periph::default();
+        p.write(0x1211c, 0xffff_fffe);
+        p.write(0x12120, 2);
+        p.write(0x12100, 0x41);
+        let mut at = Vec::new();
+        for b in 0..5 {
+            p.apply(&Action::Midi { b });
+            at.extend(p.advance(CPU_HZ / 1000).uart_rx);
+        }
+        assert_eq!(at, [(0xffff_fffe, 0), (0xffff_ffff, 1), (0, 2), (1, 3), (0xffff_fffe, 4)]);
+        // TIMER5's count read with its tick overdue (the clock past it, the tick not yet taken): 0
+        let mut p = Periph::default();
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.cycles += 12_000;
+        assert_eq!(p.read(0x10904), Some(300), "half a period in");
+        p.cycles += 12_005;
+        assert_eq!(p.read(0x10904), Some(0));
     }
 }

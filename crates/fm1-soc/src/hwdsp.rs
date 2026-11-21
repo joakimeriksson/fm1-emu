@@ -292,8 +292,9 @@ fn rnd(x: i128, q: i32) -> i128 {
     if q <= 0 {
         return x << (-q).min(64);
     }
-    let a = (x.abs() + (1i128 << (q - 1))) >> q.min(120);
-    if x < 0 { -a } else { a }
+    // (wrapping: a product of two 64-bit elements at their ends with a q past 120 leaves 128 bits)
+    let a = x.wrapping_abs().wrapping_add(1i128 << (q - 1)) >> q.min(120);
+    if x < 0 { a.wrapping_neg() } else { a }
 }
 
 fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
@@ -324,16 +325,18 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                 if con & VECY_CONJ != 0 {
                     yim = -yim;
                 }
-                let (re, im) = (yr * xr - yim * xim, yr * xim + yim * xr);
+                // (64-bit elements at -2^63 make 2^127: sums of products wrap in the 128 bits, as the
+                // accumulators do, which keep 64)
+                let (re, im) = ((yr * xr).wrapping_sub(yim * xim), (yr * xim).wrapping_add(yim * xr));
                 if accum {
-                    acc += re;
-                    acc_i += im;
+                    acc = acc.wrapping_add(re);
+                    acc_i = acc_i.wrapping_add(im);
                     continue;
                 }
                 let (mut r, mut s) = (rnd(re, q), rnd(im, q));
                 if con & VEC_MAC32 != 0 {
                     let (zr, zim) = (load(m, z0, wz, 2 * i) as i128, load(m, z0, wz, 2 * i + 1) as i128);
-                    (r, s) = if sub { (zr - r, zim - s) } else { (zr + r, zim + s) };
+                    (r, s) = if sub { (zr.wrapping_sub(r), zim.wrapping_sub(s)) } else { (zr.wrapping_add(r), zim.wrapping_add(s)) };
                 }
                 store(m, z0, wz, 2 * i, sat(r, wz));
                 store(m, z0, wz, 2 * i + 1, sat(s, wz));
@@ -356,13 +359,13 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                         let v = if sub { x - t } else { x + t };
                         (if wz == 2 { wrap(v, wz) } else { sat(v, wz) }) as i128
                     } else if accum {
-                        acc += y * x;
+                        acc = acc.wrapping_add(y * x);
                         continue;
                     } else {
                         let mut r = rnd(y * x, q);
                         if con & VEC_MAC32 != 0 {
                             let z = load(m, z0, wz, i) as i128;
-                            r = if sub { z - r } else { z + r };
+                            r = if sub { z.wrapping_sub(r) } else { z.wrapping_add(r) };
                         }
                         sat(r, wz) as i128
                     }
@@ -372,14 +375,14 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                         if con & VEC_MAX != 0 { x.max(k) } else { x.min(k) }
                     } else if cpx {
                         let xim = load(m, x0, wx, 2 * i + 1) as i128;
-                        x * x + xim * xim
+                        (x * x).wrapping_add(xim * xim)
                     } else if con & VEC_QDT != 0 {
                         if con & VEC_CONST_MUL != 0 { x * k } else { x * x }
                     } else {
                         x
                     };
                     if accum {
-                        acc += p;
+                        acc = acc.wrapping_add(p);
                         continue;
                     }
                     sat(rnd(p, q), wz) as i128
@@ -502,5 +505,27 @@ mod tests {
         ram.0[0x800 / 4] = -2144644789i32 as u32;
         vjob(&mut ram, &mut u, [w32, 0x400, 0x800, 0xc00, (1 << 12) | 1, 0, 0, 0]);
         assert_eq!(ram.0[0xc00 / 4] as i32, 4055520);
+    }
+
+    #[test]
+    fn vector_sums_of_64_bit_products_wrap() {
+        // a complex product of 64-bit elements all at -2^63: the real part 2^126 - 2^126, the
+        // imaginary 2^126 + 2^126, one past what 128 bits hold signed: wrapped, then saturated to z
+        let mut ram = Ram(vec![0; 4096]);
+        let mut u = HwDsp::default();
+        let w64 = (3 << 6) | (3 << 8) | (3 << 10);
+        for a in [0x400, 0x800] {
+            for k in 0..2 {
+                (ram.0[a / 4 + 2 * k], ram.0[a / 4 + 2 * k + 1]) = (0, 0x8000_0000);
+            }
+        }
+        vjob(&mut ram, &mut u, [w64 | 2, 0x400, 0x800, 0xc00, (1 << 12) | 1, 0, 0, 0]);
+        assert_eq!(&ram.0[0xc00 / 4..0xc00 / 4 + 4], &[0, 0, 0, 0x8000_0000]);
+        // |x|^2 of the same, and the rounding of what 128 bits can hold, at the largest q
+        vjob(&mut ram, &mut u, [w64 | 3 | VEC_CPX_QDT, 0x400, 0x800, 0xc00, (1 << 12) | 2, 0, 0, 0]);
+        assert_eq!(&ram.0[0xc00 / 4..0xc00 / 4 + 2], &[0, 0x8000_0000]);
+        for x in [i128::MAX, i128::MIN, 1 << 126] {
+            let _ = (rnd(x, 127), rnd(x, 1), rnd(x, -128));
+        }
     }
 }
