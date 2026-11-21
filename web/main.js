@@ -1123,6 +1123,9 @@ async function flushRunning(pause = false) {
 // became obsolete while downloading are skipped; every actual boot receives an acknowledgement.
 function boot(options = {}) {
   const seq = showing = ++bootSeq, f = fw, clock = mhz;
+  // (the picks as stored for the next visit, which are those that ask for this machine: while it runs, a later pick
+  // that does not boot gives them back)
+  const kept = [DEV.key + "fw", "fm1.mhz"].map((k) => [k, stored(k)]);
   bootFailed = "";
   const task = async () => {
     if (seq !== bootSeq) return false;
@@ -1153,7 +1156,7 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, fw: f, mhz: clock, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
@@ -1211,7 +1214,7 @@ function boot(options = {}) {
 function backTo(session) {
   fw = session.fw;
   mhz = session.mhz;
-  showing = session.seq;
+  show(session);
   for (const [k, v] of session.kept) store(k, v);
   if (fw.id === "local") {
     localFw = fw;
@@ -1222,6 +1225,19 @@ function backTo(session) {
   mhzSel.value = mhz;
   loadedUrl = session.record.url;
   showFirmware();
+}
+
+// A booted machine becomes the one the page shows: the panel is its board's, and the controls that stay where they
+// were put are sent to it as the page shows them, a new machine having its own defaults (MASTER only once it was
+// turned: a try-out's script may set it from its first millisecond). Once for each machine: when it boots, or, for
+// one that booted while a later pick was waiting, when that pick fails and the page goes back to it.
+function show(session) {
+  showing = session.seq;
+  if (session.shown) return;
+  session.shown = true;
+  setBoard(session.board);
+  if (session.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
+  else if (pot !== POT_REST) send({ type: "pot", value: pot });
 }
 
 // the audio graph: a context with the chosen buffer, the emulator's worklet node in it
@@ -1286,8 +1302,7 @@ function onWorklet(e) {
     const session = sessions.get(m.seq), waiter = bootWaiters.get(m.seq);
     if (!session || !waiter) return;
     running = session;
-    // (the picks as stored for the next visit while this machine runs: a later pick that does not boot gives them back)
-    session.kept = [DEV.key + "fw", "fm1.mhz"].map((k) => [k, stored(k)]);
+    session.board = m.board;
     for (const key of sessions.keys()) if (key !== m.seq) sessions.delete(key);
     session.base = m.base;
     session.observedRevision = m.revision;
@@ -1295,11 +1310,7 @@ function onWorklet(e) {
     clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.resolve();
     if (m.seq === bootSeq) {
       booting = 0;
-      setBoard(m.board);
-      // the controls that stay where they were put, as the page shows them: a new machine has its own defaults
-      // (MASTER only once it was turned: a try-out's script may set it from its first millisecond)
-      if (m.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
-      else if (pot !== POT_REST) send({ type: "pot", value: pot });
+      show(session);
     }
     return;
   }

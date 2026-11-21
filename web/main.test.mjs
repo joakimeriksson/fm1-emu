@@ -248,6 +248,48 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.match(status.textContent, /^a · 100 MHz · /);
 });
 
+test('a machine that booted while a later pick waited is gone back to with its own stored pick, board and MASTER', async () => {
+  const cat = { default: 'a', firmwares: ['a', 'b', 'c'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) };
+  const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
+  const fetchPackage = async f => {
+    if (f.id === 'c') throw new Error('c.fwsc: 503');
+    return { bytes: new Uint8Array(960).fill(1), url: f.package };
+  };
+  const kept = new Map([['fm1.fw', 'a'], ['fm1.mhz', '100']]);
+  const localStorage = { getItem: k => kept.get(k), setItem: (k, v) => kept.set(k, String(v)), removeItem: k => kept.delete(k) };
+  const boards = [];
+  const exports = { panel_board(b) { boards.push(b); }, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1,
+    panel_theme_name: () => 0, panel_theme() {}, memory: { buffer: new ArrayBuffer(256) } };
+  const p = await page(storage(), '', '', false, { fetch, fetchPackage, localStorage, WebAssembly: { instantiate: async () => ({ instance: { exports } }) } });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  p.api.setPot(300);
+  const pick = id => { p.elements.get('fw').value = id; p.elements.get('fw').listeners.change(); };
+  // b is in the worklet when c is picked; b boots (as an SMK-37's package here), then c's package does not come
+  p.audio.hangBoot = true;
+  pick('b');
+  for (let i = 0; i < 20; i++) await settle();
+  const asked = p.audio.messages.at(-1);
+  assert.equal(asked.type, 'boot');
+  pick('c');
+  const base = new Uint8Array(persistence.FLASH_SIZE).fill(170);
+  Object.assign(p.audio, { seq: asked.seq, base, flash: base.slice() });
+  p.audio.port.onmessage({ data: { type: 'booted', seq: asked.seq, base, flash: base.slice(), board: 1 } });
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(p.elements.get('status').textContent, 'c: c.fwsc: 503');
+  assert.deepEqual([p.api.running.fw.id, p.api.fw.id, p.elements.get('fw').value], ['b', 'b', 'b']);
+  assert.equal(kept.get('fm1.fw'), 'b');             // (what asked for the machine that plays; c was stored when b booted)
+  assert.equal(boards.at(-1), 1);
+  assert.deepEqual(p.audio.messages.filter(m => m.type === 'analog').map(m => m.idx), [16, 17, 18, 19, 20, 21]);
+  // and once: another pick that fails sends them no second time; an FM-1 machine gets MASTER as it was turned
+  pick('c');
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(p.audio.messages.filter(m => m.type === 'analog').length, 6);
+  p.audio.hangBoot = false;
+  pick('a');
+  for (let i = 0; i < 20; i++) await settle();
+  assert.deepEqual([p.api.running.fw.id, boards.at(-1), p.audio.messages.at(-1)], ['a', 0, { type: 'pot', value: 300 }]);
+});
+
 test('Start says what kept the audio from starting and is there to try again', async () => {
   let fail = true;
   const contexts = [];
