@@ -506,8 +506,8 @@ pub struct Mapper {
     key_count: [u8; NKEYS as usize],
     /// The fraction of a click each binding has not turned yet.
     frac: Vec<f32>,
-    /// Each binding's CC is at 64 or more: it has its button down (a CC is a level, and only its
-    /// crossing of 64 presses or releases).
+    /// Each binding's CC is at 64 or more: it has its button down, or has made its press (a CC is a
+    /// level, and only its crossing of 64 presses or releases).
     cc_down: Vec<bool>,
     /// Latched buttons, held buttons.
     latched: [bool; 14],
@@ -623,7 +623,7 @@ impl Mapper {
         }
     }
 
-    /// A CC on `ch` that a binding has holding a button down now.
+    /// A CC on `ch` that a binding has holding a button down now (or at 64 or more after its press).
     fn holds_button(&self, ch: u8, cc: u8) -> bool {
         self.profile.bindings.iter().zip(&self.cc_down).any(|(b, &down)| b.src.cc == Some(cc) && b.src.ch_ok(ch) && down)
     }
@@ -805,13 +805,13 @@ impl Mapper {
                     out(Out::Adc { ch: POT_ADC, value });
                 }
                 Target::KeysMode => {
-                    if v >= 64 {
+                    if self.pressed(i, kind, v) {
                         let k = self.keys_mode.next();
                         self.set_keys_mode(k, out);
                     }
                 }
-                Target::Record => if v >= 64 { out(Out::Record) },
-                Target::Labels => if v >= 64 { out(Out::Labels) },
+                Target::Record => if self.pressed(i, kind, v) { out(Out::Record) },
+                Target::Labels => if self.pressed(i, kind, v) { out(Out::Labels) },
                 Target::Keys | Target::Key(_) => {} // (a CC bound to keys: nothing)
             }
             return;
@@ -821,10 +821,22 @@ impl Mapper {
         }
     }
 
+    /// A press of binding `i`, for what a press does once: a note's on (`v` 127), or its CC coming
+    /// up to 64 or more. The CC's values at 64 or more after that are the same press (a pedal, a
+    /// fader, a pad's pressure), until one below.
+    fn pressed(&mut self, i: usize, kind: u8, v: u8) -> bool {
+        let down = v >= 64;
+        if kind != 0xb0 {
+            return down;
+        }
+        let was = std::mem::replace(&mut self.cc_down[i], down);
+        down && !was
+    }
+
     /// The steps (+ clockwise) a message turns binding `i` by.
-    fn steps(&mut self, _i: usize, kind: u8, ch: u8, d1: u8, v: u8, mode: Mode, is_note: bool) -> f32 {
+    fn steps(&mut self, i: usize, kind: u8, ch: u8, d1: u8, v: u8, mode: Mode, is_note: bool) -> f32 {
         if is_note || mode == Mode::Step {
-            return if v >= 64 { 1.0 } else { 0.0 };
+            return if self.pressed(i, kind, v) { 1.0 } else { 0.0 };
         }
         if kind != 0xb0 {
             return 0.0;
