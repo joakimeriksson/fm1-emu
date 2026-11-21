@@ -86,11 +86,12 @@ impl HwDsp {
                 if start {
                     let n = ((v >> 8) & 0xff).max(1);
                     let mut cost = 0u64;
+                    let mut room = WRITE_WORK;
                     for i in 0..n {
                         cost += if v & 8 != 0 {
-                            vector(m, self.cadr.wrapping_add(32 * i), self.cnst)
+                            vector(m, self.cadr.wrapping_add(32 * i), self.cnst, &mut room)
                         } else {
-                            fft_job(m, self.cadr.wrapping_add(16 * i))
+                            fft_job(m, self.cadr.wrapping_add(16 * i), &mut room)
                         };
                     }
                     self.jobs += n as u64;
@@ -107,7 +108,34 @@ impl HwDsp {
     }
 }
 
+/// The most one CON write makes the host do, in element operations (a vector job's nlen x nloop,
+/// an FFT's `fft_work`): 2^24, which is one vector job of the largest nlen and nloop a descriptor
+/// can say (4095 x 4095) and more than 255 FFTs of the SDK's largest size. A job in the row that
+/// would go past it is not run: it reads and writes nothing and takes the cycles it would have.
+/// (The fields are the firmware's words: 255 descriptors of 4095 x 4095 elements, or of a prime
+/// number of points, kept the host busy for minutes.)
+pub const WRITE_WORK: u64 = 1 << 24;
+/// The most one FFT may come to (`fft_work`): 2^20, 23 times the SDK's largest (2048 points:
+/// 45,056; its sizes are 10 to 2048 points with the factors 2, 3 and 5, tools/hwdsp.py's table).
+/// Past it are only sizes with a prime factor in the hundreds, a prime N from 1031 on.
+pub const FFT_WORK: u64 = 1 << 20;
+
 // ---- FFT ----------------------------------------------------------------------------------
+
+/// What `dft` does for N points: N rotations for each prime factor's size at that factor's level,
+/// N times the sum of N's prime factors (a prime N: N x N).
+pub fn fft_work(n: usize) -> u64 {
+    let (mut m, mut sum, mut p) = (n, 0u64, 2);
+    while m > 1 {
+        if m % p == 0 {
+            sum += p as u64;
+            m /= p;
+        } else {
+            p += 1;
+        }
+    }
+    n as u64 * sum
+}
 
 /// (N, real, inverse) of an FFT con word
 pub fn fft_shape(con: u32) -> (usize, bool, bool) {
@@ -211,8 +239,13 @@ pub fn fft(con: u32, input: &[i32]) -> Vec<i32> {
     }
 }
 
-fn fft_job(m: &mut impl Mem, d: u32) -> u64 {
+fn fft_job(m: &mut impl Mem, d: u32, room: &mut u64) -> u64 {
     let con = m.rd(d);
+    let work = fft_work(fft_shape(con).0);
+    if work > FFT_WORK.min(*room) {
+        return fft_cycles(con); // (not run: `WRITE_WORK`, `FFT_WORK`)
+    }
+    *room -= work;
     let (iadr, oadr) = (m.rd(d.wrapping_add(4)), m.rd(d.wrapping_add(8)));
     let (ni, no) = fft_words(con);
     let input: Vec<i32> = (0..ni).map(|k| m.rd(iadr.wrapping_add(4 * k as u32)) as i32).collect();
@@ -297,7 +330,7 @@ fn rnd(x: i128, q: i32) -> i128 {
     if x < 0 { a.wrapping_neg() } else { a }
 }
 
-fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
+fn vector(m: &mut impl Mem, d: u32, cnst: u32, room: &mut u64) -> u64 {
     let con = m.rd(d);
     let (xa, ya, za) = (m.rd(d.wrapping_add(4)), m.rd(d.wrapping_add(8)), m.rd(d.wrapping_add(12)));
     let (c0, c1) = (m.rd(d.wrapping_add(16)), m.rd(d.wrapping_add(20)));
@@ -312,6 +345,12 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
     let accum = con & VEC_ACC != 0;
     let cpx = mode == 2 || (mode == 3 && con & VEC_CPX_QDT != 0);
     let count = if mode == 2 { nlen } else if cpx { nlen / 2 } else { nlen };
+    let per = if con & VEC_MAC32 != 0 { 45 } else { 33 };
+    let cycles = 30 + (nlen as u64) * (nloop as u64) * per / 10;
+    if nlen as u64 * nloop as u64 > *room {
+        return cycles; // (not run: `WRITE_WORK`)
+    }
+    *room -= nlen as u64 * nloop as u64;
     for l in 0..nloop {
         let (x0, y0, z0) = (xa.wrapping_add(l * xi), ya.wrapping_add(l * yi), za.wrapping_add(l * zi));   // (l < 4096, inc < 1024)
         let (mut acc, mut acc_i) = (0i128, 0i128);
@@ -404,8 +443,7 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
             }
         }
     }
-    let per = if con & VEC_MAC32 != 0 { 45 } else { 33 };
-    30 + (nlen as u64) * (nloop as u64) * per / 10
+    cycles
 }
 
 #[cfg(test)]
@@ -526,6 +564,55 @@ mod tests {
         assert_eq!(&ram.0[0xc00 / 4..0xc00 / 4 + 2], &[0, 0x8000_0000]);
         for x in [i128::MAX, i128::MIN, 1 << 126] {
             let _ = (rnd(x, 127), rnd(x, 1), rnd(x, -128));
+        }
+    }
+
+    /// A RAM that counts its reads and writes, and stops a job that goes on for ever.
+    struct Counted(Ram, u64);
+    impl Mem for Counted {
+        fn rd(&mut self, a: u32) -> u32 {
+            self.1 += 1;
+            assert!(self.1 < 1 << 28, "the unit runs on");
+            self.0.rd(a)
+        }
+        fn wr(&mut self, a: u32, v: u32) {
+            self.1 += 1;
+            self.0.wr(a, v)
+        }
+    }
+
+    #[test]
+    fn a_con_write_does_a_bounded_amount_of_work() {
+        assert_eq!((fft_work(2048), fft_work(960), fft_work(1021), fft_work(1031)), (2048 * 22, 960 * 20, 1021 * 1021, 1031 * 1031));
+        assert!(fft_work(2048) * 255 < WRITE_WORK && fft_work(1021) < FFT_WORK && fft_work(1031) > FFT_WORK);
+        // 255 vector descriptors of 4095 x 4095 elements each (the same one, 255 times): the first
+        // runs, all of it; the rest are past what one write does
+        let mut ram = Counted(Ram(vec![0; 0x5000]), 0);
+        let mut u = HwDsp::default();
+        let w32 = (2 << 6) | (2 << 8) | (2 << 10);
+        for d in 0..255 {
+            for (i, w) in [w32 | 1, 0x4000, 0x8000, 0xc000, (4095 << 12) | 4095, 0, 0, 0].iter().enumerate() {
+                ram.0.0[0x40 + 8 * d + i] = *w;
+            }
+        }
+        (ram.0.0[0x4000 / 4], ram.0.0[0x8000 / 4]) = (7, 6);
+        u.write(&mut ram, 0x1ee0404, 0x100, 0);
+        u.write(&mut ram, 0x1ee0400, (255 << 8) | (1 << 6) | (1 << 3) | 1, 0);
+        assert_eq!(ram.0.0[0xc000 / 4], 42, "the first job ran");
+        assert!(ram.1 > 3 * 4095 * 4095 && ram.1 < 4 * 4095 * 4095, "and only it: {} accesses", ram.1);
+        assert_eq!(u.jobs, 255);
+        assert_eq!(u.read(0x1ee0400, 0) & 0x80, 0, "busy for the cycles of all of them");
+        // an FFT of a prime number of points past `FFT_WORK` is not run (its output stays); one
+        // under it is
+        for (n, runs) in [(1031, false), (1021, true), (2048, true)] {
+            let mut ram = Counted(Ram(vec![0; 16384]), 0);
+            (ram.0.0[0x100 / 4], ram.0.0[0x100 / 4 + 1], ram.0.0[0x100 / 4 + 2]) = (con(n, false, false), 0x1000, 0x8000);
+            (ram.0.0[0x1000 / 4], ram.0.0[0x8000 / 4]) = (5, 0x7777);
+            u.write(&mut ram, 0x1ee0404, 0x100, 0);
+            u.write(&mut ram, 0x1ee0400, (1 << 8) | (1 << 6) | 1, 0);
+            assert_eq!(ram.0.0[0x8000 / 4] == 5, runs, "{n} points");
+            assert_eq!(ram.0.0[0x8000 / 4] == 0x7777, !runs, "{n} points");
+            assert_ne!(u.read(0x1ee0400, 1 << 40) & 0x80, 0, "done either way");
         }
     }
 }
