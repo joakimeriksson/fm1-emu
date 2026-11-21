@@ -87,7 +87,11 @@ function endTryOut() {
   q.delete("script");
   history.replaceState(null, "", `?${q}`);
 }
-let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
+// ?mhz= or the clock kept from the last visit: a whole number of MHz within the clocks offered (one between two of them
+// is listed with them). Anything else is no clock: it would go to the machine as it is (not a number: 0 MHz; a huge one:
+// a quantum of audio that takes minutes to emulate).
+const clockOf = (v) => { const c = Number(v); return Number.isInteger(c) && c >= CLOCKS[0] && c <= CLOCKS[CLOCKS.length - 1] ? c : null; };
+let mhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
 // (an AudioContext refuses any other word)

@@ -325,6 +325,22 @@ test('MASTER stays where it was turned to when the machine is replaced', async (
   assert.equal(p.audio.messages.at(-1).type, 'pot', 'after the boot, to the new machine');
 });
 
+test('?mhz= is a clock within those offered; anything else leaves the clock as it was, and the address says which runs', async () => {
+  const clock = async (q, kept) => {
+    const p = await page(storage(), q, '', false, kept ? { localStorage: { getItem: k => (k === 'fm1.mhz' ? kept : undefined), setItem() {} } } : {});
+    await p.api.startAudio(); await p.api.boot();
+    const mhz = p.audio.messages.find(m => m.type === 'boot').mhz;
+    assert.equal(new URLSearchParams(p.location.search).get('mhz'), String(mhz), q);
+    assert.ok(p.elements.get('mhz').options.some(o => o.value === String(mhz)), q);
+    return mhz;
+  };
+  assert.equal(await clock('?mhz=160'), 160);
+  assert.equal(await clock('?mhz=96'), 96);            // (between two of them: listed too)
+  for (const bad of ['abc', '0', '-120', '59', '241', '700', '1e9', '100.5', 'Infinity', '']) assert.equal(await clock(`?mhz=${bad}`), 100, bad);
+  assert.equal(await clock('?mhz=abc', '200'), 200);   // (the clock of the last visit)
+  assert.equal(await clock('', 'NaN'), 100);
+});
+
 test('Big screen shows the screen again; Screen colours recolour it by brightness, on the panel too', async () => {
   const memory = { buffer: new ArrayBuffer(240 * 240 * 2) };
   const exports = { panel_board() {}, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1,

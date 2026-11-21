@@ -458,7 +458,9 @@ In Chrome, Melodee at 240 MHz went from ~122% of the audio thread (dropouts) to 
   up a warning with the fix: the highest clock that fits (load x 1.25), or a larger audio
   buffer (`latencyHint: "playback"`, remembered) when it drops out with time to spare; "Copy a
   report" gives device, browser, audio setup and load for a bug report. Chrome's CPU throttling
-  does not reach the audio thread; `?mhz=700` overloads it for a test.
+  does not reach the audio thread; `?mhz=700` overloaded it for a test (the page has since kept
+  `?mhz=` to the clocks it offers, 60 to 240 MHz: the interpreter alone, `?jit=0`, at 240 MHz is
+  the overload to try).
 - Next: Melodee is still the slowest natively (1.4x: the AArch64 JIT does not chain into RAM
   blocks; the same count would let it, with the flag check in its inline stores); careful pairs
   (a pair head whose second instruction reads its result) stay interpreted in both JITs.
