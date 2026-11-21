@@ -2768,7 +2768,15 @@ impl Cpu {
     /// predicated `if` block counts as one unit including its then/else
     /// parts and a `rep` header includes its block (how the block-size
     /// nibbles of `if (...) {` count, verified on 2057 corpus blocks).
-    fn block_end<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32) -> u32 {
+    fn block_end<B: Bus>(&self, bus: &mut B, pc: u32, units: u32) -> u32 {
+        self.block_end_in(bus, pc, units, 0)
+    }
+
+    /// `block_end` inside `depth` if blocks. One nested deeper than `IF_DEPTH` is not counted, as
+    /// a word that does not decode is not: compiled code nests them a few deep, but data taken
+    /// for code may be header after header, each a call deeper here.
+    fn block_end_in<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32, depth: u32) -> u32 {
+        const IF_DEPTH: u32 = 32;
         for _ in 0..units {
             let lo = bus.fetch32(pc) as u64;
             let hi = bus.fetch32(pc + 4) as u64;
@@ -2787,8 +2795,11 @@ impl Cpu {
             let name = insn.entry.name;
             if insn.entry.len == 4 && name.starts_with("if") && !has(name, "goto") {
                 if let Some(b) = decode_if_block(insn.raw) {
-                    pc = self.block_end(bus, pc, b.then_units);
-                    pc = self.block_end(bus, pc, b.else_units);
+                    if depth == IF_DEPTH {
+                        return pc - 4;
+                    }
+                    pc = self.block_end_in(bus, pc, b.then_units, depth + 1);
+                    pc = self.block_end_in(bus, pc, b.else_units, depth + 1);
                 }
             } else if name == "rep_i_r" || name == "rep_i_i" {
                 pc += 2 * (((insn.raw >> 4) & 0xf) as u32 + 1);
@@ -5162,6 +5173,28 @@ mod tests {
             }
             assert_eq!(cpu.regs[..6], want, "r13 = {r13:#x}");
         }
+    }
+
+    /// If blocks nested in each other's then-parts: `b0 e8 00 10` if (r0 != 0) { 1 unit } else
+    /// { 1 unit }, the unit the next header and all its parts. Five deep, the innermost's parts
+    /// two nops: each construct ends one nop (the else part) past the one inside it. A run of
+    /// 100 000 headers (data taken for code) is counted without a call a header: `fetch_at` and
+    /// the if's own arm both come back.
+    #[test]
+    fn nested_if_blocks_are_counted_to_a_depth() {
+        let header = [0xb0u8, 0xe8, 0x00, 0x10];
+        let mut ram = FlatRam::new([header.repeat(5), vec![0; 0x40]].concat());
+        let mut cpu = Cpu::new(0);
+        let slot = cpu.fetch_at(&mut ram, 0).unwrap();
+        assert!(matches!(cpu.icache[slot].fast, Some(Fast::IfBlk { then_d: 26, else_d: 2, has_else: true, .. })), "{:?}", cpu.icache[slot].fast);
+        let run = 100_000;
+        let mut ram = FlatRam::new(header.repeat(run));
+        let mut cpu = Cpu::new(0);
+        let then_end = cpu.block_end(&mut ram, 4, 1);
+        // (past the run every word is a nop: at most a unit or two for each level still open)
+        assert!(then_end > 4 && then_end <= 4 * run as u32 + 0x200, "{then_end:#x}");
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.pc, then_end, "r0 == 0: to the else part");
     }
 
     /// Two programs with an if-else block at `base + 0x80`: `b0 e8 00 10` if (r0 != 0) { 2 units }
