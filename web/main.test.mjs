@@ -78,7 +78,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     setTimeout(fn, ms) { if (manualBootTimeout && ms === 30000) { bootTimer = fn; return 'boot-timer'; } return setTimeout(fn, ms); },
     clearTimeout(id) { if (id !== 'boot-timer') clearTimeout(id); },
     document, location, history: { replaceState(_a, _b, url) { location.search = url; } },
-    localStorage: { getItem: key => local.get(key), setItem: (key, value) => local.set(key, value) },
+    localStorage: { getItem: key => local.get(key), setItem: (key, value) => local.set(key, value), removeItem: key => local.delete(key) },
     ResizeObserver: class { observe() {} }, scrollY: 0, Option: Element, navigator: {},
     fetch: async url => ({ ok: true, json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : cat,
       arrayBuffer: async () => new ArrayBuffer(0) }),
@@ -209,7 +209,9 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
     if (f.id === 'b') throw new Error('b.fwsc: 503');
     return { bytes: new Uint8Array(960).fill(1), url: f.package };
   };
-  const p = await page(storage(), '', '', false, { fetchPackage });
+  const kept = new Map([['fm1.fw', 'a'], ['fm1.mhz', '100']]);
+  const localStorage = { getItem: k => kept.get(k), setItem: (k, v) => kept.set(k, String(v)), removeItem: k => kept.delete(k) };
+  const p = await page(storage(), '', '', false, { fetchPackage, localStorage });
   await p.api.startAudio(); await p.api.boot(); await settle();
   const first = p.api.running, status = p.elements.get('status');
   const frame = () => p.audio.port.onmessage({ data: { type: 'frame', seq: first.seq, lcd: null, leds: new Float32Array(41), ms: 5000,
@@ -222,6 +224,7 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.equal(p.api.fw.id, 'a');
   assert.equal(p.elements.get('fw').value, 'a');
   assert.match(p.location.search, /fw=a\b/);
+  assert.equal(kept.get('fm1.fw'), 'a');          // the next visit opens what plays, not the pick that failed
   frame();
   assert.match(status.textContent, /^b: b\.fwsc: 503 · a · 100 MHz · 2\.5x real time/);
   // the worklet refuses the new machine (the old one paused for it, then resumed), at another clock too
@@ -232,6 +235,11 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.equal(p.elements.get('mhz').value, 100);
   frame();
   assert.match(status.textContent, /^a: boot: not a package · a · 100 MHz · /);
+  // a clock picked from the list is stored as it is picked: a machine that then does not boot takes it back
+  p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(p.api.running, first);
+  assert.equal(kept.get('fm1.mhz'), '100');
   // the next boot that works clears what the failed one said
   p.audio.failBoot = false;
   assert.equal(await p.api.boot(), true);

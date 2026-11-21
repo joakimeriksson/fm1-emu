@@ -19,7 +19,7 @@ const DEV = DEVICE === "smk37"
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+const store = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* private mode */ } };
 
 // What the page cannot do without (its list of firmwares, the emulator's module): when one does not load, the status
 // line says so and Start is off; the page would otherwise sit there with a Start that does nothing.
@@ -1200,11 +1200,13 @@ function boot(options = {}) {
 }
 
 // A boot that failed left the machine before it running (the worklet keeps it until the next one has booted): the page
-// is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays.
+// is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays, and
+// what the next visit opens is what it would have opened before the pick.
 function backTo(session) {
   fw = session.fw;
   mhz = session.mhz;
   showing = session.seq;
+  for (const [k, v] of session.kept) store(k, v);
   if (fw.id === "local") {
     localFw = fw;
     const opt = [...fwSel.options].find((o) => o.value === "local");
@@ -1278,6 +1280,8 @@ function onWorklet(e) {
     const session = sessions.get(m.seq), waiter = bootWaiters.get(m.seq);
     if (!session || !waiter) return;
     running = session;
+    // (the picks as stored for the next visit while this machine runs: a later pick that does not boot gives them back)
+    session.kept = [DEV.key + "fw", "fm1.mhz"].map((k) => [k, stored(k)]);
     for (const key of sessions.keys()) if (key !== m.seq) sessions.delete(key);
     session.base = m.base;
     session.observedRevision = m.revision;
