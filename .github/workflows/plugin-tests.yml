@@ -7,8 +7,11 @@ on:
       - 'crates/fm1-core/**'
       - 'crates/fm1-soc/**'
       - 'crates/fm1-map/**'
+      # (fm1-live's files the plugin compiles in, `#[path]` in crates/fm1-plugin/src/lib.rs)
       - 'crates/fm1-live/src/labels.rs'
       - 'crates/fm1-live/src/wav.rs'
+      - 'crates/fm1-live/src/panel.rs'
+      - 'crates/fm1-live/src/panel_smk.rs'
       - 'tools/build_plugin.sh'
       - 'tools/build_plugin.ps1'
       - 'tools/fetch_firmwares.mjs'
@@ -28,8 +31,11 @@ jobs:
           node-version: '22'
       - name: Build prerequisites
         run: brew install cmake ninja
+      # (the engine tests skip themselves without the file: a download that failed must not pass)
       - name: Firmware for engine tests
-        run: node tools/fetch_firmwares.mjs felucca
+        run: |
+          node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP, AU and VST3 without installation
@@ -45,7 +51,10 @@ jobs:
         with:
           node-version: '22'
       - name: Firmware for engine tests
-        run: node tools/fetch_firmwares.mjs felucca
+        shell: bash
+        run: |
+          node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP and VST3 without installation
