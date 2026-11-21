@@ -310,6 +310,25 @@ test('a firmware out of time at its clock: the warning offers a higher one, and 
   assert.equal(p.api.perf.lowerClock(3), 60);
 });
 
+test("the catalog's minimum clock: the advice offers no clock under it, and only on the package it was measured on", async () => {
+  const p = await page(); await p.api.startAudio();
+  p.api.fw.minMhz = 160;
+  p.api.fw.minMhzPackage = (await persistence.packageHash(new Uint8Array(960).fill(1))).slice(0, 16);   // (a's package)
+  await p.api.boot(); await settle();
+  assert.equal(p.elements.get('perfwarn').hidden, true);   // (below it, no warning until it runs out of time)
+  for (let i = 0; i < 5; i++) {
+    p.api.perf.add({ busy: 400, quanta: 345, frames: 128, emulated: 1000, idle: 0, worst: 1, starved: 9 });
+    p.api.perf.second({ halted: false });
+  }
+  assert.equal(p.elements.get('perfwarn-fix').textContent, 'Use 160 MHz');
+  p.api.setMhz(240); await p.api.boot(); await settle();
+  p.api.perf.idleShare = 0.1;
+  assert.equal(p.api.perf.lowerClock(3), 160);
+  // another build of the firmware: its own minimum is not known, only where it ran out of time
+  p.api.fw.minMhzPackage = 'ffffffffffffffff';
+  assert.equal(p.api.perf.lowerClock(3), 120);
+});
+
 test("a try-out boots with its sectors and script from this origin, starts by itself and saves nothing", async () => {
   const disk = storage(), fetched = [], told = [];
   const sector = new Uint8Array(4100); new DataView(sector.buffer).setUint32(0, 0x96000, true); sector.fill(7, 4);
