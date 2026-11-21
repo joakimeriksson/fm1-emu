@@ -166,7 +166,8 @@ fn sext(v: u32, bits: u8) -> i64 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instruction {
     pub addr: u32,
-    /// Raw instruction bytes as a little-endian integer (zero-extended).
+    /// The window it was decoded from, as a little-endian integer: the instruction's bytes
+    /// and, above its `len`, whatever followed them in the window (zeros for `decode_bytes`).
     pub raw: u64,
     /// Class resolved from the table.
     pub entry: &'static IsaEntry,
@@ -256,15 +257,19 @@ thread_local! {
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// `decode_win` memoised on the 6-byte window: the class only depends on the
-/// bytes, and the scan over every class is the emulator's hot spot.
+/// `decode_win` memoised on the window's low 6 bytes: the class only depends on those
+/// (no mask reaches past them), and the scan over every class is the emulator's hot spot.
+/// A caller's window may be longer (fm1-core's is 8 bytes): the bytes above belong to the
+/// next instruction and are no part of the key, or every place an instruction stands in
+/// would have a line of its own.
 pub fn decode_win_cached(win: u64, addr: u32) -> Result<Instruction, DecodeError> {
-    let hit = DECODE_CACHE.with(|c| c.borrow().get(&win).copied());
+    let key = win & 0xffff_ffff_ffff;
+    let hit = DECODE_CACHE.with(|c| c.borrow().get(&key).copied());
     let entry = match hit {
         Some(e) => e,
         None => {
             let e = decode_win(win, addr).ok().map(|i| i.entry);
-            DECODE_CACHE.with(|c| c.borrow_mut().insert(win, e));
+            DECODE_CACHE.with(|c| c.borrow_mut().insert(key, e));
             e
         }
     };
@@ -308,7 +313,7 @@ mod tests {
 
     #[test]
     fn table_has_everything() {
-        // 1067 classes as of the five-corpus build
+        // 2916 classes as of the five-corpus build
         assert!(entry_count() > 1000);
     }
 
@@ -350,6 +355,23 @@ mod tests {
             decode_win(0xffff_ffff_ffff, 0),
             Err(DecodeError::UnknownInstruction { .. })
         ));
+    }
+
+    #[test]
+    fn the_decode_cache_keys_on_the_six_bytes_a_class_can_see() {
+        // no class looks past them: a longer window's upper bytes are the next instruction's
+        for e in ISA.iter().chain(FPU).chain(FALLBACK) {
+            assert!(e.len <= 6 && e.mask >> 48 == 0, "{}", e.name);
+        }
+        // `05 ff d9 41 f2 00`, a 6-byte branch, in three 8-byte windows: one cache line, each
+        // answer with its own window
+        for up in [0u64, 0x1234, 0xffff] {
+            let win = 0x00f2_41d9_ff05 | up << 48;
+            let (i, plain) = (decode_win_cached(win, 8).unwrap(), decode_win(win, 8).unwrap());
+            assert_eq!((i.raw, i.addr, i.len()), (win, 8, 6));
+            assert_eq!(i, plain);
+        }
+        assert_eq!(DECODE_CACHE.with(|c| c.borrow().len()), 1);
     }
 
     #[test]

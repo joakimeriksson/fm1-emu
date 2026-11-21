@@ -13,7 +13,7 @@
 //! - branch/call offsets are byte offsets from pc_next (Rel slots multiplied
 //!   by the solver-found factor).
 
-use fm1_isa::{DecodeError, Instruction, SlotKind};
+use fm1_isa::{DecodeError, Instruction};
 
 /// The memory bus. Implemented by the SoC (or by plain RAM in unit tests).
 ///
@@ -70,6 +70,10 @@ pub trait Bus {
         false
     }
     /// Host pointers for the JIT's inline memory paths (None: no JIT on this bus).
+    /// The core reads through them and compiled code reads and writes through them, unchecked: an
+    /// implementation answers for `ram..ram + ram_len` being its RAM (readable and writable),
+    /// `xip..xip + xip_len` its XIP image (readable), `ram_code` null or a byte for every 4 bytes
+    /// of RAM, and for none of them moving or going away while the bus is in use.
     fn jit_mem(&mut self) -> Option<JitMem> {
         None
     }
@@ -115,14 +119,15 @@ pub trait Bus {
 }
 
 /// The RAM from `pc` to its end, when the bus can show it (its JIT memory map), and pc is in it.
+/// (Borrowed from the bus: nothing can write RAM through it while the slice is held.)
 #[inline]
-fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&'static [u8]> {
+fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&[u8]> {
     let m = bus.jit_mem()?;
     let off = pc.checked_sub(m.ram_base)?;
     if off >= m.ram_len {
         return None;
     }
-    // SAFETY: the bus's RAM outlives the machine; only read here, between instructions
+    // SAFETY: `Bus::jit_mem`'s contract: ram_len bytes of the bus's RAM at `ram`, off inside them
     Some(unsafe { std::slice::from_raw_parts(m.ram.add(off as usize), (m.ram_len - off) as usize) })
 }
 
@@ -204,8 +209,8 @@ pub struct Cpu {
     /// the block start. `rep_end == 0` means no rep is active.
     pub rep_start: u32,
     pub rep_end: u32,
-    /// Counter register (`rep N rR`, decremented in place) or `None` for
-    /// the immediate-count form, which counts in `rep_count`.
+    /// A register to count in, decremented in place, or `None` to count in `rep_count`: always
+    /// `None`, since `rep N rR` latches its register's count there too (`execute`'s arm).
     pub rep_reg: Option<usize>,
     pub rep_count: u32,
     /// Predicated `if {} else {}` blocks whose then-part is executing:
@@ -240,6 +245,10 @@ pub struct Cpu {
     pub jit_on: bool,
     #[cfg(native_jit)]
     jit: Option<Box<jit::Jit>>,
+    /// The host had no executable memory for the JIT (`jit::Jit::new`: a mapping its rules
+    /// refuse this process). Asked once: the core then runs interpreted, whatever `jit_on` says.
+    #[cfg(native_jit)]
+    jit_refused: bool,
     /// (the wasm32 build: hot blocks as WebAssembly modules, see jit_wasm.rs)
     #[cfg(target_arch = "wasm32")]
     wjit: Option<Box<jit_wasm::Jit>>,
@@ -261,9 +270,13 @@ pub struct Cpu {
     /// Per block over RAM: the bus's count of code-word writes when the block was last found
     /// current (`ram_block_ok`: the same count, no compare).
     bver: Vec<u64>,
+    /// How often the block table was emptied and begun again (`build_block`, past its limit): a
+    /// block id or an op index from before one is not this table's.
+    bresets: u32,
     /// FM1_NO_RAM_BLOCKS: RAM code a step at a time (the reference)
     pub no_ram_blocks: bool,
-    /// Instructions per execute route (index 31 = the micro-op fast path),
+    /// Instructions per execute route (index 31 = the micro-op fast path; 30 = the syntax
+    /// executor's route and every one above it: the FPU's, the raw-decoded 32 to 41),
     /// and per class name on the slow path — for tuning the dispatcher.
     pub route_hist: [u64; 32],
     pub slow_hist: std::collections::HashMap<&'static str, u64>,
@@ -503,7 +516,7 @@ impl Cpu {
             && self.pred_skips.is_empty()
             && self.pair_pending.is_none()
             && self.hold_irq == 0
-            && self.irq_levels.last().map_or(true, |&l| prio > l && self.nest_ok)
+            && self.irq_levels.last().is_none_or(|&l| prio > l && self.nest_ok)
     }
 
     /// Enter an interrupt handler: `reti` = the interrupted pc (the ISR
@@ -553,7 +566,7 @@ impl Cpu {
         if hit {
             let len = self.icache[slot].len as u32;
             let mask = if len >= 8 { u64::MAX } else { (1u64 << (8 * len)) - 1 };
-            if self.icache_x[slot].map_or(false, |x| (x.win ^ win) & mask == 0) {
+            if self.icache_x[slot].is_some_and(|x| (x.win ^ win) & mask == 0) {
                 return Ok(slot);
             }
         }
@@ -601,8 +614,8 @@ impl Cpu {
 
     /// Run micro-ops back to back: the first instruction has been paid for
     /// by the caller's clock tick, every following one ticks the bus here.
-    /// Stops before an instruction that needs `step` (slow path, dual-issue
-    /// pair, predicated block, rep loop), after `budget` instructions, or
+    /// Stops before an instruction that needs `step` (one without a micro-op: pairs,
+    /// predicated blocks and rep loops run here, careful), after `budget` instructions, or
     /// when the bus reports something due — then the tick for the next
     /// instruction has already happened and `due` is true. Interrupt
     /// readiness can only change at those points, so the caller's per-
@@ -654,7 +667,9 @@ impl Cpu {
             () => {{
                 self.pc = pc;
                 self.insn_count += (n - synced) as u64;
-                synced = n;
+                // (read only where the loop goes on: most syncs are followed by a return)
+                #[allow(unused_assignments)]
+                { synced = n; }
             }};
         }
         // a runner's stretch (see `stop_pc`): `bound` is where the runner's call in progress
@@ -747,11 +762,12 @@ impl Cpu {
             if self.jit_on && !outside && (!careful || self.only_construct()) {
                 let inside = careful;
                 if let Some(mem) = jit_mem {
-                    if self.jit.is_none() {
+                    if self.jit.is_none() && !self.jit_refused {
                         self.jit = jit::Jit::new(self.profile).map(|mut j| {
                             j.stops = self.stop_checks;
                             Box::new(j)
                         });
+                        self.jit_refused = self.jit.is_none();
                     }
                     // (a block about to be compiled that ends in an if-else block: its then-part)
                     let mut then = None;
@@ -839,7 +855,14 @@ impl Cpu {
                         Some((Some((f, at, r)), _)) => self.wasm_region_ok(bus, r).then_some((f, at)),
                         Some((None, true)) => {
                             // hot: compile its region (it runs from the next visit on)
+                            let resets = self.bresets;
                             let region = self.wasm_region(bus, id);
+                            // (forming it builds blocks, and one too many begins the block table
+                            // again: the region's ids and this block's are then the old table's,
+                            // which the JIT has forgotten with it: look again)
+                            if self.bresets != resets {
+                                continue;
+                            }
                             let ver = bus.code_writes().unwrap_or(u64::MAX);
                             // (profiling as the core is now: core 1 gets the flag after its release)
                             let profile = self.profile;
@@ -1115,10 +1138,10 @@ impl Cpu {
         len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, self.pc, stop).0
     }
 
-    /// The block of micro-ops starting at pc (XIP code only): built on first
-    /// use from the decoded lines, ending after anything that may jump, before
-    /// an instruction without a micro-op, or at 32 ops. None: pc is outside
-    /// XIP or its first instruction needs `step`.
+    /// The block of micro-ops starting at pc (XIP code, or RAM the bus can show: `ram_code`):
+    /// built on first use from the decoded lines, ending after anything that may jump, before
+    /// an instruction without a micro-op, or at 32 ops. None: pc is in
+    /// neither, or its first instruction needs `step`.
     #[inline]
     fn block_at<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<Option<(usize, u32, u32)>, CoreError> {
         let xip = (0x0200_0000..0x0400_0000).contains(&pc);
@@ -1330,6 +1353,7 @@ impl Cpu {
             self.bbytes.clear();
             self.bver.clear();
             self.bmap.iter_mut().for_each(|x| *x = 0);
+            self.bresets += 1;
             #[cfg(native_jit)]
             if let Some(j) = self.jit.as_mut() {
                 j.reset();
@@ -1483,8 +1507,8 @@ impl Cpu {
         Ok(())
     }
 
-    /// Fetch/decode/execute one instruction. Fetches a 6-byte window (the
-    /// longest pi32v2 instruction); short instructions zero-extend.
+    /// Fetch/decode/execute one instruction, decoded from an 8-byte window (`fetch_at`; the
+    /// longest pi32v2 instruction is 6): above a shorter one's bytes it holds what follows.
     fn step_one<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let slot = self.fetch(bus)?;
         let l = self.icache[slot];
@@ -1503,9 +1527,16 @@ impl Cpu {
         let x = self.icache_x[slot].expect("decoded line");
         if self.profile {
             self.route_hist[(x.pre.route as usize).min(30)] += 1;
-            let tag = format!("{}{}{}{}", if l.fast.is_some() {"F"} else {"-"}, if l.pair_head {"H"} else {"-"}, if self.pair_pending.is_some() {"P"} else {"-"}, x.entry.name);
-            let tag: &'static str = Box::leak(tag.into_boxed_str());
-            *self.slow_hist.entry(tag).or_insert(0) += 1;
+            // (the key on the stack, and kept only when it is a new one: this is every slow instruction)
+            let (mut key, name) = ([0u8; 96], x.entry.name.as_bytes());
+            let n = name.len().min(key.len() - 3);
+            key[..3].copy_from_slice(&[if l.fast.is_some() { b'F' } else { b'-' }, if l.pair_head { b'H' } else { b'-' }, if self.pair_pending.is_some() { b'P' } else { b'-' }]);
+            key[3..3 + n].copy_from_slice(&name[..n]);
+            let tag = std::str::from_utf8(&key[..3 + n]).unwrap_or("?");
+            match self.slow_hist.get_mut(tag) {
+                Some(count) => *count += 1,
+                None => drop(self.slow_hist.insert(Box::leak(tag.into()), 1)),
+            }
         }
         let insn = Instruction { addr: self.pc, raw: x.win, entry: x.entry };
         let is_pair_head = x.pre.pair_head;
@@ -1611,7 +1642,6 @@ impl Cpu {
     /// (always inlined: wasm builds otherwise call it per instruction from the block loop)
     #[inline(always)]
     fn exec_fast<B: Bus>(&mut self, bus: &mut B, f: Fast, next_pc: u32) -> Option<u32> {
-        let _ = next_pc;
         let base = |cpu: &Self, b: Base| match b { Base::Reg(r) => cpu.regs[r as usize], Base::Sp => cpu.sp };
         match f {
             Fast::Mov { d, s } => self.regs[(d & 15) as usize] = self.regs[(s & 15) as usize],
@@ -2085,8 +2115,8 @@ impl Cpu {
         let mut jump: Option<u32> = None;
 
         // ---- special registers to / from the stack (ISR wrappers, prologues, context
-        // switches): first, as interrupt-heavy firmware runs them constantly (the SMK-37's
-        // stock firmware: ~150 k interrupts a second). Push in printed order (first item at the
+        // switches), the lists that are no `PushSregs` / `PopSregs` micro-op (`sreg_list_mask`:
+        // the names in another order than the ISA's). Push in printed order (first item at the
         // highest address), pop ascending assigning the printed list reversed.
         fn named_list(list: &'static str) -> Option<([&'static str; 10], usize)> {
             let inner = list.strip_prefix('{')?.strip_suffix('}')?;
@@ -2757,8 +2787,20 @@ impl Cpu {
     /// predicated `if` block counts as one unit including its then/else
     /// parts and a `rep` header includes its block (how the block-size
     /// nibbles of `if (...) {` count, verified on 2057 corpus blocks).
-    fn block_end<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32) -> u32 {
+    fn block_end<B: Bus>(&self, bus: &mut B, pc: u32, units: u32) -> u32 {
+        self.block_end_in(bus, pc, units, 0, &mut false)
+    }
+
+    /// `block_end` inside `depth` if blocks. A header nested deeper than `IF_DEPTH` ends the whole
+    /// count at its address (`cut`: the levels above stop too), as a word that does not decode
+    /// does: compiled code nests them a few deep, but data taken for code may be header after
+    /// header, each a call deeper here.
+    fn block_end_in<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32, depth: u32, cut: &mut bool) -> u32 {
+        const IF_DEPTH: u32 = 32;
         for _ in 0..units {
+            if *cut {
+                break;
+            }
             let lo = bus.fetch32(pc) as u64;
             let hi = bus.fetch32(pc + 4) as u64;
             let Ok(insn) = decode_any((hi << 32) | lo, pc) else { return pc };
@@ -2776,8 +2818,12 @@ impl Cpu {
             let name = insn.entry.name;
             if insn.entry.len == 4 && name.starts_with("if") && !has(name, "goto") {
                 if let Some(b) = decode_if_block(insn.raw) {
-                    pc = self.block_end(bus, pc, b.then_units);
-                    pc = self.block_end(bus, pc, b.else_units);
+                    if depth == IF_DEPTH {
+                        *cut = true;
+                        return pc - 4;
+                    }
+                    pc = self.block_end_in(bus, pc, b.then_units, depth + 1, cut);
+                    pc = self.block_end_in(bus, pc, b.else_units, depth + 1, cut);
                 }
             } else if name == "rep_i_r" || name == "rep_i_i" {
                 pc += 2 * (((insn.raw >> 4) & 0xf) as u32 + 1);
@@ -2798,33 +2844,8 @@ impl Cpu {
         Ok(slots[i].value(insn.raw))
     }
 
-    fn blk(&self, insn: &Instruction, i: usize) -> Result<Vec<u8>, CoreError> {
-        let slots = insn.entry.slots;
-        if i >= slots.len() || slots[i].kind != SlotKind::Blk {
-            return Err(CoreError::MissingSlot {
-                name: insn.entry.name,
-                pc: self.pc,
-                slot: i,
-            });
-        }
-        Ok(slots[i].block_regs(insn.raw))
-    }
-
     fn reg(&self, insn: &Instruction, i: usize) -> Result<usize, CoreError> {
         Ok(self.slot(insn, i)? as usize & 0xf)
-    }
-
-    fn load(&self, insn: &Instruction, i: usize) -> Result<u32, CoreError> {
-        let n = self.blk(insn, i)?;
-        Ok(if n.is_empty() { 0 } else { self.regs[n[0] as usize] })
-    }
-
-    fn store_r(&mut self, insn: &Instruction, i: usize, v: u32) -> Result<(), CoreError> {
-        let n = self.blk(insn, i)?;
-        if !n.is_empty() {
-            self.regs[n[0] as usize] = v;
-        }
-        Ok(())
     }
 
     fn branch(&self, insn: &Instruction, i: usize) -> Result<Option<u32>, CoreError> {
@@ -2848,8 +2869,7 @@ impl Cpu {
 
         let alu4 = pre.alu4;
         let bittest = pre.bittest;
-        #[allow(unused_variables)]
-        let (n, other) = (name, name);
+        let other = name;
         if let Some(f) = pre.fast {
             jumped = self.exec_fast(bus, f, next_pc);
         } else { match pre.route {
@@ -3302,8 +3322,8 @@ impl Cpu {
         Ok(())
     }
 
-    /// The instructions decoded from the raw word alone (execute's routes 16, 18, 19, 21, 22,
-    /// 32 and 27, whose 4-byte form is RAW_POP_RETS_MASK): shared by `execute` and the `Fast::Raw` micro-op, so the two cannot drift.
+    /// The instructions decoded from the raw word alone (routes 16, 18, 19, 21, 22, 32 to 41
+    /// and 27, whose 4-byte form is RAW_POP_RETS_MASK): shared by `execute` and the `Fast::Raw` micro-op, so the two cannot drift.
     fn exec_raw<B: Bus>(&mut self, bus: &mut B, route: u8, raw: u32) {
         let raw = raw as u64;
         match route {
@@ -3371,7 +3391,7 @@ impl Cpu {
             }
             37 =>
             {
-                let m = sp_mem_raw(raw as u64).unwrap();
+                let m = sp_mem_raw(raw).unwrap();
                 let a = self.sp.wrapping_add(m.off);
                 if m.store {
                     bus.write16(a, self.regs[m.d as usize] as u16);
@@ -4552,17 +4572,6 @@ fn raw_v(insn: &Instruction) -> u64 {
     insn.raw
 }
 
-/// Parse the `rHI_rLO` register-pair token from a d-access class name.
-
-fn sext(v: u32, bits: u8) -> i64 {
-    let v = v & ((1u32 << bits) - 1);
-    if bits < 32 && v & (1 << (bits - 1)) != 0 {
-        (v as i64) - (1i64 << bits)
-    } else {
-        v as i64
-    }
-}
-
 #[derive(Debug)]
 pub enum CoreError {
     Decode(DecodeError),
@@ -4570,7 +4579,7 @@ pub enum CoreError {
     MissingSlot { name: &'static str, pc: u32, slot: usize },
 }
 
-/// A flat RAM bus for unit tests — no peripherals, no side effects.
+/// Unit tests, most on `FlatRam`: a flat RAM bus with no peripherals and no side effects.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4854,6 +4863,27 @@ mod tests {
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.pc, 4, "lockclr");
         assert_eq!(ram.calls, vec![(1, true), (1, true), (1, false)]);
+    }
+
+    /// `Cpu::slow_hist` (with `profile`): an instruction off the micro-op path under its class
+    /// name, after F (it has a micro-op), H (a pair's head) and P (a pair is in flight).
+    #[test]
+    fn slow_path_histogram_keys() {
+        // `41 00` lockset, `40 00` lockclr, `94 f1 13 13` r1 = r1 & ~(1 << r3) #, a nop (the
+        // pair's second), `ff ea f9 ff` goto the lockset
+        let code = [0x41u8, 0x00, 0x40, 0x00, 0x94, 0xf1, 0x13, 0x13, 0x00, 0x00, 0xff, 0xea, 0xf9, 0xff, 0, 0, 0, 0];
+        let head = decode_any(0x1313_f194, 4).unwrap().entry.name;
+        let mut ram = FlatRam::new(code.to_vec());
+        let mut cpu = Cpu::new(0);
+        cpu.profile = true;
+        for _ in 0..5 * 1000 {
+            cpu.step(&mut ram).unwrap();
+        }
+        let mut got: Vec<(&str, u64)> = cpu.slow_hist.iter().map(|(k, n)| (*k, *n)).collect();
+        got.sort();
+        let head = format!("FH-{head}");
+        assert_eq!(got, [("---lockclr", 1000), ("---lockset", 1000), ("F-Pnop", 1000), (head.as_str(), 1000)]);
+        assert_eq!(cpu.route_hist[31], 1000, "the goto, a micro-op");
     }
 
     #[test]
@@ -5151,6 +5181,33 @@ mod tests {
             }
             assert_eq!(cpu.regs[..6], want, "r13 = {r13:#x}");
         }
+    }
+
+    /// If blocks nested in each other's then-parts: `b0 e8 00 10` if (r0 != 0) { 1 unit } else
+    /// { 1 unit }, the unit the next header and all its parts. Five deep, the innermost's parts
+    /// two nops: each construct ends one nop (the else part) past the one inside it. A run of
+    /// 100 000 headers (data taken for code) is counted without a call a header: `fetch_at` and
+    /// the if's own arm both come back.
+    #[test]
+    fn nested_if_blocks_are_counted_to_a_depth() {
+        let header = [0xb0u8, 0xe8, 0x00, 0x10];
+        let mut ram = FlatRam::new([header.repeat(5), vec![0; 0x40]].concat());
+        let mut cpu = Cpu::new(0);
+        let slot = cpu.fetch_at(&mut ram, 0).unwrap();
+        assert!(matches!(cpu.icache[slot].fast, Some(Fast::IfBlk { then_d: 26, else_d: 2, has_else: true, .. })), "{:?}", cpu.icache[slot].fast);
+        let run = 100_000;
+        let mut ram = FlatRam::new(header.repeat(run));
+        let mut cpu = Cpu::new(0);
+        let then_end = cpu.block_end(&mut ram, 4, 1);
+        // (the header 33 deep, at 4 + 4 * 32, ends the count for every level above it)
+        assert_eq!(then_end, 0x84);
+        // 32 deep is counted whole, to the end of the outermost block; one more ends it at the 33rd header
+        for (n, end) in [(32usize, 0xc2), (33, 0x80)] {
+            let mut ram = FlatRam::new([header.repeat(n), vec![0; 0x400]].concat());
+            assert_eq!(Cpu::new(0).block_end(&mut ram, 0, 1), end, "{n} headers");
+        }
+        cpu.step(&mut ram).unwrap();
+        assert_eq!(cpu.pc, then_end, "r0 == 0: to the else part");
     }
 
     /// Two programs with an if-else block at `base + 0x80`: `b0 e8 00 10` if (r0 != 0) { 2 units }
@@ -6370,6 +6427,76 @@ mod tests {
             assert!(inside > 5000, "compiled code ran {inside} instructions inside ({setup:?})");
         }
     }
+
+    /// A core whose JIT the host refused (`Cpu::jit_refused`) asks for no other and runs
+    /// interpreted with `jit_on` set, to the interpreter's result. (That `jit::Jit::new` failing
+    /// sets it is not run here: nothing on a test host refuses the mapping.)
+    #[cfg(native_jit)]
+    #[test]
+    fn a_refused_jit_is_not_asked_for_again() {
+        let xip = clocked_loop(false);
+        let run = |jit: bool, refused: bool| {
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.clone(), cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut cpu = Cpu::new(0x0200_0000);
+            (cpu.jit_on, cpu.jit_refused, cpu.profile, cpu.regs[4]) = (jit, refused, true, 0x100);
+            for _ in 0..200 {
+                if cpu.run_fast(&mut bus, 16).unwrap().0 == 0 {
+                    cpu.step(&mut bus).unwrap();
+                }
+            }
+            (cpu.jit.is_some(), cpu.jit_insns > 0, cpu.jit_refused, cpu.pc, cpu.regs, cpu.insn_count, bus.ram)
+        };
+        let (plain, refused, compiled) = (run(false, false), run(true, true), run(true, false));
+        assert_eq!((refused.0, refused.1, refused.2), (false, false, true), "no JIT made, none run");
+        assert_eq!((compiled.0, compiled.1, compiled.2), (true, true, false), "a JIT where the host has one");
+        assert_eq!((&refused.3, &refused.4, &refused.5, &refused.6), (&plain.3, &plain.4, &plain.5, &plain.6));
+    }
+
+    /// The block table past its limit is begun again by the next block built, wherever that is:
+    /// by the loop itself (interpreted: the then-part's block, the first time r0 is not 0), or by
+    /// `then_of` looking for the then-part of the block about to be compiled, whose id and ops
+    /// are then the old table's. Either way the run goes on as `step` runs it.
+    /// `b0 e8 00 10` if (r0 != 0) { `c5 21` r5 += 1 } else { `c6 21` r6 += 1 }; `c4 21` r4 += 1;
+    /// `ff ea f9 ff` goto the if.
+    #[cfg(native_jit)]
+    #[test]
+    fn the_block_table_begun_again_mid_run_changes_nothing() {
+        let mut xip = vec![0u8; 0x100];
+        xip[..14].copy_from_slice(&[0xb0, 0xe8, 0x00, 0x10, 0xc5, 0x21, 0xc6, 0x21, 0xc4, 0x21, 0xff, 0xea, 0xf9, 0xff]);
+        let run = |how: &str| {
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.clone(), cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut cpu = Cpu::new(0x0200_0000);
+            (cpu.jit_on, cpu.profile) = (how == "jit", true);
+            for lap in 0..120 {
+                // (the else part until the if's block is compiled, native: 32 runs; then the then-part)
+                cpu.regs[0] = (lap >= 50) as u32;
+                if lap == 10 && how != "step" {
+                    // the table at its limit, with the if's block and the else part's in it
+                    assert_eq!(cpu.blocks.len(), 2, "{how}");
+                    let pad = cpu.bops[0];
+                    cpu.bops.resize((1 << 22) + 1, pad);
+                }
+                let mut left = 4;
+                while left > 0 {
+                    left -= match if how == "step" { 0 } else { cpu.run_fast(&mut bus, left).unwrap().0 } {
+                        0 => cpu.step(&mut bus).map(|_| 1).unwrap(),
+                        k => k,
+                    };
+                }
+                assert_eq!(cpu.pc, 0x0200_0000, "{how}, lap {lap}");
+            }
+            if how != "step" {
+                // (the loop's blocks built anew: three, and compiled code leaves at a fourth pc)
+                assert!(cpu.bresets == 1 && cpu.blocks.len() <= 4, "{how}: begun again {} times, {} blocks", cpu.bresets, cpu.blocks.len());
+                assert!(how != "jit" || cpu.jit_insns > 0, "compiled after it");
+            }
+            (cpu.regs, cpu.insn_count)
+        };
+        let want = run("step");
+        assert_eq!((want.0[4], want.0[5], want.0[6]), (120, 70, 50));
+        assert_eq!(run("interpreted"), want, "interpreted");
+        assert_eq!(run("jit"), want, "compiled");
+    }
 }
 
 /// Substring test for the short syntax/class strings: a plain window scan
@@ -6743,7 +6870,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             _ if insn.entry.len == 4 && has(insn.entry.syntax, "d[")
                 && ((insn.raw & 0xfff0) == 0xec50 || (insn.raw & 0xffff) == 0xe9d0) => 16,
             _ if insn.entry.len == 4 && (insn.raw & 0xf8) == 0x50
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && has(insn.entry.syntax, "[R+") && !has(insn.entry.syntax, "[R+R") => 17,
             // word accesses with a negative offset (`d4..d7 ec`): the table's classes fit only the
             // corpus samples (`r_i_mov_r_3` had no slots)
@@ -6751,13 +6878,13 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
                 && has(insn.entry.syntax, "[") => 18,
             _ if insn.entry.name == "word_mem_craw" => 18,
             _ if insn.entry.len == 4 && (has(insn.entry.syntax, "[++R=#i]") || has(insn.entry.syntax, "[++R=-#i]"))
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && ((insn.raw & 0xf8) == 0x58 || (insn.raw & 0xff) == 0xd0) => 18,
             _ if insn.entry.len == 4 && (insn.raw & 0xf0) == 0xd0
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && has(insn.entry.syntax, "++=") => 19,
             _ if insn.entry.len == 4 && insn.raw & 0xff == 0xd8
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee) => 20,
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee) => 20,
             _ if insn.entry.len == 4 && matches!((insn.raw >> 8) & 0xff, 0xe1 | 0xf1)
                 && matches!(insn.raw & 0xff, 0xd0 | 0xd8 | 0xf8 | 0xfc | 0xfe | 0xf6)
                 && insn.entry.syntax.starts_with('r') && has(insn.entry.syntax, "_r") => 21,
@@ -6765,7 +6892,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             // table's entries on those bytes include the carry rotates (`r15_r14 <c>= #i`, bit 27),
             // which stay unsupported
             "pair_op_raw" => 21,
-            _ if insn.entry.len == 4 && (insn.raw & 0xffff) == 0xe070 || (insn.raw & 0xffff) == 0xf070 => 22,
+            _ if (insn.entry.len == 4 && (insn.raw & 0xffff) == 0xe070) || (insn.raw & 0xffff) == 0xf070 => 22,
             "testset_b_r" | "testset_r" => 23,
             "ifeq_goto_i" | "ifne_goto_i" => 24,
             "if_ret_eq_i_goto_i" | "if_ret_ne_i_goto_i" => 25,
@@ -6982,7 +7109,7 @@ enum Fast {
     /// `R = smin|smax|umin|umax(R, R)`: kind 0 smin, 1 smax, 2 umin, 3 umax
     MinMax { d: u8, a: u8, b: u8, kind: u8 },
     /// predicated `if (..) {` (arm 14): block ends as offsets from the
-    /// instruction's next pc, worked out at decode (XIP code only)
+    /// instruction's next pc, worked out at decode (`fetch_at`: for RAM code too)
     IfBlk { a: u8, rk: u8, fam: u8, alt: bool, has_else: bool, rv: u32, then_d: u16, else_d: u16 },
     // specialised forms of the hottest generic ops (`Fast::specialise`):
     // no inner dispatch on condition, width or operation
@@ -7076,7 +7203,7 @@ pub const F_V: u32 = 8;
 fn add_flags(a: u32, b: u32, cin: u32) -> (u32, u32) {
     let w = a as u64 + b as u64 + cin as u64;
     let r = w as u32;
-    let f = (r >> 31) * F_N | ((w >> 32) as u32) * F_C | ((r == 0) as u32) * F_Z | (((a ^ r) & (b ^ r)) >> 31) * F_V;
+    let f = ((r >> 31) * F_N) | (((w >> 32) as u32) * F_C) | (((r == 0) as u32) * F_Z) | ((((a ^ r) & (b ^ r)) >> 31) * F_V);
     (r, f)
 }
 
@@ -7356,6 +7483,8 @@ fn cond_true(c: Cond, l: u32, r: u32) -> bool {
 }
 
 /// A float compare on the raw register bits (NaN: ordered compares false, unordered true).
+// (the unordered ones are the negations as written: true for a NaN, which their opposites are not)
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 #[cold]
 fn fcond(c: Cond, l: u32, r: u32) -> bool {
     let (x, y) = (f32::from_bits(l), f32::from_bits(r));
@@ -7657,7 +7786,7 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
             }
         }
         // arithmetic shift by an immediate below 32 (exec_syntax fills larger counts with the sign)
-        "R = R >>> #i" if insn.entry.len == 4 && v(2).map_or(false, |n| (1..32).contains(&n)) => {
+        "R = R >>> #i" if insn.entry.len == 4 && v(2).is_some_and(|n| (1..32).contains(&n)) => {
             return Some(Fast::SarI { d: r(0)?, s: r(1)?, n: v(2)? as u8 });
         }
         _ if insn.entry.len == 4 && (insn.raw >> 8) & 0xff == 0xeb && block_form(s).is_some() => {
