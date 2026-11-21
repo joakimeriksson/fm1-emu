@@ -491,7 +491,8 @@ impl Soc {
     /// 0x73000, April OS 0x64000); a `--flash` file restored after this reads the same way.
     pub fn sfc_boot(&mut self, key: u16, app_end: usize) {
         self.sfc_key = Some(key);
-        self.write32(0x4030c, XIP_BASE + (app_end - XIP_FLASH_OFFSET) as u32);
+        // (an image that ends below the window's start: nothing decrypted, the window from its start)
+        self.write32(0x4030c, XIP_BASE.wrapping_add(app_end.saturating_sub(XIP_FLASH_OFFSET) as u32));
         self.write32(0x40308, 0x07ff_ffff);
         self.write32(0x40300, 3);
     }
@@ -1681,7 +1682,7 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
         }
     }
     let app = u.entry("app.bin").map(|h| h.offset).unwrap_or(0x120);
-    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
+    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE.wrapping_add(app as u32), board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
 }
 
 /// Ready a Soc for a package's firmware: its board, its flash chip, and the SPL's boot
