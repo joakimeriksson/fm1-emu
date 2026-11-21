@@ -108,6 +108,9 @@ if update:
     with open(golden_path, "w") as f:
         json.dump(dict(sorted(golden.items())), f, indent=1)
         f.write("\n")
+    changed = [fid for fid, status, _, _ in results if status == "changed"]
+    if changed:
+        print(f"the minimums in web/firmwares.json may need tools/clock_floors.py {' '.join(changed)}")
 if orphans and (not update or ids or shards > 1):
     print(f"in tests/catalog.json, not in the catalog: {', '.join(orphans)} (a whole --update drops them)")
 sys.exit(1 if count["FAIL"] else 0)
