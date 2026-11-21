@@ -21,6 +21,10 @@ const RAM_SIZE: usize = 1 << 20;
 pub const RATE: f64 = 44_100.0;
 /// Flash sectors, for saving what the firmware wrote (its patches) with the host's project.
 const SECTOR: usize = 4096;
+/// The shortest a panel key stays down or up on the emulated clock: a quick finger's press. A click
+/// can come shorter (both of its events in one frame of the window, or while the machine waits for
+/// the host), too short for the firmware's polling to see.
+const KEY_MIN_MS: u64 = 100;
 
 /// A MIDI message for the machine, with the frame (of its 44.1 kHz output) it is due at.
 #[derive(Clone, Copy, Default)]
@@ -272,6 +276,10 @@ struct Machine {
     halted: bool,
     /// the flash as booted, to find the sectors the firmware has written since
     flash0: Vec<u8>,
+    /// the cycle each panel key may next change at, one for every `u8` id
+    key_free: [u64; 256],
+    /// each panel key's state once its queued changes are done
+    key_last: [bool; 256],
 }
 
 impl Machine {
@@ -294,7 +302,24 @@ impl Machine {
         cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
         let flash0 = soc.flash.mem.clone();
         restore_flash(&mut soc, sectors);
-        Ok(Machine { cpu, cpu1: None, soc, pending_tick: false, halted: false, flash0 })
+        Ok(Machine { cpu, cpu1: None, soc, pending_tick: false, halted: false, flash0, key_free: [0; 256], key_last: [false; 256] })
+    }
+
+    /// A press that would wait more than two holds is dropped, and its release with it: fast clicks
+    /// end at most three holds after the last one.
+    fn key(&mut self, id: u8, down: bool) {
+        let (i, now, hold) = (id as usize, self.soc.periph.cycles, self.soc.periph.cycle_of_ms(KEY_MIN_MS));
+        let at = self.key_free[i].max(now);
+        if down == self.key_last[i] || (down && at - now > 2 * hold) {
+            return;
+        }
+        self.key_last[i] = down;
+        self.key_free[i] = at + hold;
+        if at > now {
+            self.soc.periph.schedule(at, Action::Key { id, down });
+        } else {
+            self.soc.periph.apply(&Action::Key { id, down });
+        }
     }
 
     /// fm1-live's loop: cpu0's blocks, cpu1 beside once the firmware releases it.
@@ -513,7 +538,11 @@ pub fn run(
                     } else { let _ = reply.send(Err("firmware changed before export; try again".into())); }
                 }
                 Cmd::Load { .. } => unreachable!(), // normalized above, after validation
-                Cmd::Key { id, down } => apply(&mut m, Action::Key { id, down }),
+                Cmd::Key { id, down } => {
+                    if let Some(m) = m.as_mut() {
+                        m.key(id, down);
+                    }
+                }
                 Cmd::Enc { enc, clicks } => apply(&mut m, Action::Enc { enc, clicks }),
                 Cmd::Analog { idx, value } => apply(&mut m, Action::Adc { ch: idx, value: value.min(1023) }),
                 Cmd::Vel(us) => {
@@ -711,7 +740,32 @@ mod portable_tests {
     fn machine() -> Machine {
         let soc = Soc::new(RAM_SIZE, vec![0x55; 0x80000]);
         let flash0 = soc.flash.mem.clone();
-        Machine { cpu: Cpu::new(0x02000120), cpu1: None, soc, pending_tick: false, halted: false, flash0 }
+        Machine { cpu: Cpu::new(0x02000120), cpu1: None, soc, pending_tick: false, halted: false, flash0, key_free: [0; 256], key_last: [false; 256] }
+    }
+    #[test]
+    fn a_double_click_stays_two_presses_and_other_keys_do_not_wait() {
+        let mut m = machine();
+        let hold = m.soc.periph.cycle_of_ms(KEY_MIN_MS);
+        for down in [true, false, true, false] { m.key(2, down); }
+        m.key(3, true);
+        assert!(m.soc.periph.keys_down[3]);
+        for (at, down) in [(0, true), (hold - 1, true), (hold, false), (2 * hold - 1, false), (2 * hold, true), (3 * hold, false)] {
+            m.soc.periph.advance(at - m.soc.periph.cycles);
+            assert_eq!(m.soc.periph.keys_down[2], down, "at cycle {at}");
+        }
+    }
+    #[test]
+    fn fast_clicks_stop_soon_after_the_last_one() {
+        let mut m = machine();
+        let hold = m.soc.periph.cycle_of_ms(KEY_MIN_MS);
+        for _ in 0..50 {
+            m.soc.periph.advance(hold / 2);
+            m.key(2, true);
+            m.key(2, false);
+        }
+        m.soc.periph.advance(3 * hold);
+        assert!(m.soc.periph.script.is_empty(), "{} key changes still queued", m.soc.periph.script.len());
+        assert!(!m.soc.periph.keys_down[2]);
     }
     #[test]
     fn restored_sectors_update_the_entire_xip_sector() {
