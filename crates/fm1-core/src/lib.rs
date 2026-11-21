@@ -70,6 +70,10 @@ pub trait Bus {
         false
     }
     /// Host pointers for the JIT's inline memory paths (None: no JIT on this bus).
+    /// The core reads through them and compiled code reads and writes through them, unchecked: an
+    /// implementation answers for `ram..ram + ram_len` being its RAM (readable and writable),
+    /// `xip..xip + xip_len` its XIP image (readable), `ram_code` null or a byte for every 4 bytes
+    /// of RAM, and for none of them moving or going away while the bus is in use.
     fn jit_mem(&mut self) -> Option<JitMem> {
         None
     }
@@ -115,14 +119,15 @@ pub trait Bus {
 }
 
 /// The RAM from `pc` to its end, when the bus can show it (its JIT memory map), and pc is in it.
+/// (Borrowed from the bus: nothing can write RAM through it while the slice is held.)
 #[inline]
-fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&'static [u8]> {
+fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&[u8]> {
     let m = bus.jit_mem()?;
     let off = pc.checked_sub(m.ram_base)?;
     if off >= m.ram_len {
         return None;
     }
-    // SAFETY: the bus's RAM outlives the machine; only read here, between instructions
+    // SAFETY: `Bus::jit_mem`'s contract: ram_len bytes of the bus's RAM at `ram`, off inside them
     Some(unsafe { std::slice::from_raw_parts(m.ram.add(off as usize), (m.ram_len - off) as usize) })
 }
 
