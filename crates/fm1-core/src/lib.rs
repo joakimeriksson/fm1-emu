@@ -245,6 +245,10 @@ pub struct Cpu {
     pub jit_on: bool,
     #[cfg(native_jit)]
     jit: Option<Box<jit::Jit>>,
+    /// The host had no executable memory for the JIT (`jit::Jit::new`: a mapping its rules
+    /// refuse this process). Asked once: the core then runs interpreted, whatever `jit_on` says.
+    #[cfg(native_jit)]
+    jit_refused: bool,
     /// (the wasm32 build: hot blocks as WebAssembly modules, see jit_wasm.rs)
     #[cfg(target_arch = "wasm32")]
     wjit: Option<Box<jit_wasm::Jit>>,
@@ -755,11 +759,12 @@ impl Cpu {
             if self.jit_on && !outside && (!careful || self.only_construct()) {
                 let inside = careful;
                 if let Some(mem) = jit_mem {
-                    if self.jit.is_none() {
+                    if self.jit.is_none() && !self.jit_refused {
                         self.jit = jit::Jit::new(self.profile).map(|mut j| {
                             j.stops = self.stop_checks;
                             Box::new(j)
                         });
+                        self.jit_refused = self.jit.is_none();
                     }
                     // (a block about to be compiled that ends in an if-else block: its then-part)
                     let mut then = None;
@@ -6427,6 +6432,30 @@ mod tests {
             }
             assert!(inside > 5000, "compiled code ran {inside} instructions inside ({setup:?})");
         }
+    }
+
+    /// A core whose JIT the host refused (`Cpu::jit_refused`) asks for no other and runs
+    /// interpreted with `jit_on` set, to the interpreter's result. (That `jit::Jit::new` failing
+    /// sets it is not run here: nothing on a test host refuses the mapping.)
+    #[cfg(native_jit)]
+    #[test]
+    fn a_refused_jit_is_not_asked_for_again() {
+        let xip = clocked_loop(false);
+        let run = |jit: bool, refused: bool| {
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.clone(), cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut cpu = Cpu::new(0x0200_0000);
+            (cpu.jit_on, cpu.jit_refused, cpu.profile, cpu.regs[4]) = (jit, refused, true, 0x100);
+            for _ in 0..200 {
+                if cpu.run_fast(&mut bus, 16).unwrap().0 == 0 {
+                    cpu.step(&mut bus).unwrap();
+                }
+            }
+            (cpu.jit.is_some(), cpu.jit_insns > 0, cpu.jit_refused, cpu.pc, cpu.regs, cpu.insn_count, bus.ram)
+        };
+        let (plain, refused, compiled) = (run(false, false), run(true, true), run(true, false));
+        assert_eq!((refused.0, refused.1, refused.2), (false, false, true), "no JIT made, none run");
+        assert_eq!((compiled.0, compiled.1, compiled.2), (true, true, false), "a JIT where the host has one");
+        assert_eq!((&refused.3, &refused.4, &refused.5, &refused.6), (&plain.3, &plain.4, &plain.5, &plain.6));
     }
 
     /// The block table past its limit is begun again by the next block built, wherever that is:
