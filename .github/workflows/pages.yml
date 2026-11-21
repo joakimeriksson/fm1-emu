@@ -9,10 +9,17 @@ on:
   pull_request:
   workflow_dispatch:
 
-# (publishing rights and the one-at-a-time rule are the deploy job's alone: as a workflow-wide
-# group, a pull request's tests waited behind, and were cancelled by, every other run)
+# (publishing rights are the deploy job's alone)
 permissions:
   contents: read
+
+# One run at a time for each branch: master's runs build and deploy in the order they were pushed
+# (with only the deploy jobs in a group, a slower build of an older push would deploy last and
+# leave the site behind master). A pull request has its own group, so its tests wait behind no
+# other run, and a new push to it replaces the run of the one before.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -46,7 +53,7 @@ jobs:
         run: |
           set -o pipefail
           FM1_WASM=_site/fm1_web.wasm node --test --test-reporter=tap web/*.test.mjs | tee tests.tap
-          ! grep -n '# SKIP' tests.tap
+          if grep -n '# SKIP' tests.tap; then echo "::error::a test skipped itself"; exit 1; fi
 
       # The emulator's wasm boots a real firmware (Felucca, fetched from its author's site like
       # the page does) to audio and a screen, and a MIDI note sounds.
@@ -59,10 +66,11 @@ jobs:
       # The wasm JIT against the wasm interpreter (its oracle), as the jobs below do for the native
       # JITs: the page's own build gives the same audio either way, byte for byte, and the JIT did
       # compile. FM-1 SID's package is in the tree; Felucca and mono2k (two cores) come from their
-      # authors' sites, and one that could not be fetched is said, not failed.
+      # authors' sites, and one of those that could not be fetched is said, not failed.
       - name: WASM JIT against the interpreter
         run: |
           node tools/fetch_firmwares.mjs felucca mono2k
+          test -f fm1-sid/web/sidplayer.fwsc
           for pkg in fm1-sid/web/sidplayer.fwsc reference/firmwares/felucca.fwsc reference/firmwares/mono2k.fwsc; do
             test -f "$pkg" || { echo "::warning::$pkg was not fetched: its JIT audio was not compared"; continue; }
             FM1_WASM=_site/fm1_web.wasm FM1_FWSC=$pkg FM1_BENCH_JSON=jit.json node web/bench.mjs 240 5 jit.raw > /dev/null
@@ -138,7 +146,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libasound2-dev pkg-config
 
-      # (the two programs' own tests too: this job has the ALSA headers fm1-live builds against)
+      # (the two programs' own tests too: this job has the ALSA headers fm1-live builds against;
+      # two of fm1-live's boot Felucca and skip themselves without its package, so it must be there)
+      - name: Firmware for fm1-live's tests
+        run: |
+          node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc
+
       - name: Core tests
         run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-live -p fm1-emu
 
@@ -188,9 +202,6 @@ jobs:
     permissions:
       pages: write
       id-token: write
-    concurrency:
-      group: pages
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

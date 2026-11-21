@@ -38,6 +38,7 @@ live = opt("--live", "target/release/fm1-live")
 shard, shards = map(int, opt("--shard", "0/1").split("/"))
 jobs = int(opt("--jobs", str(os.cpu_count() or 2)))
 max_unchecked = opt("--max-unchecked", None)
+max_unchecked = None if max_unchecked is None else int(max_unchecked)
 update = "--update" in args
 ids = [a for a in args if not a.startswith("--")]
 
@@ -120,8 +121,9 @@ if update:
         f.write("\n")
 if orphans and (not update or ids or shards > 1):
     print(f"in tests/catalog.json, not in the catalog: {', '.join(orphans)} (a whole --update drops them)")
-unchecked = sorted(r[0] for r in results if r[1] in ("missing", "rebuilt"))
-over = max_unchecked is not None and len(unchecked) > int(max_unchecked)
+# (an --update has just hashed the rebuilt ones: what stays unchecked then is what was not fetched)
+unchecked = sorted(r[0] for r in results if r[1] == "missing" or r[1] == "rebuilt" and not update)
+over = max_unchecked is not None and len(unchecked) > max_unchecked
 if over:
     print(f"audio not compared with its hash: {len(unchecked)} firmwares, more than the {max_unchecked} allowed: "
           "refresh the catalog (tools/catalog_refresh.py)")

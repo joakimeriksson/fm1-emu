@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'crates/fm1-plugin/**'
+      - 'crates/fm1-isa/**'
       - 'crates/fm1-core/**'
       - 'crates/fm1-soc/**'
       - 'crates/fm1-map/**'
@@ -15,6 +16,7 @@ on:
       - 'tools/build_plugin.sh'
       - 'tools/build_plugin.ps1'
       - 'tools/fetch_firmwares.mjs'
+      - 'web/fwsc.js'
       - '.github/workflows/plugin-tests.yml'
   workflow_dispatch:
 
