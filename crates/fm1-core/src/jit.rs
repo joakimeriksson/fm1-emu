@@ -1,5 +1,5 @@
 //! Native JIT for the blocks of micro-ops `Cpu::run_fast` interprets (after esp32sim's
-//! xtensa-lx7 JIT): AArch64 code (here), x86-64 code (jit/x64.rs, the same plan op for op). A compiled block is the block's plain prefix (up to the first op that needs
+//! xtensa-lx7 JIT): AArch64 code (here), x86-64 code (jit/x64.rs: the same plan, though not op for op, see its head). A compiled block is the block's plain prefix (up to the first op that needs
 //! the careful path) as native code, with the interpreter as the oracle: the two must leave
 //! bit-identical machine state.
 //!
@@ -643,7 +643,9 @@ fn h_op_quiet<const PROF: bool>(ctx: *mut Ctx, op: *const Fast, _idx: u32, _next
 code_abi! {
 /// `sti` (`Fast::SetIe { on: true }`): `h_op`'s work for it without the executor's dispatch. It
 /// opens the bus's interrupt window, so the ticks are synced first and brk checked after.
-fn h_sti<B: Bus>(ctx: *mut Ctx, idx: u32) {
+/// (PROF: as `h_op`'s. The AArch64 code's: jit/x64.rs has `sti` through `h_op`.)
+#[cfg(target_arch = "aarch64")]
+fn h_sti<B: Bus, const PROF: bool>(ctx: *mut Ctx, idx: u32) {
     // SAFETY: as h_op.
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
@@ -652,7 +654,9 @@ fn h_sti<B: Bus>(ctx: *mut Ctx, idx: u32) {
     if cpu.stop_pc != 0 {
         cpu.stop_io = 1;
     }
-    cpu.profile_helper(&Fast::SetIe { on: true });
+    if PROF {
+        cpu.profile_helper(&Fast::SetIe { on: true });
+    }
     cpu.ie = true;
     bus.irq_window();
     if bus.next_tick_due() || bus.code_writes() != ctx.code_version {
@@ -1746,7 +1750,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::SetIe { on: true } => {
             g.a.mov_x(0, CTX);
             g.a.add_imm(1, DONE, idx);
-            g.call(h_sti::<B> as *const () as u64);
+            g.call(if profile { h_sti::<B, true> as *const () as u64 } else { h_sti::<B, false> as *const () as u64 });
             bus_used = true;
         }
         // rev8 / rev16 / revs (exec_raw's route 22: d bits 28-31, the source 24-27, the form
@@ -1925,7 +1929,7 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
 fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
-    for o in [off_reg(15), off_sp(), off_rets(), off_pc(), off_hold(), off_stop_pc(), off_stop_io(), off_stop_rest()] {
+    for o in [off_reg(15), off_sp(), off_rets(), off_pc(), off_hold(), off_stop_pc(), off_stop_io(), off_stop_rest(), off_probe(16)] {
         if o >= 16384 {
             return None;
         }

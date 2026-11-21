@@ -6,13 +6,14 @@
 //! A hot block becomes a region: the block and the blocks reachable from it over fixed edges
 //! (fall-through, branch, goto and call targets), compiled together as one function in a small
 //! wasm module of its own (blocks average three or four instructions: one call per block cost
-//! as much as the interpreter saved). The module imports the emulator's memory and function
-//! table, and exports `run(cpu, ctx, limit, start) -> instructions`; any block of the region
-//! can be the start, and inside it a `loop` + `br_table` dispatches from block to block. The host (JavaScript)
-//! compiles it synchronously and puts `run` into the emulator's exported function table
-//! (`fm1_jit_compile`, see web/jit.js); Rust then calls it through that table index, so running
-//! compiled code involves no JavaScript at all. The generated code reaches back into Rust the
-//! same way: the helpers' table indices are `call_indirect` targets.
+//! as much as the interpreter saved). The module imports the emulator's memory and the three
+//! helpers as functions, and exports `run(cpu, ctx, limit, start) -> instructions`; any block of
+//! the region can be the start, and inside it a `loop` + `br_table` dispatches from block to
+//! block. The host (JavaScript) compiles it synchronously, hands it the helpers out of the
+//! emulator's exported function table and puts `run` into that table (`fm1_jit_compile`, see
+//! web/jit.js); Rust then calls it through that table index, so running compiled code involves
+//! no JavaScript at all. Nor does the generated code's way back into Rust: the helpers are the
+//! emulator's own functions, called directly (not through the table: `module` says why).
 //!
 //! Timing is kept exact as in jit.rs: a block runs only when all its ticks fit before anything
 //! is due; RAM / XIP accesses are inline (as are the register ops, the FPU's included: wasm's own
@@ -69,8 +70,6 @@ pub struct Jit {
     /// blocks compiled into regions, all told (with the copies: a block reachable from several
     /// hot blocks is in each one's region)
     pub blocks: u32,
-    /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
-    pub profile: bool,
     /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
     /// core 1, whose runner probes for polling loops)
     pub(crate) stops: bool,
@@ -90,8 +89,11 @@ impl std::fmt::Debug for Jit {
 }
 
 impl Jit {
-    pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, bytes_max: 0, drops: 0, resets: 0, blocks: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
+    /// (`_profile`: as `jit::Jit::new` takes it, so `Cpu::run_fast` makes either the same way.
+    /// Here a region's helper calls count themselves when the core profiles as the region is
+    /// compiled: `install`.)
+    pub fn new(_profile: bool) -> Option<Jit> {
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, bytes_max: 0, drops: 0, resets: 0, blocks: 0, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -221,7 +223,8 @@ pub struct Ctx {
 /// instructions, as far as whole blocks go (the caller's budget, as the interpreter keeps it).
 ///
 /// # Safety
-/// `f` must come from `Jit::entry` for this bus type and memory map.
+/// `f` and `start` must be a region's as `Jit::lookup` or `Jit::cached` gives them (or a module
+/// the host just installed), compiled for this bus type and memory map.
 pub(crate) unsafe fn run<B: Bus>(f: u32, start: u32, cpu: &mut Cpu, bus: &mut B, extra: u32, cap: u32) -> u32 {
     // instructions this call may run: their ticks ((k - 1) + extra) must all fit tick_room
     let limit = (bus.tick_room() + 1).saturating_sub(extra as u64).min(1 << 30).min(cap as u64) as u32;

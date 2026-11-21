@@ -1,6 +1,9 @@
-//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) op for op, with the
-//! System V calling convention (Linux, and Windows too: jit.rs declares the entry and the helpers
-//! `extern "sysv64"`).
+//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) for prefixes, chains,
+//! RAM guards and a runner's stops, with the System V calling convention (Linux, and Windows too:
+//! jit.rs declares the entry and the helpers `extern "sysv64"`). Not op for op: a guest register
+//! is read and written in the Cpu at each use (jit.rs keeps them in host registers within a
+//! block, its `RegCache`), and `Un`, `Div`, the pair loads and stores, `sti` / `cli` and the
+//! byte reversals, which jit.rs has code for, go through the interpreter's executor here.
 //!
 //! Register plan (callee-saved, so helpers may be called freely):
 //!   rbx = &Cpu, rbp = &Ctx, r12 = RAM host base, r13 = XIP host base, r14d = instructions done
