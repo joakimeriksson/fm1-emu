@@ -93,6 +93,16 @@ test("a newcomer's links are https: another scheme in the Hub's catalog is no li
   assert.equal(httpsUrl(undefined), null);
 });
 
+test("a Hub catalog of another shape gives the newcomers it can, or none: the page waits for them while loading", async () => {
+  const from = (hub) => hubNewcomers({ firmwares: [] }, async () => new Response(JSON.stringify(hub)));
+  for (const hub of [null, 7, [], {}, { firmwares: null }, { firmwares: 'none' }, { firmwares: { a: { id: 'a', pkg: 'fw/a-1.fwsc' } } }]) {
+    assert.deepEqual(await from(hub), [], JSON.stringify(hub));
+  }
+  // entries that are no firmware (not an object, no id to pick it by) are left out; the others are listed
+  const got = await from({ firmwares: [null, 'x', 3, [], { pkg: 'fw/y-1.fwsc' }, { id: 5, pkg: 'fw/5-1.fwsc' }, { id: 'ok', pkg: 'fw/ok-1.fwsc' }] });
+  assert.deepEqual(got.map((f) => [f.id, f.package]), [['ok', 'https://thefirmwarehub.com/fw/ok-1.fwsc']]);
+});
+
 test('a package larger than a package can be is refused: by its stated length, else while it is read', async () => {
   const entry = { id: 'x', package: 'https://example.test/x.fwsc' };
   // the server says how long: nothing is read

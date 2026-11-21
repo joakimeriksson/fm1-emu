@@ -179,7 +179,10 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
     return [];
   }
   const out = [];
-  for (const h of hub?.firmwares || []) {
+  // (a catalog of another shape than the one known here: what in it is a firmware with an id, or none; the page
+  // waits for this list while it loads)
+  for (const h of Array.isArray(hub?.firmwares) ? hub.firmwares : []) {
+    if (!h || typeof h.id !== "string") continue;
     const pkg = h.pkg && httpsUrl(h.pkg, HUB);
     if (!pkg || known.has(h.id) || skipped[h.id]) continue;
     out.push({
