@@ -392,8 +392,9 @@ fn a_cc_presses_once_as_it_comes_up_to_64() {
 
 #[test]
 fn a_control_that_sends_no_release_presses_each_time_it_sends_its_value() {
-    // a trigger-only button sends 127 a press and nothing when let go. A pedal or a fader sends a
-    // value only when it changed, so the same value twice in a row is that button pressed again
+    // a trigger-only button sends 127 a press and nothing when let go. A pedal or a fader as a rule
+    // sends a value only when it changed, so the same value twice in a row is taken for that button
+    // pressed again (a guess: `Mapper::pressed`)
     let bindings = vec![
         Binding::new(Src { cc: Some(20), ..Src::default() }, Target::Record),
         cc_button(21, 10, Mode::Toggle),

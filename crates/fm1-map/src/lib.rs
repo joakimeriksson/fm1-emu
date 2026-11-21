@@ -821,10 +821,15 @@ impl Mapper {
     }
 
     /// A press of binding `i`, for what a press does once: a note's on (`v` 127), or its CC coming
-    /// up to 64 or more, or at 64 or more with the value it had. A pedal, a fader or a pad's
-    /// pressure sends a value only when it changed, so its other values at 64 or more are the
-    /// same press, until one below; the same value twice in a row is a control that sends no
-    /// release (127 at each press, nothing when let go), pressed again.
+    /// up to 64 or more, or at 64 or more with the value it had. The last is a guess at which of
+    /// two kinds of control this is, from what it sends. A pedal, a fader or a pad's pressure as a
+    /// rule sends a value only when it changed, so its other values at 64 or more are taken for the
+    /// same press, until one below; a control that sends no release (127 at each press, nothing
+    /// when let go) sends the same value each time, so the same value twice in a row is taken for
+    /// that control pressed again. The guess is wrong both ways: a held CC sent again as it is (a
+    /// host that chases controllers when it loops or locates, a fader at its end stop repeating
+    /// 127) is a press nobody made, and a control with no release whose value follows how hard it
+    /// was hit (110, then 96) is a press not counted.
     fn pressed(&mut self, i: usize, kind: u8, v: u8) -> bool {
         if kind != 0xb0 {
             return v >= 64;
