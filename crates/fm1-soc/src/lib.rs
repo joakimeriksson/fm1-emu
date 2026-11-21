@@ -6,7 +6,7 @@
 //!   0x5000_0-    GPIO ports A..H (0x40 stride: OUT+0, DIR+8, DIE+C, PU+10, PD+14)
 //!   0x5100_|     IOMAP
 //!   0x1000_-0x1002  clock
-//!   0x1080_0/0x1090_0  TIMER4/TIMER5 (CNT reads = synthetic progress)
+//!   0x1080_0/0x1090_0  TIMER4/TIMER5 (periph.rs: their counts follow the cycle clock)
 //!   0x11c0_0-    SPI0 = external NOR flash (model in spiflash.rs; CS = PD0)
 //!   0x11d0_0-    SPI1 = LCD (ST7789-class 240×240, model in lcd.rs)
 //!   0x1180_0-    USB
@@ -109,10 +109,6 @@ enum Region {
     Unknown,
 }
 
-// The peripheral window, by table: `Soc::region` was a chain of some 30 compares with P33 near
-// its end, and OberVave, ZP-12 and FM1-DOOM touch P33 tens of millions of times a second (a
-// watchdog kick per round of their main loop; a quarter of FM1-DOOM's time was the chain).
-const SFR_LO: u32 = 0x10000;
 /// The FM-1's flash cache as harbor's cache probe measured it on a real FM-1 (2026-10-24,
 /// probes/cache.c): 32 KB (a 32 KB footprint hits, 64 KB misses), 64-byte lines (the cost doubles
 /// with the stride up to 64), ~300 cycles a miss (1.29 us a load at a 64-byte stride). 4-way with LRU
@@ -163,6 +159,10 @@ impl XipCache {
 
 /// Below this nothing answers: an access is bus-invalid (the guards' "NULL page")
 const NULL_PAGE: u32 = 0x1000;
+// The peripheral window, by table: `Soc::region` was a chain of some 30 compares with P33 near
+// its end, and OberVave, ZP-12 and FM1-DOOM touch P33 tens of millions of times a second (a
+// watchdog kick per round of their main loop; a quarter of FM1-DOOM's time was the chain).
+const SFR_LO: u32 = 0x10000;
 const SFR_HI: u32 = 0x14000;
 
 /// The region of an address in the peripheral window (8-byte cells: every block there starts
@@ -196,7 +196,6 @@ static SFR_MAP: [Region; ((SFR_HI - SFR_LO) / 8) as usize] = {
     t
 };
 
-/// The SoC bus: XIP flash + data RAM + modeled peripherals + a logged stub.
 /// A cheap hasher for register addresses (the SoC's register map): `std`'s SipHash cost the
 /// SMK-37's stock firmware, which touches registers about a million times a second, a few
 /// percent of its time.
@@ -253,6 +252,7 @@ impl Board {
     }
 }
 
+/// The SoC bus: XIP flash + data RAM + modeled peripherals + a logged stub.
 pub struct Soc {
     pub board: Board,
     /// The FM-1's flash part (its JEDEC id; `set_flash_part`): the stock Puya unless asked.
@@ -312,7 +312,8 @@ pub struct Soc {
     pub ovl: Ram,
     /// SRAM banks at 0x01f00000 (cleared by the RAM early init).
     pub sram2: Ram,
-    /// monotonic "time" for peripheral counters
+    /// Reads so far of timer words the model does not know (`timer_read`): a read that counts,
+    /// so a polling loop that makes one is not skipped (`pure_read`).
     pub ticks: u64,
     /// Timers, audio DMA, ADC, interrupt controller and the front panel.
     pub periph: Periph,
@@ -419,15 +420,6 @@ struct Boot {
 /// The most `Soc::console` keeps: a mebibyte, of what a firmware writes to DBG_MSG for as long as
 /// it runs.
 pub const CONSOLE_MAX: usize = 1 << 20;
-
-fn dbg_line(addr: u32) -> &'static str {
-    match addr & !3 {
-        0x1eee240 => "wr_en",
-        0x1eee244 => "msg",
-        0x1eee248 => "msg_clr",
-        _ => "dbg",
-    }
-}
 
 impl Soc {
     /// After an erase or page program: the XIP window shows the flash chip, also where the
@@ -784,7 +776,6 @@ impl Soc {
         self.set_board(self.board);
     }
 
-    /// All unknown accesses so far — the peripheral bring-up TODO list.
     /// Advance the peripheral clock by `n` CPU cycles, moving any finished
     /// audio half out of RAM (int32 L/R holding a 24-bit sample in the low
     /// bits — Felucca writes Q15 << 7, audio.c OUT_SHIFT — so >> 8 to i16).
@@ -860,6 +851,7 @@ impl Soc {
             .find_map(|(r, base)| a.checked_sub(base).filter(|&o| (o as usize) < r.len()).map(|o| r.read8(o)))
     }
 
+    /// All unknown accesses so far — the peripheral bring-up TODO list.
     pub fn unknown_accesses(&self) -> &[UnknownAccess] {
         &self.unknown_log
     }
@@ -1121,14 +1113,10 @@ impl Soc {
         }
     }
 
+    /// A timer word `Periph::read` does not answer: its stored bits, and the read counted
+    /// (`ticks`). The timers' counts are all answered there, from the cycle clock.
     fn timer_read(&mut self, addr: u32) -> u32 {
-        // "time" base ticks so timeout/wait loops make progress; count
-        // registers report a moving value, the rest stored bits.
         self.ticks = self.ticks.wrapping_add(1);
-        if addr & 0xff == 0x04 {
-            let t = (self.ticks * 7) as u32;
-            return t;
-        }
         self.sfr_get(addr)
     }
 }
@@ -1415,8 +1403,6 @@ impl Soc {
                     // always, so polls finish)
                     let busy = (self.board == Board::Smk37 || self.lcd_timed) && self.periph.cycles < self.periph.spi1_done_at;
                     self.sfr_get(addr) | if busy { 0 } else { 0x8000 }
-                } else if addr == 0x11d10 {
-                    self.sfr_get(addr)
                 } else {
                     self.sfr_get(addr)
                 }
@@ -1529,8 +1515,7 @@ impl Soc {
                 self.flash.write(addr, value);
                 self.sync_xip();
             }
-            Region::Iomap => self.sfr_set(addr, value),
-            Region::Ana => self.sfr_set(addr, value),
+            Region::Iomap | Region::Ana => self.sfr_set(addr, value),
             Region::P33 => {
                 self.p33.write(addr, value);
                 self.p33_event();
@@ -1560,17 +1545,7 @@ impl Soc {
                 }
                 self.sfr_set(addr, value)
             }
-            Region::Uart1 => {
-                if !self.periph.write(addr, value) {
-                    self.sfr_set(addr, value);
-                }
-            }
-            Region::Adc => {
-                if !self.periph.write(addr, value) {
-                    self.sfr_set(addr, value);
-                }
-            }
-            Region::Timer => {
+            Region::Uart1 | Region::Adc | Region::Timer => {
                 if !self.periph.write(addr, value) {
                     self.sfr_set(addr, value);
                 }
@@ -1593,14 +1568,15 @@ impl Soc {
                 _ => {}
             },
             Region::Dbg => {
-                match dbg_line(addr) {
-                    "msg" => {
+                // (0x1EEE240 is the box's write enable: stored)
+                match addr & !3 {
+                    0x1eee244 => {
                         // (its first `CONSOLE_MAX` bytes: only fm1-emu reads it, the start of it)
                         if self.console.len() < CONSOLE_MAX {
                             self.console.extend_from_slice(&value.to_le_bytes());
                         }
                     }
-                    "msg_clr" => self.dbg_cause &= !value,
+                    0x1eee248 => self.dbg_cause &= !value,
                     _ => {}
                 }
                 self.sfr_set(addr, value);
@@ -1734,11 +1710,7 @@ const BOOT_TRIM: u32 = 0xf80a;
 pub fn write_boot_info(soc: &mut Soc, at: u32, flash: &[u8]) -> u32 {
     let mut head = [0u8; 32];
     head.copy_from_slice(&flash[..32]);
-    let mut key: u16 = 0xffff;
-    for b in head.iter_mut() {
-        *b ^= key as u8;
-        key = (key << 1) ^ if key & 0x8000 != 0 { 0x1021 } else { 0 };
-    }
+    fwsc::unmask(&mut head, 0xffff);
     let chip = fwsc::flash_key(flash).unwrap_or(0) as u32;
     let words = [at + 24, 0x4000, XIP_BASE, chip | BOOT_TRIM << 16, u32::MAX, u32::MAX];
     for (i, w) in words.iter().enumerate() {

@@ -474,7 +474,6 @@ pub struct Due {
     pub usb_frame: bool,
     /// The watchdog ran out (the SoC resets the chip).
     pub wdt: bool,
-    pub actions: Vec<Action>,
 }
 
 impl Periph {
@@ -671,7 +670,6 @@ impl Periph {
             }
             let (_, a) = self.script.pop_front().unwrap();
             self.apply(&a);
-            due.actions.push(a);
         }
         self.next_due = self.next_event();
         due

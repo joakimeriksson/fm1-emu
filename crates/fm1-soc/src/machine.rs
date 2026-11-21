@@ -950,12 +950,11 @@ fn run_dual_from(
     Ok(done)
 }
 
-/// `run_cpu1`, with a fault stopping core 1 for good: the chip's core 1 faults there and stops;
-/// cpu0 goes on alone (a firmware built for a core 1 that fails falls back to one core:
-/// felucca-bsp's cpu2_fallback).
 /// `run_cpu1` for `run_dual`: a fault on core 1 halts the machine, unless the core survives
-/// (`Soc::cpu1_survives`): then it stops alone and cpu0 goes on, and the hardware lock it
-/// held is released (cpu0 would spin on `lockset` for ever, nothing to hand the machine to).
+/// (`Soc::cpu1_survives`): then it stops alone, as the chip's core 1 faults there and stops, and
+/// cpu0 goes on (a firmware built for a core 1 that fails falls back to one core: felucca-bsp's
+/// cpu2_fallback), and the hardware lock it held is released (cpu0 would spin on `lockset` for
+/// ever, nothing to hand the machine to).
 fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     match run_cpu1(c1, soc, cycles, until) {
         Ok(k) => Ok(k),
