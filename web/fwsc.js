@@ -121,6 +121,16 @@ export function appFromPackage(file) {
 // fetch; a test's its own.)
 const HUB = "https://thefirmwarehub.com/";
 const hubCatalogs = new WeakMap();
+// A URL from the Hub's catalog (a firmware's site, its package; `base` for a relative one), which the page fetches or
+// makes a link of: an https one, else null. A "javascript:" URL as a link's href would run in the page when clicked.
+export function httpsUrl(u, base) {
+  try {
+    const url = new URL(u, base);
+    return url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 // A Hub package's version from its name, <id>-<version>.fwsc (a build id after "+" left off).
 // The Hub's own "version" is its latest release tag, which runs ahead of the package it hosts
 // when it has not taken a release's package yet. Null when the name is not of that form.
@@ -140,9 +150,10 @@ function hubCatalog(fetchFn) {
 async function hubPackage(id, fetchFn) {
   try {
     const h = (await hubCatalog(fetchFn))?.firmwares?.find((h) => h.id === id);
-    if (!h?.pkg) return null;
+    const url = h?.pkg && httpsUrl(h.pkg, HUB);
+    if (!url) return null;
     const version = packageVersion(h.id, h.pkg) ?? (h.version == null ? null : String(h.version));
-    return { url: new URL(h.pkg, HUB).href, version };
+    return { url, version };
   } catch {
     return null;
   }
@@ -168,7 +179,8 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
   }
   const out = [];
   for (const h of hub?.firmwares || []) {
-    if (!h.pkg || known.has(h.id) || skipped[h.id]) continue;
+    const pkg = h.pkg && httpsUrl(h.pkg, HUB);
+    if (!pkg || known.has(h.id) || skipped[h.id]) continue;
     out.push({
       id: h.id,
       name: h.name,
@@ -176,8 +188,8 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
       author: h.author || "",
       license: h.lic || "see the repository",
       about: h.what || "",
-      repo: h.repo ? `https://github.com/${h.repo}` : h.site || hubCardUrl(h.id),
-      package: new URL(h.pkg, HUB).href,
+      repo: h.repo ? `https://github.com/${h.repo}` : httpsUrl(h.site) || hubCardUrl(h.id),
+      package: pkg,
       hub: h.id,
       untested: true,
     });

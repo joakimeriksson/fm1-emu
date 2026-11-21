@@ -2,7 +2,7 @@
 // version comes) is found again through the Hub's catalog.json.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fetchPackage, hubNewcomers } from './fwsc.js';
+import { fetchPackage, hubNewcomers, httpsUrl } from './fwsc.js';
 
 test('a Hub package that has gone is fetched as the one the Hub lists now', async () => {
   const asked = [];
@@ -65,4 +65,27 @@ test("the Hub's newcomers: listed with a package, not in the catalog by either i
   assert.equal(asked, 1 + 2, 'one catalog read, then the old and the new package');
   // a Hub that cannot be read: nothing new, the page as it is
   assert.deepEqual(await hubNewcomers(catalog, async () => new Response('', { status: 503 })), []);
+});
+
+test("a newcomer's links are https: another scheme in the Hub's catalog is no link, and no package", async () => {
+  const hub = { firmwares: [
+    { id: 'a', pkg: 'fw/a-1.fwsc', site: 'javascript:alert(document.domain)' },
+    { id: 'b', pkg: 'fw/b-1.fwsc', site: 'http://b.example/' },
+    { id: 'c', pkg: 'fw/c-1.fwsc', site: 'https://c.example/synth' },
+    { id: 'd', pkg: 'fw/d-1.fwsc', site: 'not a url' },
+    { id: 'e', pkg: 'javascript:alert(1)//e-1.fwsc', site: 'https://e.example/' },
+    { id: 'f', pkg: 'http://[', site: 'https://f.example/' },
+    { id: 'g', pkg: 'https://cdn.example/g-1.fwsc' },
+  ] };
+  const fetchFn = async () => new Response(JSON.stringify(hub));
+  const got = await hubNewcomers({ firmwares: [] }, fetchFn);
+  assert.deepEqual(got.map((f) => [f.id, f.repo]), [
+    ['a', 'https://thefirmwarehub.com/#fw-a'], ['b', 'https://thefirmwarehub.com/#fw-b'], ['c', 'https://c.example/synth'],
+    ['d', 'https://thefirmwarehub.com/#fw-d'], ['g', 'https://thefirmwarehub.com/#fw-g']]);
+  assert.equal(got.at(-1).package, 'https://cdn.example/g-1.fwsc');
+  // the package fallback takes no other scheme from the Hub either
+  await assert.rejects(fetchPackage({ id: 'e', package: 'https://thefirmwarehub.com/fw/e-0.fwsc', hub: 'e' },
+    async (url) => (url.endsWith('catalog.json') ? new Response(JSON.stringify(hub)) : new Response('', { status: 404 }))), /e-0\.fwsc: 404/);
+  assert.equal(httpsUrl('fw/x.fwsc', 'https://thefirmwarehub.com/'), 'https://thefirmwarehub.com/fw/x.fwsc');
+  assert.equal(httpsUrl(undefined), null);
 });
