@@ -199,8 +199,10 @@ impl Gen<'_> {
             if w == 2 {
                 self.a.alu_ri(Alu::And, RSI, !1u32); // a halfword is the one at addr & !1 (Soc read16)
             }
+            // (a window shorter than the access holds none of it: every offset is at or above
+            // the 0 the length less the width then gives, as the AArch64 code)
             self.a.alu_ri(Alu::Cmp, RSI, len.saturating_sub(w as u32));
-            self.a.jcc(Cc::A, miss);
+            self.a.jcc(if len < w as u32 { Cc::Ae } else { Cc::A }, miss);
             // (esi was written as 32 bits: rsi is the zero-extended offset)
             match (w, signed) {
                 (4, _) => self.a.ld(RAX, mx(base_reg, RSI)),
@@ -235,8 +237,9 @@ impl Gen<'_> {
         }
         self.a.mov_rr(RSI, RAX);
         self.a.alu_ri(Alu::Sub, RSI, mem.ram_base);
+        // (RAM shorter than the access: none of it inline, as `load`)
         self.a.alu_ri(Alu::Cmp, RSI, mem.ram_len.saturating_sub(w as u32));
-        self.a.jcc(Cc::A, slow);
+        self.a.jcc(if mem.ram_len < w as u32 { Cc::Ae } else { Cc::A }, slow);
         if !mem.ram_code.is_null() {
             self.a.mov_rr(RDX, RSI);
             self.a.sh_i(Sh::Shr, RDX, 2);

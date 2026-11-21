@@ -39,7 +39,15 @@ mod x64;
 #[cfg(target_arch = "x86_64")]
 use x64::compile;
 
-/// Host view of the guest memory the inline paths read and write directly.
+/// Host view of the guest memory the inline paths read and write directly (`Bus::jit_mem`).
+/// What a bus that gives one promises a Cpu that compiles code on it, for as long as the two
+/// run together: `ram` is `ram_len` bytes to read and write and `xip` `xip_len` bytes to read
+/// (a length of 0: no such window, its pointer is never used), neither moving nor going while a
+/// call of `Cpu::run_fast` lasts; `ram_code`, unless null, a byte for each 4 bytes of RAM (a
+/// store reads the one of the word it starts in); the bases and lengths the same in every
+/// answer (compiled code holds them as constants). Compiled code reads and writes those bytes
+/// itself, between the bus's own accesses, never during one.
+/// (The wasm JIT holds the pointers as constants too, jit_wasm.rs: there they never change.)
 #[derive(Clone, Copy, Debug)]
 pub struct JitMem {
     pub ram: *mut u8,
@@ -1061,9 +1069,12 @@ impl Gen<'_> {
                 self.a.mov32(2, !1u32);
                 self.a.and(3, 3, 2); // a halfword is the one at addr & !1 (Soc read16)
             }
+            // (a window shorter than the access holds none of it: every offset is at or above
+            // the 0 the length less the width then gives. `>` there let offset 0 in, to read
+            // past the window's end, or through the null base of a window that is not there)
             self.a.mov32(2, len.saturating_sub(w as u32));
             self.a.cmp(3, 2);
-            self.a.b_cond(AC::Hi, miss);
+            self.a.b_cond(if len < w as u32 { AC::Hs } else { AC::Hi }, miss);
             match (w, signed) {
                 (4, _) => self.a.ldr_u(0, base_reg, 3),
                 (2, false) => self.a.ldrh_u(0, base_reg, 3),
@@ -1096,9 +1107,10 @@ impl Gen<'_> {
         }
         self.a.mov32(2, mem.ram_base);
         self.a.sub(3, 0, 2);
+        // (RAM shorter than the access: none of it inline, as `load`)
         self.a.mov32(2, mem.ram_len.saturating_sub(w as u32));
         self.a.cmp(3, 2);
-        self.a.b_cond(AC::Hi, slow);
+        self.a.b_cond(if mem.ram_len < w as u32 { AC::Hs } else { AC::Hi }, slow);
         if !mem.ram_code.is_null() {
             self.a.lsr_imm(2, 3, 2);
             self.a.ldrb_u(2, FLAGS, 2);
@@ -2180,6 +2192,54 @@ mod tests {
         assert!(j.kept.ops.is_empty() && j.body(0).is_none());
         #[cfg(target_arch = "x86_64")]
         assert!(j.kept.slots.is_empty());
+    }
+    /// An inline window shorter than an access holds none of it: a load or store at its base
+    /// takes the bus (here one that reads 0xbb bytes and lets no write land), where a window
+    /// just long enough is read and written in place.
+    #[test]
+    fn a_window_shorter_than_the_access_takes_the_bus() {
+        struct Short { ram: [u8; 8], xip: [u8; 8], len: u32, stores: u32 }
+        const RAM: u32 = 0x100;
+        const XIP: u32 = 0x0300_0000;
+        impl Bus for Short {
+            fn read8(&mut self, _: u32) -> u8 { 0xbb }
+            fn read16(&mut self, _: u32) -> u16 { 0xbbbb }
+            fn read32(&mut self, _: u32) -> u32 { 0xbbbb_bbbb }
+            fn write8(&mut self, _: u32, _: u8) { self.stores += 1 }
+            fn write16(&mut self, _: u32, _: u16) { self.stores += 1 }
+            fn write32(&mut self, _: u32, _: u32) { self.stores += 1 }
+            fn tick_room(&self) -> u64 { 1000 }
+            fn next_tick_due(&self) -> bool { false }
+            fn jit_mem(&mut self) -> Option<JitMem> {
+                Some(JitMem { ram: self.ram.as_mut_ptr(), ram_base: RAM, ram_len: self.len, ram_code: std::ptr::null(), xip: self.xip.as_ptr(), xip_base: XIP, xip_len: self.len })
+            }
+        }
+        let mut j = Jit::new(false).unwrap();
+        let mut id = 0;
+        // (the block at an XIP pc: no RAM guard, so no RAM under it)
+        let mut go = |fast: Fast, bus: &mut Short, base: u32| {
+            let mem = bus.jit_mem().unwrap();
+            let ops = [op(fast)];
+            let code = (0..=HOT).find_map(|_| j.entry::<Short>(id, &ops, &[], None, 0x0200_0000, &mem, false, false)).unwrap().code;
+            id += 1;
+            let mut cpu = Cpu::new(0);
+            (cpu.regs[1], cpu.regs[2]) = (0x4433_2211, base);
+            assert_eq!(unsafe { run(code, &mut cpu, bus, &mem, 0, 1, false) }.0, 1, "{fast:?}");
+            cpu.regs[0]
+        };
+        for w in [1u8, 2, 4] {
+            let all = u32::MAX >> (32 - 8 * w as u32);
+            for (len, inline) in [(w as u32 - 1, false), (w as u32, true)] {
+                let mut bus = Short { ram: [0x11; 8], xip: [0x22; 8], len, stores: 0 };
+                let ld = Fast::Ld { d: 0, b: Base::Reg(2), off: 0, w, signed: false };
+                assert_eq!(go(ld, &mut bus, RAM), all & if inline { 0x1111_1111 } else { 0xbbbb_bbbb }, "RAM of {len}, {w} wide");
+                assert_eq!(go(ld, &mut bus, XIP), all & if inline { 0x2222_2222 } else { 0xbbbb_bbbb }, "XIP of {len}, {w} wide");
+                go(Fast::St { s: 1, b: Base::Reg(2), off: 0, w }, &mut bus, RAM);
+                let stored = u32::from_le_bytes(bus.ram[..4].try_into().unwrap());
+                let want = if inline { (0x1111_1111 & !all) | (0x4433_2211 & all) } else { 0x1111_1111 };
+                assert_eq!((stored, bus.stores), (want, !inline as u32), "RAM of {len}, a store {w} wide");
+            }
+        }
     }
     #[test]
     fn ram_chain_rejects_changed_target_and_respects_budget() {
