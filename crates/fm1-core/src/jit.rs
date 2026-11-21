@@ -908,9 +908,22 @@ impl Gen<'_> {
             Op::Or => a.orr(0, 0, 1),
             Op::Xor => a.eor(0, 0, 1),
             Op::Mul => a.mul(0, 0, 1),
-            Op::Shl => a.lslv(0, 0, 1),
-            Op::Shr => a.lsrv(0, 0, 1),
-            Op::Sar => a.asrv(0, 0, 1),
+            // the count is w1's low 8 bits, and 32 and up shift everything out (`shift32`);
+            // lslv/lsrv/asrv take it mod 32, so a larger count gives 0, or for >>> shifts by 31
+            // (w9 clobbered)
+            Op::Shl | Op::Shr => {
+                a.and_mask(1, 1, 8, 0);
+                if matches!(op, Op::Shl) { a.lslv(0, 0, 1) } else { a.lsrv(0, 0, 1) }
+                a.cmp_imm(1, 31);
+                a.csel(0, 0, ZR, AC::Ls);
+            }
+            Op::Sar => {
+                a.and_mask(1, 1, 8, 0);
+                a.movz(9, 31, 0);
+                a.cmp_imm(1, 31);
+                a.csel(1, 1, 9, AC::Ls);
+                a.asrv(0, 0, 1);
+            }
         }
     }
     /// w1 = an A4/BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg`
@@ -1340,14 +1353,23 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.a.bind(taken);
             g.chain(next_pc, count);
         }
-        // (the multiply-accumulates 7 / 8 read d too, and the rounding conversions other than
-        // trunc have no single A64 instruction here: through the interpreter's executor)
-        Fast::FOp { d, a, b, op } if matches!(op, 0..=6 | 0x1f | 0x5f | 0x8f | 0x9f) => {
+        // (the multiply-accumulates 7 / 8 read d too, min / max are `fminmax`, and the rounding
+        // conversions other than trunc have no single A64 instruction here: through the
+        // interpreter's executor)
+        Fast::FOp { d, a, b, op } if matches!(op, 0..=3 | 0x1f | 0x5f | 0x8f | 0x9f) => {
             g.ld_reg(0, a);
             match op {
                 0x1f | 0x5f => {
                     g.a.fmov_s_w(0, 0);
                     if op == 0x1f { g.a.fcvtzs(0, 0) } else { g.a.fcvtzu(0, 0) }
+                    // a NaN goes as the infinity of its sign (`fpu`): w1 = sign ^ 0x7fffffff /
+                    // !sign, w1 when unordered
+                    g.a.fmov_w_s(1, 0);
+                    g.a.asr_imm(1, 1, 31);
+                    if op == 0x1f { g.a.mov32(2, 0x7fff_ffff); } else { g.a.mov32(2, u32::MAX); }
+                    g.a.eor(1, 1, 2);
+                    g.a.fcmp(0, 0);
+                    g.a.csel(0, 1, 0, AC::Vs);
                 }
                 0x8f | 0x9f => {
                     if op == 0x8f { g.a.scvtf(0, 0) } else { g.a.ucvtf(0, 0) }
@@ -1357,9 +1379,13 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     g.ld_reg(1, b);
                     g.a.fmov_s_w(0, 0);
                     g.a.fmov_s_w(1, 1);
-                    let opc = match op { 0 => 0x1e20_2800, 1 => 0x1e20_3800, 2 => 0x1e20_0800, 3 => 0x1e20_1800, 5 => 0x1e20_7800, _ => 0x1e20_6800 };
+                    let opc = match op { 0 => 0x1e20_2800, 1 => 0x1e20_3800, 2 => 0x1e20_0800, _ => 0x1e20_1800 };
                     g.a.fop(opc, 0, 0, 1);
                     g.a.fmov_w_s(0, 0);
+                    // every NaN is 0x7f800001 (`fnan`)
+                    g.a.fcmp(0, 0);
+                    g.a.mov32(1, 0x7f80_0001);
+                    g.a.csel(0, 1, 0, AC::Vs);
                 }
             }
             g.st_reg(0, d);
@@ -1569,14 +1595,14 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::BitExt { d, s, p, l, signed } => {
             let (p, l) = (p as u32 & 31, l as u32 & 31);
             g.ld_reg(0, s); g.a.lsr_imm(0, 0, p);
-            if l != 0 {
-                if signed { g.a.sbfx(0, 0, 0, l); } else { g.a.ubfx(0, 0, 0, l); }
-            }
+            // (a width of 0 gives 0, `bit_extract`)
+            if l == 0 { g.a.movz(0, 0, 0); } else if signed { g.a.sbfx(0, 0, 0, l); } else { g.a.ubfx(0, 0, 0, l); }
             g.st_reg(0, d);
         }
         Fast::BitIns { d, s, p, l } => {
+            // (a width of 0 changes nothing, `bit_insert`)
             let (p, l) = (p as u32 & 31, l as u32 & 31);
-            let mask = if l == 0 { u32::MAX } else { (1u32 << l) - 1 };
+            let mask = (1u32 << l) - 1;
             g.ld_reg(0, s); g.ld_reg(1, d);
             g.a.mov32(2, mask); g.a.and(0, 0, 2); g.a.lsl_imm(0, 0, p);
             g.a.mov32(2, !(mask << p)); g.a.and(1, 1, 2); g.a.orr(0, 0, 1);
@@ -1603,7 +1629,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.ind_brk(KEEP, count, true);
         }
         Fast::PopRets => {
-            g.a.ldr(0, CPU, off_sp()); g.load(4, false, idx); g.a.str(0, CPU, off_rets());
+            g.a.ldr(0, CPU, off_sp()); g.load(4, false, idx);
+            g.a.mov32(1, crate::RETS_MASK); g.a.and(0, 0, 1); g.a.str(0, CPU, off_rets());
             g.a.ldr(0, CPU, off_sp()); g.a.add_imm(0, 0, 4); g.a.str(0, CPU, off_sp());
             bus_used = true;
         }
@@ -1635,10 +1662,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             match k {
                 0 => g.a.mvn(0, 0),
                 1 => g.a.neg(0, 0),
-                // (i32::MIN stays i32::MIN, as wrapping_abs)
+                // (saturating: i32::MIN gives i32::MAX, the sign of the negated i32::MIN flips it)
                 2 => {
                     g.a.cmp_imm(0, 0);
                     g.a.cneg(0, 0, AC::Lt);
+                    g.a.asr_imm(1, 0, 31);
+                    g.a.eor(0, 0, 1);
                 }
                 3 => g.a.rev(0, 0),
                 4 => g.a.clz(0, 0),
@@ -1650,12 +1679,11 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     g.a.cmp(0, 1);
                     g.a.csel(0, 1, 0, AC::Lt);
                 }
+                // (sat16 (u): an unsigned value into 0..65535)
                 _ => {
-                    g.a.cmp_imm(0, 0);
-                    g.a.csel(0, ZR, 0, AC::Lt);
                     g.a.mov32(1, 65535);
                     g.a.cmp(0, 1);
-                    g.a.csel(0, 1, 0, AC::Gt);
+                    g.a.csel(0, 1, 0, AC::Hi);
                 }
             }
             g.st_reg(0, d);
@@ -1750,7 +1778,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                 }
                 k += 1;
             }
-            if post {
+            // (a load into its own base keeps the loaded word, as the interpreter)
+            if post && (store || mask >> (base & 15) & 1 == 0) {
                 g.add_imm(0, KEEP, if down { 0 } else { 4 * n });
                 g.st_reg(0, base & 15);
             }

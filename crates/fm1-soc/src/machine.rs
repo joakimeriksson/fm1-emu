@@ -1662,13 +1662,14 @@ mod tests {
         assert_eq!(&cpu1[18..20], &testset(2));
         let regs = [(2, WORD), (3, PASSES), (6, XIP_BASE)];
         let mut last = None;
-        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0x80)], false, 8, |s, cpu, c1, soc| {
+        // (a taken byte is 0xff: testset leaves 0xff, an FM-1)
+        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0xff)], false, 8, |s, cpu, c1, soc| {
             if let Some((i0, i1)) = last {
                 assert_eq!(cpu.insn_count - i0, SLICE as u64, "cpu0's instructions in slice {s}");
                 assert!(c1.insn_count - i1 >= SLICE as u64 - 64, "cpu1 ran {} instructions in slice {s}", c1.insn_count - i1);
             }
             last = Some((cpu.insn_count, c1.insn_count));
-            assert_eq!(word(soc, WORD) & 0xff, 0x80, "the byte stays taken");
+            assert_eq!(word(soc, WORD) & 0xff, 0xff, "the byte stays taken");
         });
     }
 

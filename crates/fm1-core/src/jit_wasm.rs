@@ -796,7 +796,7 @@ impl Gen<'_> {
         self.end();
     }
 
-    /// push alu(op, local a, local b) (wasm shifts take the count mod 32, as `alu`)
+    /// push alu(op, local a, local b)
     fn alu(&mut self, op: Op) {
         match op {
             Op::RSub => {
@@ -813,6 +813,36 @@ impl Gen<'_> {
                 self.op(I32_AND);
                 return;
             }
+            // the count is b's low 8 bits, and 32 and up shift everything out (`shift32`); wasm
+            // takes it mod 32, so a larger count gives 0, or for >>> shifts by 31
+            Op::Shl | Op::Shr => {
+                self.get(L_A);
+                self.get(L_B);
+                self.op(if matches!(op, Op::Shl) { I32_SHL } else { I32_SHR_U });
+                self.i32c(0);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(32);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                return;
+            }
+            Op::Sar => {
+                self.get(L_A);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                self.op(I32_SHR_S);
+                return;
+            }
             _ => {}
         }
         self.get(L_A);
@@ -824,10 +854,7 @@ impl Gen<'_> {
             Op::Or => I32_OR,
             Op::Xor => I32_XOR,
             Op::Mul => I32_MUL,
-            Op::Shl => I32_SHL,
-            Op::Shr => I32_SHR_U,
-            Op::Sar => I32_SHR_S,
-            Op::RSub | Op::AndNot => unreachable!(),
+            Op::RSub | Op::AndNot | Op::Shl | Op::Shr | Op::Sar => unreachable!(),
         });
     }
     /// local b = an A4 / BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg`
@@ -1257,22 +1284,22 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 g.ld_reg(s);
                 g.i32c(p);
                 g.op(I32_SHR_U);
-                if signed {
-                    if l != 0 {
-                        g.i32c(32 - l);
-                        g.op(I32_SHL);
-                        g.i32c(32 - l);
-                        g.op(I32_SHR_S);
-                    }
+                // (a width of 0 gives 0, `bit_extract`)
+                if signed && l != 0 {
+                    g.i32c(32 - l);
+                    g.op(I32_SHL);
+                    g.i32c(32 - l);
+                    g.op(I32_SHR_S);
                 } else {
-                    g.i32c(if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) });
+                    g.i32c((1u32 << l).wrapping_sub(1));
                     g.op(I32_AND);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
             Fast::BitIns { d, s, p, l } => {
+                // (a width of 0 changes nothing, `bit_insert`)
                 let (p, l) = (p as u32 & 31, l as u32 & 31);
-                let mask = if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) };
+                let mask = (1u32 << l).wrapping_sub(1);
                 g.get(L_CPU);
                 g.ld_reg(d);
                 g.i32c(!(mask << p));
@@ -1373,33 +1400,6 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(F32_REINTERPRET_I32);
                         g.op(match op { 0 => F32_ADD, 1 => F32_SUB, 2 => F32_MUL, _ => F32_DIV });
                     }
-                    5 | 6 => {
-                        // a' = a != a ? b : a; b' = b != b ? a' : b; a' < b' ? a' : b' (max: >)
-                        g.ld_reg(a);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FA);
-                        g.ld_reg(b);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.op(if op == 5 { F32_LT } else { F32_GT });
-                        g.op(SELECT);
-                    }
                     0x8f | 0x9f => {
                         g.ld_reg(a);
                         g.op(if op == 0x8f { F32_CONVERT_I32_S } else { F32_CONVERT_I32_U });
@@ -1422,6 +1422,36 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 }
                 if !to_int {
                     g.op(I32_REINTERPRET_F32);
+                }
+                // NaNs as `fpu` has them: arithmetic gives 0x7f800001, ftof the input's sign |
+                // 0x7fc00000, ftoi / ftou the range's end on the input's side
+                if !matches!(op, 0x8f | 0x9f) {
+                    g.set(L_A);
+                    match op {
+                        0..=3 => g.i32c(0x7f80_0001),
+                        _ if !to_int => {
+                            g.ld_reg(a);
+                            g.i32c(0x8000_0000);
+                            g.op(I32_AND);
+                            g.i32c(0x7fc0_0000);
+                            g.op(I32_OR);
+                        }
+                        _ => {
+                            g.ld_reg(a);
+                            g.i32c(31);
+                            g.op(I32_SHR_S);
+                            g.i32c(if k < 4 { 0x7fff_ffff } else { u32::MAX });
+                            g.op(I32_XOR);
+                        }
+                    }
+                    g.get(L_A);
+                    // the NaN test: on the result for arithmetic, on the input otherwise
+                    if matches!(op, 0..=3) { g.get(L_A); } else { g.ld_reg(a); }
+                    g.i32c(0x7fff_ffff);
+                    g.op(I32_AND);
+                    g.i32c(0x7f80_0000);
+                    g.op(I32_GT_U);
+                    g.op(SELECT);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
@@ -1596,7 +1626,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_SUB);
                     }
                     2 => {
-                        // |x| = (x ^ m) - m, m = x >> 31 (wrapping: the minimum stays)
+                        // |x| = (x ^ m) - m, m = x >> 31; saturating: the minimum gives the maximum
+                        // (^ its own sign)
                         g.get(L_A);
                         g.i32c(31);
                         g.op(I32_SHR_S);
@@ -1606,6 +1637,12 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_XOR);
                         g.get(L_B);
                         g.op(I32_SUB);
+                        g.set(L_A);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(31);
+                        g.op(I32_SHR_S);
+                        g.op(I32_XOR);
                     }
                     3 => {
                         // rev8: the bytes reversed
@@ -1634,7 +1671,15 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_CLZ);
                     }
                     5 => g.clamp(-32768, 32767),
-                    _ => g.clamp(0, 65535),
+                    // sat16 (u): an unsigned value into 0..65535
+                    _ => {
+                        g.i32c(65535);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(65535);
+                        g.op(I32_GT_U);
+                        g.op(SELECT);
+                    }
                 }
                 g.set(L_VAL);
                 g.st_reg_from(d, L_VAL);
@@ -1943,7 +1988,7 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
             Fast::PopRets => {
                 g.ld_field(off_sp()); g.set(L_ADDR);
                 g.load(4, false, idx);
-                g.get(L_CPU); g.get(L_VAL); g.mem_op(I32_STORE, 2, off_rets());
+                g.get(L_CPU); g.get(L_VAL); g.i32c(crate::RETS_MASK); g.op(I32_AND); g.mem_op(I32_STORE, 2, off_rets());
                 g.get(L_CPU); g.get(L_ADDR); g.i32c(4); g.op(I32_ADD);
                 g.mem_op(I32_STORE, 2, off_sp());
                 bus_used = true;
@@ -2017,7 +2062,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
 /// ftou in every rounding, itof, utof, and ftof in every rounding (fm1-isa's fpu.rs). Not the
 /// multiply-accumulates 7 / 8 (the executor, as jit.rs), nor an op the table does not decode.
 fn fop_inline(op: u8) -> bool {
-    matches!(op, 0..=3 | 5 | 6 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
+    // (fmin / fmax, `fminmax`, go through the interpreter)
+    matches!(op, 0..=3 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
 }
 
 static mut SELFTEST_DETAIL: String = String::new();
@@ -2038,15 +2084,18 @@ fn no_mem() -> JitMem {
     JitMem { ram: std::ptr::null_mut(), ram_base: 0, ram_len: 0, ram_code: std::ptr::null(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 }
 }
 
-/// The integer ops computed inline since the float ones (`Un`, `Div`) against the executor:
-/// every kind on the edge values (zero, the signs, the extremes, the halfword bounds) and
-/// random words, four register choices. The mismatches, 0 when all agree; the detail follows
+/// The integer ops computed inline since the float ones (`Un`, `Div`), the shifts by a register
+/// (its low 8 bits: 32 and up shift everything out) and the bit fields (`BitExt` / `BitIns`, with
+/// a width of 0 among them) against the executor: every kind on the edge values (zero, the signs,
+/// the extremes, the halfword bounds, shift counts about 32 and 256) and random words, four
+/// register choices. The mismatches, 0 when all agree; the detail follows
 /// `fop_selftest`'s in `SELFTEST_DETAIL`.
 pub fn int_selftest() -> u32 {
     let mem = no_mem();
     let specials: [u32; 28] = [0, 1, 2, 3, 0xffff_ffff, 0xffff_fffe, 0x8000_0000, 0x7fff_ffff, 0x8000_0001, 0x7fff_fffe,
         0x8000, 0x7fff, 0xffff, 0x1_0000, 0xffff_8000, 0xffff_7fff, 0xffff_0000, 0x0102_0304, 0x8070_6050, 0x00ff_ff00,
         0xdead_beef, 10, 0xffff_fff6, 7, 0xffff_fff9, 0x4000_0000, 0xc000_0000, 0x12345678];
+    let specials: Vec<u32> = specials.iter().copied().chain([31, 32, 33, 63, 255, 256, 0x1_0020, 0xffff_ff1f]).collect();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
     let n = specials.len();
@@ -2066,6 +2115,15 @@ pub fn int_selftest() -> u32 {
         }
         for k in 0..4u8 {
             ops.push(Fast::Div { d, a, b, k });
+        }
+        for op in [Op::Shl, Op::Shr, Op::Sar] {
+            ops.push(Fast::Alu3 { d, a, b, op });
+            ops.push(Fast::A4 { d, s: a, op, rk: 0, rv: b as u32 });
+        }
+        for (p, l) in [(0u8, 0u8), (7, 0), (31, 0), (0, 1), (0, 8), (4, 12), (16, 16), (31, 1), (1, 31)] {
+            ops.push(Fast::BitExt { d, s: a, p, l, signed: false });
+            ops.push(Fast::BitExt { d, s: a, p, l, signed: true });
+            ops.push(Fast::BitIns { d, s: a, p, l });
         }
     }
     for fast in ops {
@@ -2091,7 +2149,11 @@ pub fn int_selftest() -> u32 {
             // SAFETY: `f` is the module just installed, built for NoBus
             let k = unsafe { run::<NoBus>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) };
             if k != 1 || cpu.regs != want.regs || cpu.pc != want.pc {
-                let d = match fast { Fast::Un { d, .. } | Fast::Div { d, .. } => d as usize, _ => 0 };
+                let d = match fast {
+                    Fast::Un { d, .. } | Fast::Div { d, .. } | Fast::Alu3 { d, .. } | Fast::A4 { d, .. }
+                    | Fast::BitExt { d, .. } | Fast::BitIns { d, .. } => d as usize,
+                    _ => 0,
+                };
                 fail(format!("{fast:?}"), x, y, format!("ran {k}, r{d} {:08x}, the executor {:08x}", cpu.regs[d], want.regs[d]));
             }
         }
