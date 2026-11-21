@@ -105,12 +105,15 @@ test("a Hub catalog of another shape gives the newcomers it can, or none: the pa
 
 test('a package larger than a package can be is refused: by its stated length, else while it is read', async () => {
   const entry = { id: 'x', package: 'https://example.test/x.fwsc' };
-  // the server says how long: nothing is read
-  let read = 0;
-  const stated = new Response(new ReadableStream({ pull(c) { read++; c.enqueue(new Uint8Array(1)); c.close(); } }, { highWaterMark: 0 }),
+  // the server says how long: nothing is read, and the response is let go of (its connection would stay open)
+  let read = 0, dropped = false;
+  const stated = new Response(new ReadableStream({ pull(c) { read++; c.enqueue(new Uint8Array(1)); c.close(); }, cancel() { dropped = true; } }, { highWaterMark: 0 }),
     { headers: { 'content-length': String(MAX_PACKAGE + 1) } });
   await assert.rejects(fetchPackage(entry, async () => stated), /x\.fwsc: larger than 8 MB/);
   assert.equal(read, 0);
+  await new Promise(setImmediate);
+  assert.equal(dropped, true);
+  await assert.rejects(fetchPackage(entry, async () => ({ ok: true, headers: new Headers({ 'content-length': String(MAX_PACKAGE + 1) }) })), /larger than 8 MB/);
   // it does not say: the reading stops once past the limit (64 KiB at a time here, without end)
   let sent = 0, cancelled = false;
   const endless = new Response(new ReadableStream({ pull(c) { sent += 65536; c.enqueue(new Uint8Array(65536)); }, cancel() { cancelled = true; } },

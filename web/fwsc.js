@@ -207,7 +207,10 @@ export const hubCardUrl = (hubId) => `${HUB}#fw-${hubId}`;
 // that a link to something huge (?package= takes any https URL) is not read into memory.
 async function packageBytes(r, url) {
   const large = () => new Error(`${url}: larger than ${MAX_PACKAGE >> 20} MB, not a firmware package`);
-  if (Number(r.headers?.get("content-length")) > MAX_PACKAGE) throw large();
+  if (Number(r.headers?.get("content-length")) > MAX_PACKAGE) {
+    r.body?.cancel?.()?.catch(() => {});       // (not left to be read: the connection is given up)
+    throw large();
+  }
   const reader = r.body?.getReader?.();
   if (!reader) {
     const bytes = new Uint8Array(await r.arrayBuffer());
