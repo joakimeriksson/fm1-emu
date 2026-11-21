@@ -416,7 +416,8 @@ pub fn run(
     // the sectors last put in the project's state
     let mut saved: Sectors = Vec::new();
     let mut last_view = Instant::now();
-    // when the host last took frames, and the free run's start (wall time, emulated ms)
+    // when the host last took frames, and the free run's start (wall time, the machine's ms: none
+    // again when another machine is booted, whose clock starts at 0)
     let mut last_take = Instant::now();
     let mut free: Option<(Instant, u64)> = None;
     let mut last_flash = Instant::now();
@@ -475,6 +476,8 @@ pub fn run(
                     ctl.reset(&params);
                     saved = sectors;
                     due.clear();
+                    // (a free run is one machine's: its start is on that machine's clock)
+                    free = None;
                     if let Some((firmware, reply)) = loaded {
                         *params.firmware.lock().unwrap() = firmware;
                         *params.flash.lock().unwrap() = project_sectors(&saved);
@@ -521,6 +524,7 @@ pub fn run(
                     *params.halt.lock().unwrap() = None;
                     pot = u16::MAX;
                     due.clear();
+                    free = None;
                     ctl.reset(&params);
                     let mut v = shared.view.lock().unwrap();
                     (v.halted, v.speed) = (false, 0.0);

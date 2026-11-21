@@ -30,15 +30,18 @@ fn a_firmware_that_halts_is_shown_as_halted_with_the_reason() {
     let params = Arc::new(fm1_plugin::Fm1Params::default());
     let (tx, rx) = mpsc::channel();
     let (_midi, midi_rx) = rtrb::RingBuffer::new(64);
-    let (audio_tx, _audio) = rtrb::RingBuffer::new(16384);
+    let (audio_tx, audio) = rtrb::RingBuffer::new(16384);
     let (sh, p) = (shared.clone(), params.clone());
     let t = std::thread::spawn(move || engine::run(sh, p, rx, midi_rx, audio_tx));
     tx.send(Cmd::Block(1024)).unwrap();
     tx.send(Cmd::Boot { pkg: pkg.clone(), sectors: Vec::new() }).unwrap();
-    // it runs (in real time: nobody takes its audio), the window's view kept up to date
+    // it runs, the window's view kept up to date: flat out until the ring holds its lead (the block and
+    // the default lead, 2048 frames), and then, nobody taking its audio, in real time
     let lit = || shared.view.lock().unwrap().lcd.iter().filter(|&&p| p != 0).count();
     assert!(wait_for(10, || lit() > 1000), "the firmware did not start");
     assert!(params.halt.lock().unwrap().is_none());
+    assert!(wait_for(10, || audio.slots() >= 2048), "the ring was not filled");
+    std::thread::sleep(Duration::from_millis(300)); // (it runs in real time from 50 ms after the last frame taken)
 
     // the same package with the sector its entry is in overwritten in flash: its first instruction is none
     // (and a sector as the package has it, so what the project holds is not what the machine's flash differs by)
