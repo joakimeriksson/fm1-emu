@@ -115,12 +115,21 @@ fn a_state_the_host_loads_is_booted_and_initializing_again_is_not() {
         host_initializes(&link);
     };
     let wait = Duration::from_secs(10);
-    // the project opens. Then the host initializes again with the state as it is: the machine
-    // runs on, an export under way with it (a boot would end it)
+    // (with a sector as the package has it: the sectors the project opens with are then not the
+    // ones the machine's flash differs from the package by, which is what an export leaves there)
+    let same = fm1_soc::stock_from_package(&data.firmware.pkg, None).unwrap().flash[0x5000..0x6000].to_vec();
+    data.sectors.push(Sector { at: 0x5000, data: Arc::new(same) });
+    // the project opens. Then the host initializes again with the state as it is, the sectors the
+    // machine was booted with: it runs on, an export under way with it (a boot would end it)
     host_loads(&data);
     let export = engine.snapshot(&data.firmware);
     host_initializes(&link);
     assert_eq!(byte(&export.recv_timeout(wait).unwrap().expect("initializing again booted the machine again")), 0x56);
+    // and again with what that export put in the project, the machine's flash as it is now
+    assert!(!engine.params.flash.lock().unwrap().iter().any(|s| s.at == 0x5000));
+    let export = engine.snapshot(&data.firmware);
+    host_initializes(&link);
+    assert_eq!(byte(&export.recv_timeout(wait).unwrap().expect("initializing after an export booted the machine again")), 0x56);
 
     // the host loads another state of the same firmware (a preset, an undo): booted, with its sectors
     data.sectors[0].data = Arc::new(vec![0x73; 4096]);
@@ -131,8 +140,9 @@ fn a_state_the_host_loads_is_booted_and_initializing_again_is_not() {
     // and they stay the project's: the look at the flash every 2 s has nothing of the old machine's to put there
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(byte(&engine.params.flash.lock().unwrap()), 0x73);
+    let export = engine.snapshot(&data.firmware);
     host_initializes(&link);
-    assert_eq!(byte(&engine.snapshot(&data.firmware).recv_timeout(wait).unwrap().unwrap()), 0x73);
+    assert_eq!(byte(&export.recv_timeout(wait).unwrap().expect("initializing again booted the loaded state again")), 0x73);
 }
 
 #[test]
