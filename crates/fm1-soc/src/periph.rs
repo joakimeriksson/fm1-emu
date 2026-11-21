@@ -1847,4 +1847,214 @@ mod tests {
         p.cycles += 12_005;
         assert_eq!(p.read(0x10904), Some(0));
     }
+
+    /// A Periph with TIMER4 running and the idle skip on, at cycle 1000.
+    fn polled(hz: u64) -> Periph {
+        let mut p = Periph { hz, skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.write(0x10800, 1);
+        p
+    }
+
+    /// TIMER4's count read `gap` cycles after the read before: the cycles that read skipped.
+    fn poll(p: &mut Periph, gap: u64) -> u64 {
+        p.cycles += gap;
+        let (at, skipped) = (p.cycles, p.skipped);
+        p.read(0x10804).unwrap();
+        assert_eq!(p.cycles - at, p.skipped - skipped, "what the clock jumped is counted");
+        p.cycles - at
+    }
+
+    #[test]
+    fn timer4_polls_skip_from_the_third_close_read() {
+        // a delay loop on TIMER4's count: from the third read less than 64 cycles after the one
+        // before, each read jumps the clock to one cycle short of 20 us on (4800 cycles at 240
+        // MHz, 2000 at 100 MHz)
+        for (hz, cap) in [(CPU_HZ, 4800), (100_000_000, 2000)] {
+            let mut p = polled(hz);
+            assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, cap - 1, cap - 1], "{hz} Hz");
+            assert_eq!(p.next_due, 0, "and the run loop looks again");
+            // the count itself is the clock's, jumps included (24 MHz)
+            let (c, before) = (p.cycles, p.read(0x10804).unwrap());
+            assert_eq!(before as u64, (p.cycles - 1000) * 24_000_000 / hz);
+            assert_eq!(p.cycles, c + cap - 1);
+        }
+        // 63 cycles apart is close, 64 is not: reads that far apart never skip
+        let mut p = polled(CPU_HZ);
+        assert_eq!([poll(&mut p, 63), poll(&mut p, 63), poll(&mut p, 63)], [0, 0, 4799]);
+        let mut p = polled(CPU_HZ);
+        assert!((0..20).all(|_| poll(&mut p, 64) == 0));
+        // a read further off starts the count again: two more close ones before the next skip
+        let mut p = polled(CPU_HZ);
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 500), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 4799, 0, 0, 4799]);
+        // not with the skip off, nor with TIMER4 off (its count reads 0)
+        let mut p = polled(CPU_HZ);
+        p.skip_idle = false;
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0));
+        let mut p = polled(CPU_HZ);
+        p.write(0x10800, 0);
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0) && p.read(0x10804) == Some(0));
+    }
+
+    #[test]
+    fn timer4_polls_skip_to_the_next_event_and_not_in_an_isr() {
+        // an event sooner than 20 us on (a key due 1000 cycles after the third read): the clock
+        // stops one cycle short of it, the next tick is its cycle, and the key goes down there
+        let mut p = polled(CPU_HZ);
+        p.script.push_back((1030 + 1000, Action::Key { id: 5, down: true }));
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 999]);
+        assert!(!p.keys_down[5] && p.tick());
+        p.advance(0);
+        assert!(p.keys_down[5]);
+        // with the event the very next cycle, or already due, nothing is skipped
+        let mut p = polled(CPU_HZ);
+        p.script.push_back((1031, Action::Key { id: 5, down: true }));
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 0, 0]);
+        // reads in an ISR neither skip nor count as close reads: the two outside it, 20 cycles
+        // apart with the handler's between them, are the first and second
+        let mut p = polled(CPU_HZ);
+        p.in_isr = true;
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0));
+        p.in_isr = false;
+        assert_eq!(poll(&mut p, 10), 0);
+        p.in_isr = true;
+        assert_eq!(poll(&mut p, 10), 0);
+        p.in_isr = false;
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10)], [0, 4799]);
+    }
+
+    #[test]
+    fn idle_skips_to_one_cycle_short_of_the_next_event() {
+        // cpu0's `idle` with nothing pending: to the cycle before TIMER5's tick (PRD 600: 24000
+        // cycles on), which then comes with the next tick
+        let mut p = Periph { skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.idle();
+        assert_eq!((p.cycles, p.skipped, p.next_due), (1000 + 24_000 - 1, 23_999, 0));
+        assert!(!p.any_pending() && p.tick());
+        p.advance(0);
+        assert!(p.any_pending() && p.pending_irq_for(0).is_none(), "the tick is pending (and not enabled)");
+        // with an interrupt source pending it wakes at once: no skip
+        let at = p.cycles;
+        p.idle();
+        assert_eq!(p.cycles, at);
+        // nor with nothing to wait for (no event at all), nor with the skip off
+        let mut p = Periph { skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.idle();
+        assert_eq!((p.cycles, p.skipped), (1000, 0));
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.skip_idle = false;
+        p.idle();
+        assert_eq!((p.cycles, p.skipped), (1000, 0));
+    }
+
+    #[test]
+    fn timer5_alnk_and_the_os_tick_at_100_mhz() {
+        // their periods are whole cycles of the CPU clock, rounded down, and add up from there.
+        // At 240 MHz every one is exact (40 cycles a TIMER5 count, 5440 a frame); at 100 MHz
+        // TIMER5 is 16.67 cycles a count and a frame 2266.67:
+        let mut p = Periph { hz: 100_000_000, ..Periph::default() };
+        // TIMER5 at PRD 600 (10 kHz): 10000 cycles, exact; its count half way
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.advance(5_000);
+        assert_eq!((p.read(0x10904), p.t5_pending), (Some(300), false));
+        p.advance(4_999);
+        assert!(!p.t5_pending);
+        p.advance(1);
+        assert!(p.t5_pending);
+        // at PRD 601: 10016 cycles, not the 10016.67 of 601 counts (67 ppm short)
+        p.write(0x10900, 0x4000);
+        p.write(0x10908, 601);
+        p.write(0x10900, 0x4001);
+        for _ in 0..3 {
+            p.advance(10_015);
+            assert!(!p.t5_pending);
+            p.advance(1);
+            assert!(std::mem::take(&mut p.t5_pending));
+        }
+        p.write(0x10900, 0);
+        // the OS tick: 10 ms, 1,000,000 cycles
+        p.write(0x1eef0ec, 1);
+        p.advance(999_999);
+        assert!(!p.tick_pending);
+        p.advance(1);
+        assert!(p.tick_pending);
+        p.write(0x1eef0ec, 0x40);
+        // ALNK0 with halves of 64 frames (LEN 128 words): a half every 145066 cycles, not the
+        // 145066.67 of 64 frames (4.6 ppm short: after 3000 halves the DAC clock, which
+        // `audio_frames_at` counts exactly, is a frame behind the 192000 played)
+        p.write(0x12e1c, 0x01c1_0000);
+        p.write(0x12e20, 128);
+        p.write(0x12e00, 0x800);
+        let t0 = p.cycles;
+        for n in 0..3000u32 {
+            assert_eq!(p.advance(145_065).audio_half, None, "half {n}");
+            assert_eq!(p.advance(1).audio_half, Some((0x01c1_0000 + (n % 2) * 512, 128)), "half {n}");
+        }
+        assert_eq!(Periph::audio_frames_at(p.cycles - t0, p.hz), 3000 * 64 - 1);
+        // at 240 MHz: 348160 cycles, 64 frames to the cycle
+        let mut p = Periph::default();
+        p.write(0x12e20, 128);
+        p.write(0x12e00, 0x800);
+        for _ in 0..100 {
+            assert_eq!(p.advance(348_159).audio_half, None);
+            assert!(p.advance(1).audio_half.is_some());
+        }
+        assert_eq!(Periph::audio_frames_at(p.cycles, p.hz), 100 * 64);
+    }
+
+    #[test]
+    fn writes_that_leave_compiled_code_running_move_no_event() {
+        // the words `write` does not stop the run for (the port pins but PD0, the FM-1's ADC,
+        // TIMER4's period and TIMER5's count): with every timer, the OS tick and the audio DMA
+        // running, a write there changes neither when the next event is nor, the ADC's interrupt
+        // apart, when the run loop looks next
+        for board in [crate::Board::Fm1, crate::Board::Smk37] {
+            let mut p = Periph { board, ..Periph::default() };
+            p.write(0x10800, 1);
+            p.write(0x10908, 60_000);
+            p.write(0x10900, 1);
+            p.write(0x1eef0f4, 2_400_000);
+            p.write(0x1eef0ec, 1);
+            for i in 0..4u32 {
+                p.write(0x10408 + 0x100 * i, 50_000);
+                p.write(0x10400 + 0x100 * i, 1);
+            }
+            p.write(0x12e20, 256);
+            p.write(0x12e00, 0x800);
+            p.advance(1000);
+            let (event, due) = (p.next_event(), p.next_due);
+            assert!(event != u64::MAX && due == event);
+            let pins = (0x50000..0x50200u32).step_by(4).filter(|&a| a != 0x500c0);
+            for addr in pins.chain([0x10808, 0x10904]) {
+                for v in [0, 1, 0x1a, 0x5a5a_5a5a, !0] {
+                    p.write(addr, v);
+                    assert_eq!((p.next_event(), p.next_due), (event, due), "{board:?}: {addr:#x} = {v:#x}");
+                }
+            }
+            if board == crate::Board::Fm1 {
+                for (addr, v) in [(0x13104, !0), (0x13100, 0x50), (0x13100, 0x40), (0x13100, 0x70), (0x13100, 0x40), (0x13100, 0)] {
+                    p.write(addr, v);
+                    assert_eq!(p.next_event(), event, "{addr:#x} = {v:#x}");
+                }
+            }
+            // and the other way round, for every word `write` knows: one that moves any source's
+            // next event, or makes an interrupt pending, has the run loop look (`next_due` 0)
+            let timed = |p: &Periph| {
+                let t = [p.t5_next, p.alnk_next, p.tick_next, p.spi2_next, p.adc_next, p.spi1_irq_at, p.uart.next, p.uart.ot_next, p.usb_next, p.wdt_at];
+                (t, p.tmr.map(|t| t.next), p.any_pending())
+            };
+            let words = [0x10400..0x10920u32, 0x12100..0x12130, 0x12e00..0x12e40, 0x13100..0x13120, 0x50000..0x50200, 0x1eef000..0x1eef400];
+            for addr in words.into_iter().flatten().step_by(4) {
+                for v in [0, 1, 0x50, 0x800, 0x4001, 0x2_0003, !0, 1] {
+                    p.advance(0);
+                    let before = (timed(&p), p.next_due);
+                    p.write(addr, v);
+                    assert!(p.next_due == 0 || (timed(&p), p.next_due) == before, "{board:?}: {addr:#x} = {v:#x} moved an event unseen");
+                }
+            }
+        }
+    }
 }
