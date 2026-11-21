@@ -320,8 +320,10 @@ extern "C" fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx
     if PROF {
         cpu.profile_helper(unsafe { &*op });
     }
+    let code = bus.code_writes();
     let j = cpu.exec_fast(bus, unsafe { *op }, next_pc);
-    if bus.next_tick_due() {
+    // (a store of the op's to a word of RAM code: leave, as after `h_write`'s)
+    if bus.next_tick_due() || bus.code_writes() != code {
         ctx.brk = 1;
     }
     match j {
@@ -2096,7 +2098,7 @@ pub fn int_selftest() -> u32 {
             }
         }
     }
-    fails
+    fails + exits_selftest()
 }
 
 /// The mismatches `fop_selftest` and `int_selftest` found, the first of each op and register
@@ -2191,6 +2193,74 @@ pub fn fop_selftest() -> u32 {
                 }
             }
         }
+    }
+    fails
+}
+
+/// The self-tests' RAM: 64 bytes at `Probe::RAM` with a code flag per word, and a count of the
+/// writes to flagged words (`Bus::code_writes`). Every read through the bus gives `0xbb` bytes
+/// and no write through it lands, so a test tells an inline access from one that took the bus.
+struct Probe { ram: [u8; 64], code: [u8; 17], writes: u64, stores: u32 }
+impl Probe {
+    const RAM: u32 = 0x0100_0000;
+    fn new() -> Self { Probe { ram: [0x11; 64], code: [0; 17], writes: 0, stores: 0 } }
+    fn wrote(&mut self, a: u32) {
+        self.stores += 1;
+        if self.code.get((a.wrapping_sub(Self::RAM) >> 2) as usize).is_some_and(|&f| f != 0) {
+            self.writes += 1;
+        }
+    }
+    /// (the inline window: the first `len` bytes of the RAM)
+    fn mem(&mut self, len: u32) -> JitMem {
+        JitMem { ram: self.ram.as_mut_ptr(), ram_base: Self::RAM, ram_len: len, ram_code: self.code.as_ptr(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 }
+    }
+}
+impl Bus for Probe {
+    fn read8(&mut self, _: u32) -> u8 { 0xbb }
+    fn read16(&mut self, _: u32) -> u16 { 0xbbbb }
+    fn read32(&mut self, _: u32) -> u32 { 0xbbbb_bbbb }
+    fn write8(&mut self, a: u32, _: u8) { self.wrote(a) }
+    fn write16(&mut self, a: u32, _: u16) { self.wrote(a) }
+    fn write32(&mut self, a: u32, _: u32) { self.wrote(a) }
+    fn tick_room(&self) -> u64 { 1 << 40 }
+    fn next_tick_due(&self) -> bool { false }
+    fn code_writes(&self) -> Option<u64> { Some(self.writes) }
+}
+
+/// Where compiled code leaves, in the engine at hand (`int_selftest` adds its count): a store
+/// through the executor's helper to a word of RAM code ends the run after its instruction, as
+/// one through `h_write` does, and to any other word does not. The mismatches, described in
+/// `SELFTEST_DETAIL`.
+#[allow(static_mut_refs)]
+fn exits_selftest() -> u32 {
+    let mut fails = 0u32;
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            fails += 1;
+            unsafe { SELFTEST_DETAIL += &format!("{what}\n"); }
+        }
+    };
+    let bop = |fast| crate::BOp { fast, len: 2, careful: false, pair_head: false, glue: false };
+    let build = |blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem| {
+        let m = compile::<Probe>(blocks, mem, false, false);
+        let [r, w, o] = helpers::<Probe>(false);
+        // SAFETY: a plain byte slice; the host copies it before returning
+        unsafe { fm1_jit_compile(m.as_ptr(), m.len(), r, w, o) }
+    };
+    const PC: u32 = 0x0200_0000;
+    // `w[r2 ++= r3] = r1` (the executor's: no code of its own here), then `r4 = 99`
+    for flagged in [false, true] {
+        let mut bus = Probe::new();
+        bus.code[2] = flagged as u8;
+        let mem = bus.mem(64);
+        let f = build(&[(0, PC, vec![bop(Fast::StPostR { s: 1, b: 2, i: 3, w: 4 }), bop(Fast::MovI { d: 4, v: 99 })])], &mem);
+        let mut cpu = Cpu::new(PC);
+        (cpu.regs[1], cpu.regs[2], cpu.regs[3]) = (0x1234, Probe::RAM + 8, 4);
+        // SAFETY: `f` is the module just installed (0: the host could not), built for Probe
+        let k = if f == 0 { 0 } else { unsafe { run::<Probe>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) } };
+        let want = if flagged { (1, PC + 2, 0) } else { (2, PC + 4, 99) };
+        check((k, cpu.pc, cpu.regs[4]) == want && cpu.regs[2] == Probe::RAM + 12 && bus.stores == 1,
+            format!("a helper's store to a {} word: ran {k} to pc {:08x}, r4 {}, {} stores", if flagged { "code" } else { "data" }, cpu.pc, cpu.regs[4], bus.stores));
     }
     fails
 }
