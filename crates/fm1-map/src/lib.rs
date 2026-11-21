@@ -506,6 +506,10 @@ pub struct Mapper {
     key_count: [u8; NKEYS as usize],
     /// The fraction of a click each binding has not turned yet.
     frac: Vec<f32>,
+    /// The last value of each binding's CC (0 before any): at 64 or more it has its button down, or
+    /// has made its press. A CC is a level, and what presses is its coming up to 64 or more, or the
+    /// same value again (`pressed`).
+    cc_last: Vec<u8>,
     /// Latched buttons, held buttons.
     latched: [bool; 14],
     held_btn: [u8; 14],
@@ -518,6 +522,7 @@ impl Mapper {
         let mut m = Mapper {
             keys_mode: profile.keys_mode,
             frac: vec![0.0; profile.bindings.len()],
+            cc_last: vec![0; profile.bindings.len()],
             profile,
             last_cc: Box::new([[NONE; 128]; 16]),
             held_note: Box::new([[NONE; 128]; 16]),
@@ -541,6 +546,7 @@ impl Mapper {
         self.release_all(out);
         self.keys_mode = p.keys_mode;
         self.frac = vec![0.0; p.bindings.len()];
+        self.cc_last = vec![0; p.bindings.len()];
         self.profile = p;
         self.last_cc.iter_mut().for_each(|r| *r = [NONE; 128]);
     }
@@ -560,6 +566,8 @@ impl Mapper {
         self.profile.bindings.retain(|_| { i += 1; keep[i - 1] });
         let mut i = 0;
         self.frac.retain(|_| { i += 1; keep[i - 1] });
+        let mut i = 0;
+        self.cc_last.retain(|_| { i += 1; keep[i - 1] });
     }
     /// A built-in profile changed by learning or unbinding becomes "<name> (mine)", so the file
     /// saved for it sits next to the built-in instead of hiding it for good.
@@ -580,6 +588,7 @@ impl Mapper {
     /// Let go of every key and button the controller holds.
     pub fn release_all(&mut self, out: &mut dyn FnMut(Out)) {
         self.release_keys(out);
+        self.cc_last.fill(0);
         for i in 0..14 {
             if self.held_btn[i] > 0 || self.latched[i] {
                 self.held_btn[i] = 0;
@@ -615,11 +624,9 @@ impl Mapper {
         }
     }
 
-    /// A CC on `ch` that a binding has holding a button down now.
+    /// A CC on `ch` that a binding has holding a button down now (or at 64 or more after its press).
     fn holds_button(&self, ch: u8, cc: u8) -> bool {
-        self.profile.bindings.iter().any(|b| {
-            b.src.cc == Some(cc) && b.src.ch_ok(ch) && matches!(b.to, Target::Button(id) if self.held_btn[id.min(13) as usize] > 0)
-        })
+        self.profile.bindings.iter().zip(&self.cc_last).any(|(b, &last)| b.src.cc == Some(cc) && b.src.ch_ok(ch) && last >= 64)
     }
 
     fn function_held(&self) -> bool {
@@ -752,16 +759,22 @@ impl Mapper {
                 Target::Button(id) => {
                     let id = id.min(13);
                     let down = v >= 64;
+                    // a CC is a level: a pedal, a fader or a pad's pressure sends many values on either
+                    // side of 64, and only the crossing holds or lets go (a note's on and off are a pair).
+                    // A latch flips at each press, also of a control that sends no release (`pressed`);
+                    // a button held by such a control stays held, once, until a value below 64
+                    let crossed = kind != 0xb0 || (self.cc_last[i] >= 64) != down;
+                    let press = self.pressed(i, kind, v);
                     if mode == Mode::Toggle {
-                        if down {
+                        if press {
                             self.latched[id as usize] = !self.latched[id as usize];
                             out(Out::Key { id, down: self.latched[id as usize], vel: 0 });
                         }
-                    } else {
+                    } else if crossed {
                         let h = &mut self.held_btn[id as usize];
                         // (two sources may hold one button)
                         if down {
-                            *h += 1;
+                            *h = h.saturating_add(1);
                             if *h == 1 { out(Out::Key { id, down: true, vel: 0 }); }
                         } else if *h > 0 {
                             *h -= 1;
@@ -791,13 +804,13 @@ impl Mapper {
                     out(Out::Adc { ch: POT_ADC, value });
                 }
                 Target::KeysMode => {
-                    if v >= 64 {
+                    if self.pressed(i, kind, v) {
                         let k = self.keys_mode.next();
                         self.set_keys_mode(k, out);
                     }
                 }
-                Target::Record => if v >= 64 { out(Out::Record) },
-                Target::Labels => if v >= 64 { out(Out::Labels) },
+                Target::Record => if self.pressed(i, kind, v) { out(Out::Record) },
+                Target::Labels => if self.pressed(i, kind, v) { out(Out::Labels) },
                 Target::Keys | Target::Key(_) => {} // (a CC bound to keys: nothing)
             }
             return;
@@ -807,10 +820,23 @@ impl Mapper {
         }
     }
 
+    /// A press of binding `i`, for what a press does once: a note's on (`v` 127), or its CC coming
+    /// up to 64 or more, or at 64 or more with the value it had. A pedal, a fader or a pad's
+    /// pressure sends a value only when it changed, so its other values at 64 or more are the
+    /// same press, until one below; the same value twice in a row is a control that sends no
+    /// release (127 at each press, nothing when let go), pressed again.
+    fn pressed(&mut self, i: usize, kind: u8, v: u8) -> bool {
+        if kind != 0xb0 {
+            return v >= 64;
+        }
+        let last = std::mem::replace(&mut self.cc_last[i], v);
+        v >= 64 && (last < 64 || last == v)
+    }
+
     /// The steps (+ clockwise) a message turns binding `i` by.
-    fn steps(&mut self, _i: usize, kind: u8, ch: u8, d1: u8, v: u8, mode: Mode, is_note: bool) -> f32 {
+    fn steps(&mut self, i: usize, kind: u8, ch: u8, d1: u8, v: u8, mode: Mode, is_note: bool) -> f32 {
         if is_note || mode == Mode::Step {
-            return if v >= 64 { 1.0 } else { 0.0 };
+            return if self.pressed(i, kind, v) { 1.0 } else { 0.0 };
         }
         if kind != 0xb0 {
             return 0.0;
@@ -863,6 +889,10 @@ impl Mapper {
         let keep: Vec<bool> = self.profile.bindings.iter().map(|b| !(b.src == src || (single && b.to == t))).collect();
         let mut j = 0;
         self.profile.bindings.retain(|_| { j += 1; keep[j - 1] });
+        // (a CC that holds a button now stays its binding's, so its release still lets go)
+        let mut j = 0;
+        self.cc_last.retain(|_| { j += 1; keep[j - 1] });
+        self.cc_last.insert(0, 0);
         let mut b = Binding::new(src, t);
         b.mode = mode;
         if t == Target::Keys {

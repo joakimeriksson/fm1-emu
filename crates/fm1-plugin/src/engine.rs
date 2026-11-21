@@ -32,7 +32,9 @@ pub struct Midi {
 
 /// What the editor and the plugin ask of the machine.
 pub enum Cmd {
-    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it.
+    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it: the
+    /// project's state, each time the host initializes the plugin. A machine that runs this package
+    /// with these sectors runs on.
     Boot { pkg: Arc<Vec<u8>>, sectors: Vec<(u32, Vec<u8>)> },
     /// Validate and replace a shared setup, including a different save of the same package.
     Load { firmware: crate::Firmware, sectors: Vec<crate::Sector>, reply: mpsc::Sender<Result<(), String>> },
@@ -293,12 +295,16 @@ impl Machine {
     }
 
     /// fm1-live's loop: cpu0's blocks, cpu1 beside once the firmware releases it.
-    fn run(&mut self, n: u32) {
+    /// An error is why it halted, for good: an instruction the emulator cannot run, or the emulator's
+    /// own code failing on what the firmware did (a panic, which would otherwise end the thread).
+    fn run(&mut self, n: u32) -> Result<(), String> {
         let jit = self.cpu.jit_on;
         let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        if machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick)).is_err() {
-            self.halted = true;
-        }
+        let ran = caught(std::panic::AssertUnwindSafe(|| {
+            machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick))
+        }));
+        self.halted |= ran.is_err();
+        ran
     }
 
     fn changed_sectors(&self) -> Sectors {
@@ -368,6 +374,29 @@ fn snapshots(pending: &mut Vec<Snapshot>, machine: Option<&Machine>, params: &cr
     });
 }
 
+/// `f`, a panic in it as its error: the emulator's own code failing on a firmware or a package must
+/// not end the machine's thread, which every later firmware needs.
+fn caught<T>(f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe) -> Result<T, String> {
+    std::panic::catch_unwind(f).unwrap_or_else(|p| {
+        let said = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+        Err(format!("the emulator failed ({})", said.as_deref().unwrap_or("a panic")))
+    })
+}
+
+/// `Machine::boot`, with a panic anywhere in it as its error.
+fn boot(pkg: &[u8], sectors: &[(u32, Vec<u8>)], mhz: u64, lcd_timed: bool) -> Result<Machine, String> {
+    caught(|| Machine::boot(pkg, sectors, mhz, lcd_timed))
+}
+
+/// What the firmware has written to its flash, to the project's state when that changed.
+fn save_sectors(m: &Machine, saved: &mut Sectors, params: &crate::Fm1Params) {
+    let now = m.changed_sectors();
+    if now != *saved {
+        *params.flash.lock().unwrap() = project_sectors(&now);
+        *saved = now;
+    }
+}
+
 /// The thread: commands in, MIDI in (stamped), frames out.
 pub fn run(
     shared: Arc<Shared>,
@@ -395,12 +424,18 @@ pub fn run(
     let mut pending = Vec::new();
     let (mut speed_t, mut speed_ms, mut busy, mut starved0) = (Instant::now(), 0u64, Duration::ZERO, 0u64);
     let mut rec: Option<crate::wav::Wav> = None;
+    // a run that ended in a halt: why, for the window
+    let halt = |ran: Result<(), String>| {
+        if let Err(e) = ran {
+            *params.halt.lock().unwrap() = Some(format!("The firmware stopped: {e}"));
+        }
+    };
     while !shared.quit.load(Ordering::Relaxed) {
         while let Ok(c) = cmds.try_recv() {
             let (c, prepared, loaded) = match c {
                 Cmd::Load { firmware, sectors, reply } => {
                     let sectors: Sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
-                    match Machine::boot(&firmware.pkg, &sectors, params.clock.value().mhz(), lcd_timed) {
+                    match boot(&firmware.pkg, &sectors, params.clock.value().mhz(), lcd_timed) {
                         Ok(next) => (Cmd::Boot { pkg: firmware.pkg.clone(), sectors }, Some(next), Some((firmware, reply))),
                         Err(error) => { let _ = reply.send(Err(error)); continue; }
                     }
@@ -409,8 +444,21 @@ pub fn run(
             };
             match c {
                 Cmd::Boot { pkg, sectors } => {
+                    // the host initializing again (a new sample rate) sends the package that runs with
+                    // the sectors the project has from this machine, as last saved or as its flash is
+                    // now: nothing to do. Other sectors are a state the host loaded (a preset, an
+                    // undo), booted as another package is, so the project's flash and the machine's
+                    // are the same again and what the firmware writes later is saved on top of that.
+                    let runs = prepared.is_none() && active_pkg.as_ref().is_some_and(|a| Arc::ptr_eq(a, &pkg) || **a == *pkg);
+                    if runs && m.as_ref().is_some_and(|mm| sectors == saved || sectors == mm.changed_sectors()) {
+                        saved = sectors;
+                        continue;
+                    }
                     cancel_snapshots(&mut pending);
-                    m = prepared.or_else(|| Machine::boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed).ok());
+                    // (a project's package that does not boot: the window says why, as for a halt)
+                    let booted = prepared.map_or_else(|| boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed), Ok);
+                    *params.halt.lock().unwrap() = booted.as_ref().err().map(|e| format!("The firmware did not start: {e}"));
+                    m = booted.ok();
                     active_pkg = m.as_ref().map(|_| pkg);
                     pot = u16::MAX;
                     let mut v = shared.view.lock().unwrap();
@@ -468,8 +516,9 @@ pub fn run(
         if let (Some(mm), Some(pkg)) = (m.as_ref(), active_pkg.as_ref()) {
             if mm.soc.periph.hz != mhz * 1_000_000 && pending.is_empty() {
                 let sectors = mm.changed_sectors();
-                if let Ok(next) = Machine::boot(pkg, &sectors, mhz, lcd_timed) {
+                if let Ok(next) = boot(pkg, &sectors, mhz, lcd_timed) {
                     m = Some(next);
+                    *params.halt.lock().unwrap() = None;
                     pot = u16::MAX;
                     due.clear();
                     ctl.reset(&params);
@@ -497,6 +546,20 @@ pub fn run(
                 made += 1;
             }
             due.retain(|e| e.frame > made);
+            // a machine that halted: the window is told, with the screen it stopped at, and what it
+            // wrote to its flash before goes to the project (nothing changes after: the first look saves it)
+            if let Some(mm) = m.as_ref() {
+                if last_view.elapsed() >= Duration::from_millis(30) {
+                    last_view = Instant::now();
+                    let mut v = shared.view.lock().unwrap();
+                    v.lcd.copy_from_slice(&mm.soc.lcd.fb);
+                    v.halted = true;
+                }
+                if last_flash.elapsed() >= Duration::from_secs(2) {
+                    last_flash = Instant::now();
+                    save_sectors(mm, &mut saved, &params);
+                }
+            }
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };
@@ -516,7 +579,7 @@ pub fn run(
             let (t0, ms0) = *free.get_or_insert((Instant::now(), mm.soc.periph.ms()));
             if mm.soc.periph.ms() - ms0 < t0.elapsed().as_millis() as u64 {
                 let t1 = Instant::now();
-                mm.run(20_000);
+                halt(mm.run(20_000));
                 busy += t1.elapsed();
                 mm.soc.periph.audio.clear();
             } else {
@@ -530,7 +593,7 @@ pub fn run(
                 ctl.feed(&e.bytes[..e.len as usize], mm, &params);
             }
             let t0 = Instant::now();
-            mm.run(20_000);
+            halt(mm.run(20_000));
             busy += t0.elapsed();
             let a = std::mem::take(&mut mm.soc.periph.audio);
             if let Some(w) = rec.as_mut() {
@@ -575,12 +638,7 @@ pub fn run(
         }
         if last_flash.elapsed() >= Duration::from_secs(2) {
             last_flash = Instant::now();
-            let now = mm.changed_sectors();
-            if now != saved {
-                *params.flash.lock().unwrap() =
-                    now.iter().map(|(at, d)| crate::Sector { at: *at, data: Arc::new(d.clone()) }).collect();
-                saved = now;
-            }
+            save_sectors(mm, &mut saved, &params);
         }
     }
     // the plugin closed while recording: the file keeps what was played, with its length
@@ -682,5 +740,20 @@ mod portable_tests {
         snapshots(&mut pending, Some(&m), &params, start + Duration::from_secs(6));
         assert!(rx.try_recv().unwrap().is_err());
         assert!(pending.is_empty());
+    }
+    #[test]
+    fn a_run_that_cannot_go_on_halts_with_its_reason() {
+        let mut m = machine();
+        m.soc.xip.fill(0xff); // (no instruction)
+        let why = m.run(100).unwrap_err();
+        assert!(m.halted && why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
+    }
+    #[test]
+    fn a_panic_is_an_error_with_its_text() {
+        let said = caught(|| -> Result<(), String> { panic!("sector {} of 3", 7) });
+        let other = caught(|| -> Result<(), String> { std::panic::panic_any(7u8) });
+        assert_eq!(said.unwrap_err(), "the emulator failed (sector 7 of 3)");
+        assert_eq!(other.unwrap_err(), "the emulator failed (a panic)");
+        assert_eq!(caught(|| Ok::<_, String>(3)), Ok(3));
     }
 }

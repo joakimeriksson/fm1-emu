@@ -307,3 +307,115 @@ fn program_changes_and_aftertouch_are_not_learned() {
     assert_eq!(m.learning(), Some(Target::Midi));
     assert!(!m.profile().bindings.iter().any(|b| b.src.bend));
 }
+
+/// A profile with CC `cc` on button `id` in `mode`.
+fn cc_button(cc: u8, id: u8, mode: Mode) -> Binding {
+    let mut b = Binding::new(Src { cc: Some(cc), ..Src::default() }, Target::Button(id));
+    b.mode = mode;
+    b
+}
+
+#[test]
+fn a_cc_holds_a_button_from_64_up_until_it_goes_below() {
+    // a pedal or a fader: many values on the way down and back, one press and one release
+    let mut m = Mapper::new(Profile { name: "t".into(), bindings: vec![cc_button(64, 12, Mode::Momentary)], ..Profile::default() });
+    let v = run(&mut m, &[&[0xb0, 64, 20], &[0xb0, 64, 70], &[0xb0, 64, 100], &[0xb0, 64, 127], &[0xb0, 64, 90], &[0xb0, 64, 10], &[0xb0, 64, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 12, down: true, vel: 0 }, Out::Key { id: 12, down: false, vel: 0 }]);
+    // and however many values it sends while down (a pad's pressure), it lets go at the first one below
+    let mut v = Vec::new();
+    for i in 0..600 {
+        m.feed(&[0xb0, 64, 64 + (i % 64) as u8], &mut |o| v.push(o));
+    }
+    m.feed(&[0xb0, 64, 63], &mut |o| v.push(o));
+    assert_eq!(v, vec![Out::Key { id: 12, down: true, vel: 0 }, Out::Key { id: 12, down: false, vel: 0 }]);
+}
+
+#[test]
+fn a_cc_toggles_a_button_once_a_press() {
+    let mut m = Mapper::new(Profile { name: "t".into(), bindings: vec![cc_button(20, 10, Mode::Toggle)], ..Profile::default() });
+    let v = run(&mut m, &[&[0xb0, 20, 100], &[0xb0, 20, 127], &[0xb0, 20, 80], &[0xb0, 20, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 10, down: true, vel: 0 }], "one press latches it, whatever it sends while down");
+    let v = run(&mut m, &[&[0xb0, 20, 127], &[0xb0, 20, 110], &[0xb0, 20, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 10, down: false, vel: 0 }], "the next press lets it go");
+}
+
+#[test]
+fn a_pad_and_a_cc_hold_one_button_until_both_let_go() {
+    let mut p = mpk_profile();
+    p.bindings.push(cc_button(64, 7, Mode::Momentary)); // (pad A8, note 43 on channel 10, is GLO: 7)
+    let mut m = Mapper::new(p);
+    let v = run(&mut m, &[&[0x99, 43, 100], &[0xb0, 64, 100], &[0xb0, 64, 110], &[0x89, 43, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 7, down: true, vel: 0 }], "the CC still holds it");
+    let v = run(&mut m, &[&[0xb0, 64, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 7, down: false, vel: 0 }]);
+    // the other way round: the CC lets go first
+    let v = run(&mut m, &[&[0xb0, 64, 127], &[0x99, 43, 100], &[0xb0, 64, 0], &[0x89, 43, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 7, down: true, vel: 0 }, Out::Key { id: 7, down: false, vel: 0 }]);
+}
+
+#[test]
+fn a_held_cc_button_lets_go_after_something_else_was_learned() {
+    let mut m = Mapper::new(Profile { name: "t".into(), bindings: vec![cc_button(64, 12, Mode::Momentary)], ..Profile::default() });
+    assert_eq!(run(&mut m, &[&[0xb0, 64, 127]]).len(), 1);
+    // learning puts its binding first: the held one keeps its place in what the mapper holds
+    m.learn(Some(Target::Enc(2)));
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 5]]), vec![Out::Learned]);
+    assert_eq!(run(&mut m, &[&[0xb0, 64, 0]]), vec![Out::Key { id: 12, down: false, vel: 0 }]);
+}
+
+#[test]
+fn a_cc_presses_once_as_it_comes_up_to_64() {
+    // what a press does once (the recorder, the labels, the keys' mode, a step of an encoder): a pedal,
+    // a fader or a pad's pressure sends many values at 64 or more, and they are one press
+    let mut step = Binding::new(Src { cc: Some(23), ..Src::default() }, Target::Enc(2));
+    step.mode = Mode::Step;
+    let bindings = vec![
+        Binding::new(Src { cc: Some(20), ..Src::default() }, Target::Record),
+        Binding::new(Src { cc: Some(21), ..Src::default() }, Target::Labels),
+        Binding::new(Src { cc: Some(22), ..Src::default() }, Target::KeysMode),
+        step,
+        Binding::new(Src { note: Some(40), ..Src::default() }, Target::Record),
+    ];
+    let mut m = Mapper::new(Profile { name: "t".into(), bindings, ..Profile::default() });
+    for (cc, once) in [(20, Out::Record), (21, Out::Labels), (23, Out::Enc { enc: 2, clicks: 1 })] {
+        let v = run(&mut m, &[&[0xb0, cc, 30], &[0xb0, cc, 64], &[0xb0, cc, 90], &[0xb0, cc, 127], &[0xb0, cc, 100]]);
+        assert_eq!(v, vec![once], "CC {cc}: one press");
+        let v = run(&mut m, &[&[0xb0, cc, 63], &[0xb0, cc, 10], &[0xb0, cc, 127], &[0xb0, cc, 120]]);
+        assert_eq!(v, vec![once], "CC {cc}: let go, and pressed again");
+    }
+    let v = run(&mut m, &[&[0xb0, 22, 100], &[0xb0, 22, 127], &[0xb0, 22, 0], &[0xb0, 22, 127]]);
+    assert_eq!(v, vec![Out::KeysMode(KeysMode::Midi), Out::KeysMode(KeysMode::Auto)], "the keys' mode moves on once a press");
+    // a note's on and off are a pair as they come: each on is a press
+    let v = run(&mut m, &[&[0x90, 40, 100], &[0x80, 40, 0], &[0x90, 40, 100], &[0x80, 40, 0]]);
+    assert_eq!(v, vec![Out::Record, Out::Record]);
+}
+
+#[test]
+fn a_control_that_sends_no_release_presses_each_time_it_sends_its_value() {
+    // a trigger-only button sends 127 a press and nothing when let go. A pedal or a fader sends a
+    // value only when it changed, so the same value twice in a row is that button pressed again
+    let bindings = vec![
+        Binding::new(Src { cc: Some(20), ..Src::default() }, Target::Record),
+        cc_button(21, 10, Mode::Toggle),
+        cc_button(22, 12, Mode::Momentary),
+    ];
+    let mut m = Mapper::new(Profile { name: "t".into(), bindings, ..Profile::default() });
+    let (on, off) = (Out::Key { id: 10, down: true, vel: 0 }, Out::Key { id: 10, down: false, vel: 0 });
+
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 127], &[0xb0, 20, 127], &[0xb0, 20, 127]]), vec![Out::Record; 3]);
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 127], &[0xb0, 21, 127], &[0xb0, 21, 127]]), vec![on, off, on], "three presses, three toggles");
+
+    // a fader or a pedal on its way up: one press (from below 64: the mapper starts there again)
+    let mut m = Mapper::new(m.profile().clone());
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 64], &[0xb0, 20, 80], &[0xb0, 20, 100], &[0xb0, 20, 127]]), vec![Out::Record]);
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 64], &[0xb0, 21, 80], &[0xb0, 21, 100], &[0xb0, 21, 127]]), vec![on]);
+    // a button that sends its release: a press each time it comes up
+    let mut m = Mapper::new(m.profile().clone());
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 127], &[0xb0, 20, 0], &[0xb0, 20, 127]]), vec![Out::Record; 2]);
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 127], &[0xb0, 21, 0], &[0xb0, 21, 127]]), vec![on, off]);
+
+    // a button that is held while its control is: with no release it stays held, once, and the one
+    // value below 64 lets it go
+    let v = run(&mut m, &[&[0xb0, 22, 127], &[0xb0, 22, 127], &[0xb0, 22, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 12, down: true, vel: 0 }, Out::Key { id: 12, down: false, vel: 0 }]);
+}
