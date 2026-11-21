@@ -1373,33 +1373,6 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(F32_REINTERPRET_I32);
                         g.op(match op { 0 => F32_ADD, 1 => F32_SUB, 2 => F32_MUL, _ => F32_DIV });
                     }
-                    5 | 6 => {
-                        // a' = a != a ? b : a; b' = b != b ? a' : b; a' < b' ? a' : b' (max: >)
-                        g.ld_reg(a);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FA);
-                        g.ld_reg(b);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.op(if op == 5 { F32_LT } else { F32_GT });
-                        g.op(SELECT);
-                    }
                     0x8f | 0x9f => {
                         g.ld_reg(a);
                         g.op(if op == 0x8f { F32_CONVERT_I32_S } else { F32_CONVERT_I32_U });
@@ -1422,6 +1395,36 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 }
                 if !to_int {
                     g.op(I32_REINTERPRET_F32);
+                }
+                // NaNs as `fpu` has them: arithmetic gives 0x7f800001, ftof the input's sign |
+                // 0x7fc00000, ftoi / ftou the range's end on the input's side
+                if !matches!(op, 0x8f | 0x9f) {
+                    g.set(L_A);
+                    match op {
+                        0..=3 => g.i32c(0x7f80_0001),
+                        _ if !to_int => {
+                            g.ld_reg(a);
+                            g.i32c(0x8000_0000);
+                            g.op(I32_AND);
+                            g.i32c(0x7fc0_0000);
+                            g.op(I32_OR);
+                        }
+                        _ => {
+                            g.ld_reg(a);
+                            g.i32c(31);
+                            g.op(I32_SHR_S);
+                            g.i32c(if k < 4 { 0x7fff_ffff } else { u32::MAX });
+                            g.op(I32_XOR);
+                        }
+                    }
+                    g.get(L_A);
+                    // the NaN test: on the result for arithmetic, on the input otherwise
+                    if matches!(op, 0..=3) { g.get(L_A); } else { g.ld_reg(a); }
+                    g.i32c(0x7fff_ffff);
+                    g.op(I32_AND);
+                    g.i32c(0x7f80_0000);
+                    g.op(I32_GT_U);
+                    g.op(SELECT);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
@@ -2017,7 +2020,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
 /// ftou in every rounding, itof, utof, and ftof in every rounding (fm1-isa's fpu.rs). Not the
 /// multiply-accumulates 7 / 8 (the executor, as jit.rs), nor an op the table does not decode.
 fn fop_inline(op: u8) -> bool {
-    matches!(op, 0..=3 | 5 | 6 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
+    // (fmin / fmax, `fminmax`, go through the interpreter)
+    matches!(op, 0..=3 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
 }
 
 static mut SELFTEST_DETAIL: String = String::new();
