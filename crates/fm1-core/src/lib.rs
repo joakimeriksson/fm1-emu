@@ -516,7 +516,7 @@ impl Cpu {
             && self.pred_skips.is_empty()
             && self.pair_pending.is_none()
             && self.hold_irq == 0
-            && self.irq_levels.last().map_or(true, |&l| prio > l && self.nest_ok)
+            && self.irq_levels.last().is_none_or(|&l| prio > l && self.nest_ok)
     }
 
     /// Enter an interrupt handler: `reti` = the interrupted pc (the ISR
@@ -566,7 +566,7 @@ impl Cpu {
         if hit {
             let len = self.icache[slot].len as u32;
             let mask = if len >= 8 { u64::MAX } else { (1u64 << (8 * len)) - 1 };
-            if self.icache_x[slot].map_or(false, |x| (x.win ^ win) & mask == 0) {
+            if self.icache_x[slot].is_some_and(|x| (x.win ^ win) & mask == 0) {
                 return Ok(slot);
             }
         }
@@ -667,7 +667,9 @@ impl Cpu {
             () => {{
                 self.pc = pc;
                 self.insn_count += (n - synced) as u64;
-                synced = n;
+                // (read only where the loop goes on: most syncs are followed by a return)
+                #[allow(unused_assignments)]
+                { synced = n; }
             }};
         }
         // a runner's stretch (see `stop_pc`): `bound` is where the runner's call in progress
@@ -3384,7 +3386,7 @@ impl Cpu {
             }
             37 =>
             {
-                let m = sp_mem_raw(raw as u64).unwrap();
+                let m = sp_mem_raw(raw).unwrap();
                 let a = self.sp.wrapping_add(m.off);
                 if m.store {
                     bus.write16(a, self.regs[m.d as usize] as u16);
@@ -6839,7 +6841,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             _ if insn.entry.len == 4 && has(insn.entry.syntax, "d[")
                 && ((insn.raw & 0xfff0) == 0xec50 || (insn.raw & 0xffff) == 0xe9d0) => 16,
             _ if insn.entry.len == 4 && (insn.raw & 0xf8) == 0x50
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && has(insn.entry.syntax, "[R+") && !has(insn.entry.syntax, "[R+R") => 17,
             // word accesses with a negative offset (`d4..d7 ec`): the table's classes fit only the
             // corpus samples (`r_i_mov_r_3` had no slots)
@@ -6847,13 +6849,13 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
                 && has(insn.entry.syntax, "[") => 18,
             _ if insn.entry.name == "word_mem_craw" => 18,
             _ if insn.entry.len == 4 && (has(insn.entry.syntax, "[++R=#i]") || has(insn.entry.syntax, "[++R=-#i]"))
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && ((insn.raw & 0xf8) == 0x58 || (insn.raw & 0xff) == 0xd0) => 18,
             _ if insn.entry.len == 4 && (insn.raw & 0xf0) == 0xd0
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee)
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee)
                 && has(insn.entry.syntax, "++=") => 19,
             _ if insn.entry.len == 4 && insn.raw & 0xff == 0xd8
-                && matches!((insn.raw >> 8) & 0xff, 0xec | 0xed | 0xee) => 20,
+                && matches!((insn.raw >> 8) & 0xff, 0xec..=0xee) => 20,
             _ if insn.entry.len == 4 && matches!((insn.raw >> 8) & 0xff, 0xe1 | 0xf1)
                 && matches!(insn.raw & 0xff, 0xd0 | 0xd8 | 0xf8 | 0xfc | 0xfe | 0xf6)
                 && insn.entry.syntax.starts_with('r') && has(insn.entry.syntax, "_r") => 21,
@@ -7172,7 +7174,7 @@ pub const F_V: u32 = 8;
 fn add_flags(a: u32, b: u32, cin: u32) -> (u32, u32) {
     let w = a as u64 + b as u64 + cin as u64;
     let r = w as u32;
-    let f = (r >> 31) * F_N | ((w >> 32) as u32) * F_C | ((r == 0) as u32) * F_Z | (((a ^ r) & (b ^ r)) >> 31) * F_V;
+    let f = ((r >> 31) * F_N) | (((w >> 32) as u32) * F_C) | (((r == 0) as u32) * F_Z) | ((((a ^ r) & (b ^ r)) >> 31) * F_V);
     (r, f)
 }
 
@@ -7452,6 +7454,8 @@ fn cond_true(c: Cond, l: u32, r: u32) -> bool {
 }
 
 /// A float compare on the raw register bits (NaN: ordered compares false, unordered true).
+// (the unordered ones are the negations as written: true for a NaN, which their opposites are not)
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 #[cold]
 fn fcond(c: Cond, l: u32, r: u32) -> bool {
     let (x, y) = (f32::from_bits(l), f32::from_bits(r));
@@ -7722,7 +7726,7 @@ fn fast_of(insn: &Instruction, s: &'static str) -> Option<Fast> {
             }
         }
         // arithmetic shift by an immediate below 32 (exec_syntax fills larger counts with the sign)
-        "R = R >>> #i" if insn.entry.len == 4 && v(2).map_or(false, |n| (1..32).contains(&n)) => {
+        "R = R >>> #i" if insn.entry.len == 4 && v(2).is_some_and(|n| (1..32).contains(&n)) => {
             return Some(Fast::SarI { d: r(0)?, s: r(1)?, n: v(2)? as u8 });
         }
         _ if insn.entry.len == 4 && (insn.raw >> 8) & 0xff == 0xeb && block_form(s).is_some() => {
