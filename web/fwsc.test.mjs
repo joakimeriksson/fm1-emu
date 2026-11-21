@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fetchPackage, hubNewcomers, httpsUrl } from './fwsc.js';
+import { MAX_PACKAGE } from './persistence.js';
 
 test('a Hub package that has gone is fetched as the one the Hub lists now', async () => {
   const asked = [];
@@ -88,4 +89,29 @@ test("a newcomer's links are https: another scheme in the Hub's catalog is no li
     async (url) => (url.endsWith('catalog.json') ? new Response(JSON.stringify(hub)) : new Response('', { status: 404 }))), /e-0\.fwsc: 404/);
   assert.equal(httpsUrl('fw/x.fwsc', 'https://thefirmwarehub.com/'), 'https://thefirmwarehub.com/fw/x.fwsc');
   assert.equal(httpsUrl(undefined), null);
+});
+
+test('a package larger than a package can be is refused: by its stated length, else while it is read', async () => {
+  const entry = { id: 'x', package: 'https://example.test/x.fwsc' };
+  // the server says how long: nothing is read
+  let read = 0;
+  const stated = new Response(new ReadableStream({ pull(c) { read++; c.enqueue(new Uint8Array(1)); c.close(); } }, { highWaterMark: 0 }),
+    { headers: { 'content-length': String(MAX_PACKAGE + 1) } });
+  await assert.rejects(fetchPackage(entry, async () => stated), /x\.fwsc: larger than 8 MB/);
+  assert.equal(read, 0);
+  // it does not say: the reading stops once past the limit (64 KiB at a time here, without end)
+  let sent = 0, cancelled = false;
+  const endless = new Response(new ReadableStream({ pull(c) { sent += 65536; c.enqueue(new Uint8Array(65536)); }, cancel() { cancelled = true; } },
+    { highWaterMark: 0 }));
+  await assert.rejects(fetchPackage(entry, async () => endless), /larger than 8 MB/);
+  assert.ok(sent > MAX_PACKAGE && sent <= MAX_PACKAGE + 2 * 65536, `${sent} bytes read`);
+  await new Promise(setImmediate);
+  assert.equal(cancelled, true);
+  // one of the limit's size comes whole, in the order it was sent; a response with no stream to read too
+  const whole = new Uint8Array(MAX_PACKAGE).map((_, i) => i >> 16);
+  let at = 0;
+  const chunks = new Response(new ReadableStream({ pull(c) { at < whole.length ? c.enqueue(whole.slice(at, at += 1 << 20)) : c.close(); } }));
+  assert.deepEqual((await fetchPackage(entry, async () => chunks)).bytes, whole);
+  assert.deepEqual((await fetchPackage(entry, async () => ({ ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer }))).bytes, new Uint8Array([1, 2, 3]));
+  await assert.rejects(fetchPackage(entry, async () => ({ ok: true, arrayBuffer: async () => new ArrayBuffer(MAX_PACKAGE + 1) })), /larger than 8 MB/);
 });

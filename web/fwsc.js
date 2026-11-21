@@ -16,6 +16,7 @@
 // Written for the emulator's web page; on 2026-10-10 it gave byte for byte the apps Felucca's
 // own package code (web/fm1pkg.js, GPL-3.0, not used here) extracts, for every package in
 // web/firmwares.json.
+import { MAX_PACKAGE } from "./persistence.js";
 
 function unmask(buf, off, len, key = 0xffff) {
   for (let i = 0; i < len; i++) {
@@ -198,6 +199,35 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
 }
 export const hubCardUrl = (hubId) => `${HUB}#fw-${hubId}`;
 
+// A fetched package's bytes, refused when it is larger than a package can be (MAX_PACKAGE, what the page keeps of one;
+// the devices' flash is 1 MB, and so about a package's most): by the length the server gives, else while reading, so
+// that a link to something huge (?package= takes any https URL) is not read into memory.
+async function packageBytes(r, url) {
+  const large = () => new Error(`${url}: larger than ${MAX_PACKAGE >> 20} MB, not a firmware package`);
+  if (Number(r.headers?.get("content-length")) > MAX_PACKAGE) throw large();
+  const reader = r.body?.getReader?.();
+  if (!reader) {
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (bytes.length > MAX_PACKAGE) throw large();
+    return bytes;
+  }
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if ((n += value.length) > MAX_PACKAGE) {
+      reader.cancel().catch(() => {});
+      throw large();
+    }
+    parts.push(value);
+  }
+  const bytes = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) { bytes.set(p, at); at += p.length; }
+  return bytes;
+}
+
 // Fetch a catalog entry's package (web/firmwares.json): its `package` URL, or when that has
 // gone (a newer version replaced it) the package the Hub lists now (an entry with `hub`), or
 // the .fwsc its `installer` page links now, found in the
@@ -219,19 +249,19 @@ export async function fetchPackage(entry, fetchFn = fetch) {
     return { bytes, url: entry.installer };
   }
   let r = await fetchFn(entry.package);
-  if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url: entry.package };
+  if (r.ok) return { bytes: await packageBytes(r, entry.package), url: entry.package };
   if (entry.hub) {
     const now = await hubPackage(entry.hub, fetchFn);
     if (now && now.url !== entry.package) {
       const h = await fetchFn(now.url);
-      if (h.ok) return { bytes: new Uint8Array(await h.arrayBuffer()), url: now.url, ...(now.version && { version: now.version }) };
+      if (h.ok) return { bytes: await packageBytes(h, now.url), url: now.url, ...(now.version && { version: now.version }) };
     }
   }
   if (entry.manifest) {
     const m = await (await fetchFn(entry.manifest)).json();
     const url = new URL(m.package || m.file, entry.manifest).href;
     r = await fetchFn(url);
-    if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url };
+    if (r.ok) return { bytes: await packageBytes(r, url), url };
   }
   if (!entry.installer) throw new Error(`${entry.package}: ${r.status}`);
   const find = (text) => [...text.matchAll(/[\w./-]+\.fwsc/g)].map((m) => m[0]).filter((n) => !/(^|\/)FM-1\.fwsc$/i.test(n));
@@ -246,7 +276,7 @@ export async function fetchPackage(entry, fetchFn = fetch) {
   for (const n of names) {
     const url = new URL(n, base).href;
     r = await fetchFn(url);
-    if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url };
+    if (r.ok) return { bytes: await packageBytes(r, url), url };
   }
   throw new Error(`${entry.package}: ${r.status}, and ${entry.installer} names no package that loads`);
 }
