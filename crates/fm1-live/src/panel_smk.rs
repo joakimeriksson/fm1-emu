@@ -341,7 +341,7 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
     for y in 0..240 {
         for x in 0..240 {
             let p = st.lcd[y * 240 + x] as u32;
-            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | (p & 31) * 255 / 31;
+            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | ((p & 31) * 255 / 31);
             let o = (LCD_Y + 2 * y) * W + LCD_X + 2 * x;
             buf[o] = c;
             buf[o + 1] = c;

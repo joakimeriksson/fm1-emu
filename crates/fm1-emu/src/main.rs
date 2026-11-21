@@ -16,7 +16,7 @@ use fm1_soc::{Soc, XIP_BASE, RAM_BASE};
 
 mod buildinfo;
 
-const DEFAULT_RAM: usize = 1 * 1024 * 1024;
+const DEFAULT_RAM: usize = 1024 * 1024;
 /// RAM runs from RAM_BASE up to the XIP window: more would cover the code with RAM
 const MAX_RAM: usize = (XIP_BASE - RAM_BASE) as usize;
 
@@ -488,7 +488,6 @@ fn main() -> ExitCode {
     let extra_breaks: Vec<u32> = std::env::var("FM1_BREAK_PCS").ok()
         .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
         .unwrap_or_default();
-    let mut last_pc = cpus[0].pc;
     let mut total_steps: u64 = 0;
     let mut ring: Vec<u32> = Vec::new();
     // last executed instructions (pc, class, sp) for the halt report
@@ -576,8 +575,8 @@ fn main() -> ExitCode {
             if total_steps > 0 && total_steps % dump_every == 0 {
                 let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
             }
-            last_pc = cpu.pc;
-            let tail_name = soc_instruction_name(&soc, &cpu, last_pc).unwrap_or("?");
+            let last_pc = cpu.pc;
+            let tail_name = soc_instruction_name(&soc, last_pc).unwrap_or("?");
             if let Some((a, b)) = trace_range {
                 if (a..b).contains(&total_steps) {
                     println!("T {total_steps} c{} {last_pc:#010x} {tail_name} irq={:?} ie={} r0={:#x} r1={:#x}", cpu.core_id, cpu.irq_levels, cpu.ie, cpu.regs[0], cpu.regs[1]);
@@ -639,7 +638,7 @@ fn main() -> ExitCode {
                     }
                     cpu.interrupt(handler, prio);
                     irq_count += 1;
-                    *irq_by.entry((cpu.core_id, n as u8)).or_default() += 1;
+                    *irq_by.entry((cpu.core_id, n)).or_default() += 1;
                 }
             }
             if ci == 0 {
@@ -676,8 +675,7 @@ fn main() -> ExitCode {
                                 count = cpu.insn_count,
                                 pc = last_pc,
                                 sp = cpu.sp,
-                                insn = soc_instruction_name(&soc, &cpu, last_pc)
-                                    .unwrap_or("?"),
+                                insn = tail_name,
                                 r0 = cpu.regs[0],
                             );
                         }
@@ -716,23 +714,19 @@ fn main() -> ExitCode {
     }
 
     if !args.quiet {
-        let stopped = halt.is_some() || true;
         let mut top: Vec<(&'static str, u64)> = hist.into_iter().collect();
         top.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
         let total: u64 = top.iter().map(|(_, c)| c).sum();
+        let top_n = std::env::var("FM1_HIST_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
         println!(
             "stopped after {} instructions ({}, hist top-{} of {} classes):",
             cpu.insn_count,
             if halt.is_some() { "halt" } else { "step limit" },
-            top.len().min(12),
-            top.len().min(1) * 0 + top.len().max(1),
+            top.len().min(top_n),
+            top.len(),
         );
-        let top_n = std::env::var("FM1_HIST_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
         for (name, n) in top.iter().take(top_n) {
             println!("  {name:<28} {n:8} ({:5.1}%)", 100.0 * *n as f64 / total as f64);
-        }
-        if total > 0 {
-            let _ = total;
         }
         let mut pcs: Vec<(u32, u64)> = pchist.into_iter().collect();
         pcs.extend(xip_hist.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, &n)| (XIP_BASE + 2 * i as u32, n)));
@@ -848,7 +842,6 @@ fn main() -> ExitCode {
                 println!("  {op} @ {addr:#010x} first value={value:#010x} x{n}");
             }
         }
-        let _ = stopped;
     } else if let Some(e) = &halt {
         // (on stderr: with --quiet stdout is the --dump's)
         eprintln!("{}", halt_reason(e, cpu));
@@ -875,12 +868,11 @@ fn halt_reason(e: &CoreError, cpu: &Cpu) -> String {
 }
 
 /// The SoC doesn't track names; recover the executed class name by decoding
-/// at the PC the step started from (cheap; runs once per step only under
-/// tracing).
-fn soc_instruction_name(_soc: &Soc, cpu: &Cpu, pc: u32) -> Option<&'static str> {
-    if let Ok(win) = fetch_window(_soc, pc) {
+/// at the PC the step starts from (every step: the histogram and the tails
+/// of the report are by name; the decoder caches).
+fn soc_instruction_name(soc: &Soc, pc: u32) -> Option<&'static str> {
+    if let Ok(win) = fetch_window(soc, pc) {
         if let Ok(insn) = fm1_isa::decode_win_cached(win, pc) {
-            let _ = cpu;
             return Some(insn.entry.name);
         }
     }

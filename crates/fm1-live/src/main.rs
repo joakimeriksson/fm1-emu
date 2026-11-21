@@ -589,7 +589,7 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     }
     if sample {
         let mut v: Vec<_> = pcs.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
         let tot: u64 = v.iter().map(|x| x.1).sum();
         for (pc, n) in v.iter().take(25) {
             println!("pc {pc:#010x} {:5.1}%", 100.0 * *n as f64 / tot as f64);
@@ -765,11 +765,6 @@ fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<Audi
     .map_err(|e| e.to_string())
 }
 
-/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
-/// the panel drawn at `ms` into work/panel.ppm.
-/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
-/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
-/// False when the variable is unset.
 /// --flash: the flash chip back to its file; and how many erases / programs it saw
 fn save_flash(m: &Machine, path: Option<&String>) {
     let f = &m.soc.flash;
@@ -792,6 +787,9 @@ fn halted(e: &str) {
     eprintln!("{}", buildinfo::halt_note("fm1-live"));
 }
 
+/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
+/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
+/// False when the variable is unset.
 fn script_keys(m: &mut Machine) -> bool {
     let Ok(mut keys) = std::env::var("FM1_BENCH_KEYS") else { return false };
     if let Some(path) = keys.strip_prefix('@') {
@@ -919,6 +917,8 @@ fn run_tail(m: &mut Machine, ms: u64, mut rec: Option<&mut Recorder>, theme: &pa
     Ok((in_isr, total))
 }
 
+/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
+/// the panel drawn at `ms` into work/panel.ppm.
 fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     if o.record.as_deref() == Some("-") {
         REPORTS_TO_STDERR.store(true, Ordering::Relaxed);
@@ -2173,7 +2173,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     let mut analog = [0u16; 23];
     analog[ANALOG_PITCH as usize] = PITCH_REST;
     analog[ANALOG_MOD as usize] = MOD_REST;
-    let mut set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
+    let set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
         if analog[i] != v {
             analog[i] = v;
             let _ = tx.send(Action::Adc { ch: i as u8, value: v });
@@ -2349,7 +2349,7 @@ mod tests {
         // a device that needs 20 ms (WASAPI shared: a 10 ms period and jitter)
         let first = run(&mut t, t0, 0, 120, 20.0);
         let settled = t.ms;
-        assert!(settled >= 20.0 && settled <= 24.0, "settled at {settled}: {first:?}");
+        assert!((20.0..=24.0).contains(&settled), "settled at {settled}: {first:?}");
         // then an hour: no more underruns, no more probing below what it needs
         let later = run(&mut t, t0, 120, 3720, 20.0);
         assert!(later.iter().all(|&ms| ms >= 20.0), "went under 20: {:?}", later.iter().cloned().fold(f64::MAX, f64::min));
