@@ -51,6 +51,8 @@ pub struct HwEq {
     /// (s1, s2) of a slot, by its address
     state: std::collections::HashMap<u32, (f64, f64)>,
     pub runs: u64,
+    /// a channel's frames while a run filters them, kept so that a run allocates nothing
+    buf: Vec<f64>,
 }
 
 impl HwEq {
@@ -137,14 +139,15 @@ impl HwEq {
         let (ia, oa) = (self.regs[4], self.regs[5]);
         // the input's channels: CON2's low half is the step to the last one
         let ch = if in_ch == 0 { 1 } else { (self.regs[2] & 0xffff) / in_ch + 1 };
+        let mut x = std::mem::take(&mut self.buf);
         for o in 0..och {
             let k = o % ch;
             let at = |s: u32| ia.wrapping_add(k.wrapping_mul(in_ch)).wrapping_add(s.wrapping_mul(in_step));
-            let mut x: Vec<f64> = (0..n).map(|s| load(m, at(s), fin)).collect();
+            x.clear();
+            x.extend((0..n).map(|s| load(m, at(s), fin)));
             for sec in 0..nsec {
                 let j = o * nsec + sec;
-                let c: Vec<f64> = (0..5).map(|w| f32::from_bits(self.slot_word(m, j, w)) as f64).collect();
-                let (g, c1, c2, c3, c4) = (c[0], c[1], c[2], c[3], c[4]);
+                let [g, c1, c2, c3, c4]: [f64; 5] = std::array::from_fn(|w| f32::from_bits(self.slot_word(m, j, w as u32)) as f64);
                 let at = self.slot_addr(j);
                 let tag = self.slot_word(m, j, 7);
                 let (mut s1, mut s2) = if tag == STATE_TAG {
@@ -172,6 +175,7 @@ impl HwEq {
                 store(m, oa.wrapping_add(o.wrapping_mul(out_ch)).wrapping_add((s as u32).wrapping_mul(out_step)), fout, *v);
             }
         }
+        self.buf = x;
         100 + (n as u64) * (och as u64) * (8 + 26 * nsec as u64)
     }
 }

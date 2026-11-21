@@ -105,16 +105,14 @@ impl HwSrc {
         let (ia, mut ileft, oa, mut oleft) = (self.regs[4], self.regs[5], self.regs[6], self.regs[7]);
         let fltb = self.regs[8];
         let rd16 = |m: &mut dyn FnMut(u32) -> u32, a: u32| -> i16 { (m(a & !3) >> ((a & 2) * 8)) as u16 as i16 };
-        // the history, channel by channel (24 halfwords each, from FLTB_ADR on)
-        let mut hist: Vec<[i16; TAPS]> = (0..ch)
-            .map(|k| {
-                let mut r = [0i16; TAPS];
-                for (t, s) in r.iter_mut().enumerate() {
-                    *s = rd16(&mut |a| m.rd(a), fltb.wrapping_add(48 * k + 2 * t as u32));
-                }
-                r
-            })
-            .collect();
+        // the history, channel by channel (24 halfwords each, from FLTB_ADR on; 8 channels at most)
+        let mut hist = [[0i16; TAPS]; 8];
+        let hist = &mut hist[..ch as usize];
+        for (k, r) in hist.iter_mut().enumerate() {
+            for (t, s) in r.iter_mut().enumerate() {
+                *s = rd16(&mut |a| m.rd(a), fltb.wrapping_add(48 * k as u32 + 2 * t as u32));
+            }
+        }
         let (mut s, mut o, mut taken) = (0u32, 0u32, 0u64);
         'out: while oleft > 0 && o < RUN_MAX {
             while phase >= out_rate {
@@ -137,7 +135,7 @@ impl HwSrc {
                 break;
             }
             let f = phase as f64 / out_rate as f64;
-            let c: Vec<f64> = (0..TAPS).map(|t| h(t as f64 + f)).collect();
+            let c: [f64; TAPS] = std::array::from_fn(|t| h(t as f64 + f));
             for (k, r) in hist.iter().enumerate() {
                 let y: f64 = (0..TAPS).map(|t| r[(off + t) % TAPS] as f64 * c[t]).sum();
                 let y = (y + 0.5).floor().clamp(-32768.0, 32767.0) as i32;
