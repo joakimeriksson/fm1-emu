@@ -1014,18 +1014,18 @@ impl Gen<'_> {
     }
 }
 
-/// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
-/// first.
 /// The helpers' indices in the function table (the host imports them into a region's module:
 /// `fm1_jit_compile`), as a region compiled with `profile` calls them.
 fn helpers<B: Bus>(profile: bool) -> [u32; 3] {
     [
-        h_read::<B> as usize as u32,
-        h_write::<B> as usize as u32,
-        if profile { h_op::<B, true> as usize as u32 } else { h_op::<B, false> as usize as u32 },
+        h_read::<B> as *const () as usize as u32,
+        h_write::<B> as *const () as usize as u32,
+        if profile { h_op::<B, true> as *const () as usize as u32 } else { h_op::<B, false> as *const () as usize as u32 },
     ]
 }
 
+/// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
+/// first.
 fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, stops: bool, prof: bool) -> Vec<u8> {
     let n = blocks.len() as u32;
     let mut g = Gen {
@@ -2099,7 +2099,7 @@ pub fn int_selftest() -> u32 {
         for i in 0..n * n + 256 {
             let (x, y) = if i < n * n { (specials[i / n], specials[i % n]) } else { (rnd(), rnd()) };
             let mut cpu = Cpu::new(0x0200_0000);
-            for r in 0..16 { cpu.regs[r] = rnd(); }
+            for r in &mut cpu.regs { *r = rnd(); }
             cpu.regs[1] = x;
             cpu.regs[2] = y;
             let mut want = Cpu::new(0x0200_0000);
@@ -2179,7 +2179,7 @@ pub fn fop_selftest() -> u32 {
                     else if i < n { (specials[i], rnd()) }
                     else { (rnd(), rnd()) };
                 let mut cpu = Cpu::new(0x0200_0000);
-                for r in 0..16 { cpu.regs[r] = rnd(); }
+                for r in &mut cpu.regs { *r = rnd(); }
                 cpu.regs[1] = x;
                 cpu.regs[2] = y;
                 let init = cpu.regs;

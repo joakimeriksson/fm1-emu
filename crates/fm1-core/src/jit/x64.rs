@@ -1050,13 +1050,13 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
         }
     }
     // fell off the end of the prefix
-    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
+    if !ops.last().is_some_and(|o| o.fast.may_jump()) {
         g.chain(pc, ins);
     }
 }
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::vec_box)]
 pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
     let mut a = Asm::new();
     let exit = a.label();

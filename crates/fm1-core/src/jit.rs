@@ -236,6 +236,7 @@ pub struct Jit {
     /// per block: runs counted until hot, then the compiled entry (or a failure)
     state: Vec<Entry>,
     // Boxes keep addresses embedded in generated code stable until cache reset.
+    #[allow(clippy::vec_box)]
     guards: Vec<Box<RamGuard>>,
     kept: Kept,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
@@ -1920,14 +1921,14 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
         }
     }
     // fell off the end of the prefix
-    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
+    if !ops.last().is_some_and(|o| o.fast.may_jump()) {
         g.chain(pc, ins);
     }
 }
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
 #[cfg(target_arch = "aarch64")]
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::vec_box)]
 fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
     for o in [off_reg(15), off_sp(), off_rets(), off_pc(), off_hold(), off_stop_pc(), off_stop_io(), off_stop_rest(), off_probe(16)] {
         if o >= 16384 {
@@ -2427,7 +2428,7 @@ mod tests {
             bus.flags.iter_mut().for_each(|f| *f = 0);
             let mem = bus.jit_mem().unwrap();
             let mut cpu = Cpu::new(0);
-            for r in 0..8 { cpu.regs[r] = if rnd() % 3 == 0 { rnd() % 40 } else { rnd() }; }
+            for r in &mut cpu.regs[..8] { *r = if rnd() % 3 == 0 { rnd() % 40 } else { rnd() }; }
             cpu.regs[8] = 64 + (rnd() % 32) * 4; cpu.regs[9] = 65 + (rnd() % 32) * 2; cpu.regs[10] = 129 + rnd() % 64;
             cpu.regs[11] = rnd() % 16;
             let mut e = Cpu::new(0);
@@ -2502,7 +2503,6 @@ mod tests {
         let mut seed = 0x1357_9bdf_2468_ace0u64;
         let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
         let mut jit = Jit::new(false).unwrap();
-        let mut id = 0;
         for round in 0..3000 {
             let (x, y) = (rnd(), rnd());
             let fam = [0u8, 1, 2, 4, 5, 6][x as usize % 6];
@@ -2529,7 +2529,7 @@ mod tests {
             (bus.irq, bus.due_on_mmio) = (rnd() % 3 == 0, rnd() % 2 == 0);
             let mem = bus.jit_mem().unwrap();
             let mut cpu = Cpu::new(0);
-            for r in 0..4 { cpu.regs[r] = rnd() % 6; }
+            for r in &mut cpu.regs[..4] { *r = rnd() % 6; }
             (cpu.regs[8], cpu.regs[9], cpu.regs[2]) = (64 + 4 * (rnd() % 16), MMIO, rnd());
             let mut e = Cpu::new(0);
             e.regs = cpu.regs;
@@ -2547,9 +2547,8 @@ mod tests {
                     }
                 }
             }
-            for _ in 0..HOT { jit.entry::<Memory>(id, &block, &[], Some(&then), 0, &mem, true, false); }
-            let p = jit.entry::<Memory>(id, &block, &[], Some(&then), 0, &mem, true, false).unwrap();
-            id += 1;
+            for _ in 0..HOT { jit.entry::<Memory>(round, &block, &[], Some(&then), 0, &mem, true, false); }
+            let p = jit.entry::<Memory>(round, &block, &[], Some(&then), 0, &mem, true, false).unwrap();
             assert_eq!(p.insns, 1 + then.len() as u32);
             let (got, _, got_stop) = unsafe { run(p.code, &mut cpu, &mut bus, &mem, 0, 10, false) };
             let what = format!("round {round}: {:?} then {:?}", block[0].fast, then.iter().map(|o| o.fast).collect::<Vec<_>>());
@@ -2619,7 +2618,7 @@ mod tests {
             bus.paths(paths);
             let mem = bus.jit_mem().unwrap();
             let mut cpu = Cpu::new(0);
-            for r in 0..16 { cpu.regs[r] = rnd(); }
+            for r in &mut cpu.regs { *r = rnd(); }
             cpu.regs[8] = 64 + (rnd() % 16) * 4; cpu.regs[9] = 65 + (rnd() % 16) * 2; cpu.regs[10] = 129 + rnd() % 32;
             cpu.regs[11] = rnd() % 16;
             cpu.sp = 192; cpu.rets = 0x0200_1234;
@@ -2885,8 +2884,8 @@ mod tests {
                 bus.paths(paths);
                 let mem = bus.jit_mem().unwrap();
                 let mut cpu = Cpu::new(0);
-                for r in 0..8 {
-                    cpu.regs[r] = match rnd() % 4 { 0 => floats[rnd() as usize % floats.len()].to_bits(), 1 => rnd() % 40, _ => rnd() };
+                for r in &mut cpu.regs[..8] {
+                    *r = match rnd() % 4 { 0 => floats[rnd() as usize % floats.len()].to_bits(), 1 => rnd() % 40, _ => rnd() };
                 }
                 if round % 3 == 0 { cpu.regs[2] = cpu.regs[1]; }
                 cpu.regs[8] = 64 + (rnd() % 32) * 4; cpu.regs[9] = 65 + (rnd() % 32) * 2; cpu.regs[10] = 129 + rnd() % 64;
