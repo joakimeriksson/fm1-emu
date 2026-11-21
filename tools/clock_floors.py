@@ -52,7 +52,7 @@ def starved(pkg, mhz):
         try:
             subprocess.run([live, "--fwsc", pkg, "--mhz", str(mhz), "--bench", str(MS)], env=env,
                            capture_output=True, timeout=600)
-        except (subprocess.TimeoutExpired, OSError):
+        except subprocess.TimeoutExpired:
             return None, False
         if not os.path.exists(out):
             return None, False
@@ -92,6 +92,9 @@ def text_of(doc):
     return (f'{{\n  "note": {s(doc["note"])},\n  "default": {s(doc["default"])},\n  "skipped": {skipped},\n'
             '  "firmwares": [\n' + ",\n".join(entry(f) for f in doc["firmwares"]) + "\n  ]\n}\n")
 
+# (no fm1-live is not a firmware that gives no result: every one would keep the minimum it has, and the run would pass)
+if not os.access(live, os.X_OK):
+    sys.exit(f"{live}: no fm1-live to run (cargo build --release -p fm1-live, or --live PATH)")
 text = open(cat_path, encoding="utf-8").read()
 doc = json.loads(text)
 if text_of(doc) != text:
