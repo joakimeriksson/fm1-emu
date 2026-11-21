@@ -229,6 +229,7 @@ pub struct Jit {
     state: Vec<Entry>,
     // Boxes keep addresses embedded in generated code stable until cache reset.
     guards: Vec<Box<RamGuard>>,
+    kept: Kept,
     /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
     profile: bool,
     /// computed jumps' targets: pc -> compiled body, direct-mapped by pc (`Gen::ind`); a body
@@ -236,6 +237,32 @@ pub struct Jit {
     itab: Box<[ITab]>,
     /// compile the checks for `Cpu::stop_pc` / `stop_io` at each body's entry (`Cpu::stop_checks`)
     pub(crate) stops: bool,
+}
+
+/// What generated code holds the address of besides its RAM guards, kept as long as the code
+/// is: until `Jit::reset`, after which none of the code before it is entered again (its entries,
+/// the table and the chains into it are all forgotten or lie in it), or the Jit's end. (Boxes:
+/// the addresses stay while the lists grow.)
+#[derive(Default)]
+#[allow(clippy::vec_box)]
+struct Kept {
+    /// the op of each call of the executor's helper (`h_op`'s argument)
+    ops: Vec<Box<Fast>>,
+    /// x86-64: each chain exit's slot (`link`)
+    #[cfg(target_arch = "x86_64")]
+    slots: Vec<Box<u64>>,
+}
+
+impl Kept {
+    fn op(&mut self, op: Fast) -> *const Fast {
+        self.ops.push(Box::new(op));
+        &**self.ops.last().unwrap()
+    }
+    #[cfg(target_arch = "x86_64")]
+    fn slot(&mut self) -> *mut u64 {
+        self.slots.push(Box::new(0));
+        self.slots.last_mut().unwrap().as_mut()
+    }
 }
 
 /// An `itab` entry (generated code reads it: pc at 0, body at 8).
@@ -307,7 +334,7 @@ impl Jit {
         // (the mapping first: a host that refuses it gets None before anything else is made)
         let cache = CodeCache::new(64 << 20)?;
         let itab = (0..1 << ITAB_BITS).map(itab_empty).collect();
-        Some(Jit { cache, state: Vec::new(), guards: Vec::new(), profile, itab, stops: false })
+        Some(Jit { cache, state: Vec::new(), guards: Vec::new(), kept: Kept::default(), profile, itab, stops: false })
     }
 
     /// Will `entry` compile block `id` on its next call? (Then `Cpu::then_of` looks for the
@@ -377,7 +404,7 @@ impl Jit {
         }
         let itab = self.itab.as_ptr() as u64;
         let stops = self.stops.then_some(whole);
-        let (code, body) = compile::<B>(ops, swaps, then, pc0, mem, &mut self.guards, self.profile, itab, stops)?;
+        let (code, body) = compile::<B>(ops, swaps, then, pc0, mem, &mut self.guards, &mut self.kept, self.profile, itab, stops)?;
         let p = self.cache.write(&code)?;
         // SAFETY: body is a byte offset inside the code just written
         let body = unsafe { p.add(body) };
@@ -415,6 +442,7 @@ impl Jit {
         self.state.clear();
         self.cache.used = 0;
         self.guards.clear();
+        self.kept = Kept::default();
         self.itab.iter_mut().enumerate().for_each(|(i, e)| *e = itab_empty(i));
     }
 }
@@ -566,7 +594,7 @@ fn h_write<B: Bus>(ctx: *mut Ctx, addr: u32, v: u32, idx: u32, w: u32) {
 code_abi! {
 /// Any op through the interpreter's own executor: bit 32 = jumped (target in the low word).
 fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx: u32, next_pc: u32) -> u64 {
-    // SAFETY: as h_read; `op` points at a leaked, immutable Fast.
+    // SAFETY: as h_read; `op` points at a Fast the Jit keeps unchanged as long as this code (`Kept`).
     let ctx = unsafe { &mut *ctx };
     let bus = unsafe { &mut *(ctx.bus as *mut B) };
     let cpu = unsafe { &mut *ctx.cpu };
@@ -732,6 +760,7 @@ struct Gen<'a> {
     h_pair: u64,
     /// `Jit::itab`'s address
     itab: u64,
+    kept: &'a mut Kept,
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
     rc: RegCache,
@@ -1781,9 +1810,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         // ---- everything else: the interpreter's executor for this one op
         other => {
-            let p: &'static Fast = Box::leak(Box::new(other));
+            let p = g.kept.op(other);
             g.a.mov_x(0, CTX);
-            g.a.ldr_lit_x(1, p as *const Fast as u64);
+            g.a.ldr_lit_x(1, p as u64);
             g.idx_w2(idx);
             g.a.mov32(3, next_pc);
             g.call(op_helper::<B>(&other, profile));
@@ -1883,7 +1912,7 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
-fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
+fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
     for o in [off_reg(15), off_sp(), off_rets(), off_pc(), off_hold(), off_stop_pc(), off_stop_io(), off_stop_rest()] {
         if o >= 16384 {
             return None;
@@ -1899,6 +1928,7 @@ fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate
         h_write: h_write::<B> as *const () as u64,
         h_pair: h_pair::<B> as *const () as u64,
         itab,
+        kept,
         stops: stops.is_some(),
         rc: RegCache::default(),
         probe_copy: None,
@@ -2128,6 +2158,28 @@ mod tests {
             });
             assert!(gone, "a dropped cache's range is still mapped");
         }
+    }
+    /// The op a block hands to the executor's helper (and on x86-64 a chain exit's slot) is the
+    /// Jit's, kept while the block's code is and gone at its reset, with the code's entries.
+    #[test]
+    fn what_compiled_code_refers_to_is_kept_with_it() {
+        let mut bus = Memory::new(); let mem = bus.jit_mem().unwrap();
+        let mut cpu = Cpu::new(0); let mut j = Jit::new(false).unwrap();
+        let code = hot(&mut j, 0, 0, &[op(Fast::IcfgRd { d: 3 }), op(Fast::Goto { target: 32 })], &mem);
+        assert_eq!(j.kept.ops.len(), 1);
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(j.kept.slots.len(), 1);
+        // (more of them, so the list holding the first has grown: its address stays)
+        for id in 1..200 {
+            hot(&mut j, id, 64, &[op(Fast::IcfgWr { s: 4 })], &mem);
+        }
+        cpu.sreg_store[0] = 0x155;
+        assert_eq!(unsafe { run(code, &mut cpu, &mut bus, &mem, 0, 10, false) }.0, 2);
+        assert_eq!((cpu.regs[3], cpu.pc), (cpu.icfg(), 32));
+        j.reset();
+        assert!(j.kept.ops.is_empty() && j.body(0).is_none());
+        #[cfg(target_arch = "x86_64")]
+        assert!(j.kept.slots.is_empty());
     }
     #[test]
     fn ram_chain_rejects_changed_target_and_respects_budget() {
