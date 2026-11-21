@@ -283,8 +283,10 @@ const HOT: u32 = 32;
 
 impl Jit {
     pub fn new(profile: bool) -> Option<Jit> {
+        // (the mapping first: a host that refuses it gets None before anything else is made)
+        let cache = CodeCache::new(64 << 20)?;
         let itab = (0..1 << ITAB_BITS).map(itab_empty).collect();
-        Some(Jit { cache: CodeCache::new(64 << 20)?, state: Vec::new(), guards: Vec::new(), profile, itab, stops: false })
+        Some(Jit { cache, state: Vec::new(), guards: Vec::new(), profile, itab, stops: false })
     }
 
     /// Will `entry` compile block `id` on its next call? (Then `Cpu::then_of` looks for the
