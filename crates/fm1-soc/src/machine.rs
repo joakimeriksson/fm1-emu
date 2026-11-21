@@ -49,6 +49,10 @@ impl Core1Bus<'_> {
     }
 }
 
+// Every method of `Bus` is spelled out here, none left to its default. Not passed on to the SoC:
+// the clock (`tick`, `tick_room`, `add_ticks`, `next_tick_due`: the budget instead, time stands
+// still while core 1 runs), `irq_window` and `service` (they end the run; the SoC's `next_due` is
+// cpu0's to zero) and `idle` (core 1's sleep, not cpu0's idle skip).
 impl Bus for Core1Bus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.soc.core1_read8(a)
@@ -146,6 +150,9 @@ impl Bus for Core1Bus<'_> {
 /// the SoC as it is, but for a flaky core 1's misreads (`Soc::flaky_core1`).
 pub struct Core1Loads<'a>(pub &'a mut Soc);
 
+// The SoC's own answers but for the loads. Not passed on: `jit_mem` (None, see there) and
+// `fetch_cost` (its default, nothing: the flash cache it would charge is FM1_STRICT's, and a
+// runner with that clock runs core 1 through `Core1Bus`).
 impl Bus for Core1Loads<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.0.core1_read8(a)
@@ -366,6 +373,10 @@ impl ProbeBus<'_> {
     }
 }
 
+// Left to `Bus`'s defaults on purpose: `tick` (`probe_loop` ticks the SoC itself, between steps),
+// `jit_mem`, `tick_room`, `add_ticks`, `next_tick_due`, `code_writes` and `code_mark` (a probe
+// steps: no compiled code, no blocks built, and a store into code ends it) and `fetch_cost` (no
+// probe runs with the cost model: `run_blocks`).
 impl Bus for ProbeBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         if self.load(a & !3) { self.soc.read8(a) } else { 0 }
@@ -462,6 +473,11 @@ fn probe_loop(cpu: &mut Cpu, soc: &mut Soc, budget: u32) -> u32 {
             }
         }
         if i >= budget || i >= PROBE_MAX {
+            break Err(false);
+        }
+        // (code outside the PC limits is the block loop's: it raises the guard where a block out
+        // there is entered, and a step checks no limits)
+        if cpu.pc_win.is_some_and(|w| w.iter().all(|&(lo, hi)| !(lo..=hi).contains(&cpu.pc))) {
             break Err(false);
         }
         // (the first instruction's tick is paid; with something due the block loop goes on)
@@ -602,7 +618,12 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
         let now = soc.periph.cycles;
         // not while a release is latched: run_fast's return must break below where it would
         // without the skip (lib.rs latches again on any later 0 -> 1 of 0x10008 bit 3)
-        if soc.loop_skip.enabled && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
+        // nor on FM1_STRICT's clock, whichever part of it is on: a probe counts an instruction as one
+        // tick (the cost model: each its own), its loads from XIP would move the flash cache and
+        // charge its misses, and a misaligned access raised in a probe that is then undone would
+        // stay raised
+        let exact = soc.xip_cache.is_none() && !soc.strict_align && !cpu.cost_model;
+        if soc.loop_skip.enabled && exact && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
             if soc.periph.next_due < soc.periph.cycles + PROBE_MIN as u64 {
                 soc.loop_skip.next_try = soc.periph.next_due; // too close to the next event
             } else {
@@ -2225,5 +2246,45 @@ mod tests {
         c1.core_id = 1;
         assert!(run_cpu1(&mut c1, &mut soc, 3 << 20, None).unwrap() < 1024);
         assert_eq!(soc.core1_dropped, 0);
+    }
+
+    #[test]
+    fn a_probe_leaves_a_round_outside_the_pc_limits_to_the_block_loop() {
+        // a round that leaves the PC limits (XIP alone here) for code in RAM and comes back: the
+        // block loop sets the guard's cause where the block out there is entered. A probe steps,
+        // which checks no limits: it must not run such a round, let alone skip its repeats.
+        let code = [LOAD.as_slice(), &goto_r(6)].concat();
+        let both = |skip: bool| {
+            let (cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544), (6, RAM_BASE + 0x8000), (7, XIP_BASE)], skip);
+            soc.ram.load(0x8000, &[&NOP[..], &goto_r(7)].concat());
+            pc_limits(&mut soc, XIP_BASE, XIP_BASE + 0xfff);
+            (cpu, soc, false)
+        };
+        let (mut a, mut b) = (both(true), both(false));
+        for i in 0..8 {
+            let ran = [&mut a, &mut b].map(|(cpu, soc, t)| run_blocks(cpu, soc, 8192, t).unwrap());
+            assert_eq!(ran[0], ran[1], "call {i}");
+            assert_eq!((a.0.pc, a.0.insn_count, a.1.periph.cycles, a.1.dbg_cause), (b.0.pc, b.0.insn_count, b.1.periph.cycles, b.1.dbg_cause), "call {i}");
+        }
+        assert_eq!(b.1.dbg_cause, 1 << 12, "the round does leave the limits");
+        assert!(a.1.loop_skip.probes > 0 && a.1.loop_skip.hits == 0, "probed, and left alone");
+    }
+
+    #[test]
+    fn no_probe_on_the_strict_clock() {
+        // a loop a probe finds; with the flash cache, the cost model or strict alignment on
+        // (FM1_STRICT's parts) none is made, whether or not the runner switched the skip off
+        let code = [LOAD.as_slice(), &[0x60, 0xff, 0x00, 0x20, 0xfb, 0xff]].concat();
+        let probes = |set: fn(&mut Cpu, &mut Soc)| {
+            let (mut cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544)], true);
+            set(&mut cpu, &mut soc);
+            let mut t = false;
+            run_blocks(&mut cpu, &mut soc, 100_000, &mut t).unwrap();
+            (soc.loop_skip.probes, soc.loop_skip.hits)
+        };
+        assert!(probes(|_, _| {}).1 > 0, "found and skipped on the plain clock");
+        assert_eq!(probes(|_, s| s.xip_cache = Some(crate::XipCache::default())), (0, 0));
+        assert_eq!(probes(|c, _| c.cost_model = true), (0, 0));
+        assert_eq!(probes(|_, s| s.strict_align = true), (0, 0));
     }
 }
