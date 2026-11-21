@@ -5899,6 +5899,25 @@ mod tests {
     }
 
     #[test]
+    fn float_nans_as_an_fm1_gives_them() {
+        // pi32v2-isa hw/fm1-2026-10-24 (the `.f` forms, hw/report-s.md)
+        let (one, inf, ninf, nan, nnan) = (0x3f80_0000u32, 0x7f80_0000u32, 0xff80_0000u32, 0x7fc1_2345u32, 0xffc0_0001u32);
+        for (op, a, b, want) in [
+            (0, one, nan, 0x7f80_0001), (1, inf, inf, 0x7f80_0001), (2, 0, inf, 0x7f80_0001), (3, 0, 0, 0x7f80_0001),
+            (3, one, 0, inf), (0, one, one, 0x4000_0000),
+            // fmin / fmax: the number over a NaN, b of two NaNs, -0 below +0
+            (5, nan, one, one), (6, one, nnan, one), (5, nan, nnan, nnan), (5, 0, 0x8000_0000, 0x8000_0000),
+            (6, 0x8000_0000, 0, 0), (6, ninf, one, one),
+            // ftof (trunc): the sign | 0x7fc00000; ftoi / ftou (trunc): the range's end on the NaN's side
+            (0xdf, nnan, 0, 0xffc0_0000), (0xdf, nan, 0, 0x7fc0_0000), (0x1f, nan, 0, 0x7fff_ffff), (0x1f, nnan, 0, 0x8000_0000),
+            (0x5f, nan, 0, u32::MAX), (0x5f, nnan, 0, 0), (0x1f, ninf, 0, 0x8000_0000), (0x5f, 0xc000_0000, 0, 0),
+        ] {
+            assert_eq!(fpu(op, a, b), want, "op {op:#x} a {a:#x} b {b:#x}");
+        }
+        assert_eq!(fpu_d(7, one, 0, inf), 0x7f80_0001, "1 + 0 * inf");
+    }
+
+    #[test]
     fn vendor_encodings() {
         // `dc ec cc bc` r11 = [r12++=-820] (the corpus's: dc's bit 2 is the increment's sign)
         let (c, _) = run1(&[0xdc, 0xec, 0xcc, 0xbc], &[]);
@@ -7486,23 +7505,54 @@ fn fcond(c: Cond, l: u32, r: u32) -> bool {
 /// The FPU ops (`3f e5`, see fm1-isa's fpu.rs): binary op 0 +, 1 -, 2 *, 3 /, 5 fmin, 6 fmax on
 /// (a, b); unary `K f` on a: K 0..3 ftoi, 4..7 ftou, c..f ftof (a whole float), rounding by
 /// K & 3 (0 to nearest even, 1 trunc, 2 ceil, 3 floor); 0x8f itof, 0x9f utof.
+///
+/// NaNs as an FM-1 has them (pi32v2-isa hw/fm1-2026-10-24, hw/report-s.md): arithmetic gives
+/// 0x7f800001 for every NaN; ftof gives the input's sign | 0x7fc00000; ftoi / ftou take a NaN
+/// as the infinity of its sign (the range's end); fmin / fmax pick the number over a NaN
+/// (`fminmax`).
 fn fpu(op: u8, a: u32, b: u32) -> u32 {
     let (x, y) = (f32::from_bits(a), f32::from_bits(b));
     let round = |k: u8| match k & 3 { 0 => x.round_ties_even(), 1 => x.trunc(), 2 => x.ceil(), _ => x.floor() };
+    let neg = a >> 31 != 0;
     match op {
-        0 => (x + y).to_bits(),
-        1 => (x - y).to_bits(),
-        2 => (x * y).to_bits(),
-        3 => (x / y).to_bits(),
-        5 => x.min(y).to_bits(),
-        6 => x.max(y).to_bits(),
+        0 => fnan(x + y),
+        1 => fnan(x - y),
+        2 => fnan(x * y),
+        3 => fnan(x / y),
+        5 => fminmax(a, b, false),
+        6 => fminmax(a, b, true),
         0x8f => (a as i32 as f32).to_bits(),
         0x9f => (a as f32).to_bits(),
         _ => match op >> 4 {
+            0..=3 if x.is_nan() => if neg { i32::MIN as u32 } else { i32::MAX as u32 },
+            4..=7 if x.is_nan() => if neg { 0 } else { u32::MAX },
+            _ if x.is_nan() => (a & 0x8000_0000) | 0x7fc0_0000,
             k @ 0..=3 => round(k) as i32 as u32,
             k @ 4..=7 => round(k) as u32,
             k => round(k).to_bits(),
         },
+    }
+}
+
+/// A float arithmetic result as an FM-1 gives it: every NaN is 0x7f800001.
+fn fnan(x: f32) -> u32 {
+    if x.is_nan() { 0x7f80_0001 } else { x.to_bits() }
+}
+
+/// fmin / fmax as an FM-1 runs them: a NaN loses to a number, of two NaNs b is the result,
+/// fmin(+0, -0) is -0 and fmax +0 (pi32v2-isa fmin.rrr / fmax.rrr).
+fn fminmax(a: u32, b: u32, max: bool) -> u32 {
+    let (x, y) = (f32::from_bits(a), f32::from_bits(b));
+    if x.is_nan() {
+        b
+    } else if y.is_nan() {
+        a
+    } else if x == 0.0 && y == 0.0 {
+        if max { a & b } else { a | b }
+    } else if (max && x > y) || (!max && x < y) {
+        a
+    } else {
+        b
     }
 }
 
@@ -7639,8 +7689,8 @@ fn sat16_raw(raw: u64) -> Option<(u8, u8, bool)> {
 fn fpu_d(op: u8, d: u32, a: u32, b: u32) -> u32 {
     let (x, y, acc) = (f32::from_bits(a), f32::from_bits(b), f32::from_bits(d));
     match op {
-        7 => (acc + x * y).to_bits(),
-        8 => (acc - x * y).to_bits(),
+        7 => fnan(acc + x * y),
+        8 => fnan(acc - x * y),
         _ => fpu(op, a, b),
     }
 }
