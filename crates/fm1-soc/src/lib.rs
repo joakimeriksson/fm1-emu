@@ -264,7 +264,7 @@ pub struct Soc {
     pub lcd: Lcd,
     /// SPI0 + the external NOR flash (1 MiB; `--flash` image loaded at 0).
     pub flash: SpiFlash,
-    /// Console bytes written through DBG_MSG / UART-style debug boxes.
+    /// Console bytes written through DBG_MSG / UART-style debug boxes (the first `CONSOLE_MAX`).
     pub console: Vec<u8>,
     /// The guards' causes in DBG_MSG (bit 12 a PC outside its limits, 4 / 5 a read / write of
     /// unmapped space): set as a guard trips, cleared by DBG_MSG_CLR
@@ -415,6 +415,10 @@ struct Boot {
     /// The SPL's boot parameters (r0 into RAM, `write_boot_info`): where, and the bytes.
     info: Option<(u32, Vec<u8>)>,
 }
+
+/// The most `Soc::console` keeps: a mebibyte, of what a firmware writes to DBG_MSG for as long as
+/// it runs.
+pub const CONSOLE_MAX: usize = 1 << 20;
 
 fn dbg_line(addr: u32) -> &'static str {
     match addr & !3 {
@@ -1591,7 +1595,10 @@ impl Soc {
             Region::Dbg => {
                 match dbg_line(addr) {
                     "msg" => {
-                        self.console.extend_from_slice(&value.to_le_bytes());
+                        // (its first `CONSOLE_MAX` bytes: only fm1-emu reads it, the start of it)
+                        if self.console.len() < CONSOLE_MAX {
+                            self.console.extend_from_slice(&value.to_le_bytes());
+                        }
                     }
                     "msg_clr" => self.dbg_cause &= !value,
                     _ => {}
@@ -2108,6 +2115,16 @@ mod tests {
         soc.write32(RAM_BASE + (1 << 16) - 4, 0x5566_7788);
         assert_eq!((soc.read32(RAM_BASE + (1 << 16) - 4), soc.fetch32(RAM_BASE)), (0x5566_7788, 0x1122_3344));
         assert_eq!((soc.read32(XIP_BASE + 0xffc), soc.read16(XIP_BASE + 0xffe)), (0x5a5a_5a5a, 0x5a5a));
+    }
+
+    #[test]
+    fn the_console_keeps_its_first_mebibyte() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for i in 0..(CONSOLE_MAX as u32 / 4 + 1000) {
+            soc.write32(0x1eee244, i);
+        }
+        assert_eq!(soc.console.len(), CONSOLE_MAX);
+        assert_eq!((&soc.console[..8], &soc.console[CONSOLE_MAX - 4..]), (&[0u8, 0, 0, 0, 1, 0, 0, 0][..], &(CONSOLE_MAX as u32 / 4 - 1).to_le_bytes()[..]));
     }
 }
 

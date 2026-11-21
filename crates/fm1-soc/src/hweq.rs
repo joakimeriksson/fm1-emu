@@ -36,6 +36,11 @@ pub const RAM_END: u32 = RAM + 4 * RAM_WORDS - 1;
 pub const RAM_SLOTS: u32 = 20;
 /// word 7 of a slot whose state is this model's (f64, in `HwEq::state`)
 pub const STATE_TAG: u32 = 0x5145_4d31;
+/// The most slots whose states `HwEq::state` keeps: 2^14, sixteen EQs of the largest size (16
+/// channels of 64 sections). A firmware that filters at ever new coefficient addresses would
+/// add states without end; at this many all are dropped, and a slot's next run starts from
+/// silence, as one whose state words the driver zeroed.
+const STATES_MAX: usize = 1 << 14;
 
 #[derive(Default, Clone, Debug)]
 pub struct HwEq {
@@ -155,6 +160,9 @@ impl HwEq {
                     s2 = g * c2 * xi + c1 * y;
                     *v = y;
                 }
+                if self.state.len() >= STATES_MAX && !self.state.contains_key(&at) {
+                    self.state.clear();
+                }
                 self.state.insert(at, (s1, s2));
                 self.slot_store(m, j, 5, (s2 as f32).to_bits());
                 self.slot_store(m, j, 6, (s1 as f32).to_bits());
@@ -269,5 +277,26 @@ mod tests {
     #[test]
     fn integers_round_half_away_and_saturate() {
         assert_eq!([int(-19.5, 16), int(19.5, 16), int(-9.75, 16), int(44560.0, 16)], [-20, 20, -10, 32767]);
+    }
+
+    #[test]
+    fn the_states_kept_are_bounded() {
+        // 16 channels of 64 sections, one frame, at 40 coefficient addresses in turn (1004 slots
+        // past the EQ's RAM each): never more than STATES_MAX states, and the EQ still runs
+        let mut ram = Ram(vec![0; 0x10_0000]);
+        let mut eq = HwEq::new();
+        let mut most = 0;
+        for k in 0..40u32 {
+            for (r, v) in [(1, 0), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, 0), (7, 0x10000 + 0x8000 * k)] {
+                eq.write(&mut ram, BASE + 4 * r, v, 0);
+            }
+            let con = (63 << 16) | (15 << 8) | (2 << 4) | (2 << 6);
+            eq.write(&mut ram, BASE, con | 0x4000_0000, 0);
+            eq.write(&mut ram, BASE, con | 3, 0);
+            assert_ne!(eq.read(BASE, 1 << 40) & 0x8000_0000, 0, "run {k} done");
+            most = most.max(eq.state.len());
+        }
+        assert!(most > STATES_MAX / 2 && most <= STATES_MAX, "{most} states at most");
+        assert_eq!(eq.runs, 40);
     }
 }
