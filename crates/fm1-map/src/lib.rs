@@ -506,9 +506,9 @@ pub struct Mapper {
     key_count: [u8; NKEYS as usize],
     /// The fraction of a click each binding has not turned yet.
     frac: Vec<f32>,
-    /// The last value of each binding's CC (0 before any): at 64 or more it has its button down, or
-    /// has made its press. A CC is a level, and what presses is its coming up to 64 or more, or the
-    /// same value again (`pressed`).
+    /// The last value of each binding's CC (0 before any; the value it was learned with): at 64 or
+    /// more it has its button down or has made its press, or was learned there. A CC is a level, and
+    /// what presses is its coming up to 64 or more, or the same value again (`pressed`).
     cc_last: Vec<u8>,
     /// Latched buttons, held buttons.
     latched: [bool; 14],
@@ -671,7 +671,7 @@ impl Mapper {
                     if kind == 0xb0 && self.profile.bindings.iter().any(|b| b.src.cc == Some(d1) && b.to == t) {
                         return; // the rest of a knob's turn
                     }
-                    self.learn_from(t, kind, ch, d1);
+                    self.learn_from(t, kind, ch, d1, d2);
                     out(Out::Learned);
                 }
                 return;
@@ -863,7 +863,7 @@ impl Mapper {
         }
     }
 
-    fn learn_from(&mut self, t: Target, kind: u8, ch: u8, d1: u8) {
+    fn learn_from(&mut self, t: Target, kind: u8, ch: u8, d1: u8, d2: u8) {
         self.own_copy();
         // learning one panel key learns the key zone: the note pressed plays that key
         let (t, at) = match t {
@@ -892,7 +892,10 @@ impl Mapper {
         // (a CC that holds a button now stays its binding's, so its release still lets go)
         let mut j = 0;
         self.cc_last.retain(|_| { j += 1; keep[j - 1] });
-        self.cc_last.insert(0, 0);
+        // the new binding's CC is at the value it was learned with: the rest of a fader's way up is
+        // not a press of what it was learned for, and the release of the press that taught it is that
+        // press's (`holds_button`), not something for the next target to learn
+        self.cc_last.insert(0, if kind == 0xb0 { d2 } else { 0 });
         let mut b = Binding::new(src, t);
         b.mode = mode;
         if t == Target::Keys {

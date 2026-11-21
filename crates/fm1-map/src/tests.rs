@@ -419,3 +419,28 @@ fn a_control_that_sends_no_release_presses_each_time_it_sends_its_value() {
     let v = run(&mut m, &[&[0xb0, 22, 127], &[0xb0, 22, 127], &[0xb0, 22, 0]]);
     assert_eq!(v, vec![Out::Key { id: 12, down: true, vel: 0 }, Out::Key { id: 12, down: false, vel: 0 }]);
 }
+
+#[test]
+fn a_learned_cc_starts_at_the_value_it_was_learned_with() {
+    let mut m = Mapper::new(Profile { name: "t".into(), ..Profile::default() });
+    // learned from a fader on its way up: the rest of its way is not a press; down and up again is
+    m.learn(Some(Target::Record));
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 70]]), vec![Out::Learned]);
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 71], &[0xb0, 20, 90], &[0xb0, 20, 127]]), vec![]);
+    assert_eq!(run(&mut m, &[&[0xb0, 20, 10], &[0xb0, 20, 100]]), vec![Out::Record]);
+    // a control that sends no release, learned by its press: each press after it is one
+    m.learn(Some(Target::Labels));
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 127]]), vec![Out::Learned]);
+    assert_eq!(run(&mut m, &[&[0xb0, 21, 127], &[0xb0, 21, 127]]), vec![Out::Labels, Out::Labels]);
+    // a pad learned by its press and still down when something else is to be learned: its release
+    // is the release of that press, not what the other target learns
+    m.learn(Some(Target::Button(3)));
+    assert_eq!(run(&mut m, &[&[0xb0, 22, 127]]), vec![Out::Learned]);
+    m.learn(Some(Target::KeysMode));
+    assert_eq!(run(&mut m, &[&[0xb0, 22, 0]]), vec![]);
+    assert_eq!(m.learning(), Some(Target::KeysMode));
+    // and the pad's next press holds its button, from the press to the release
+    m.learn(None);
+    let v = run(&mut m, &[&[0xb0, 22, 127], &[0xb0, 22, 0]]);
+    assert_eq!(v, vec![Out::Key { id: 3, down: true, vel: 0 }, Out::Key { id: 3, down: false, vel: 0 }]);
+}
