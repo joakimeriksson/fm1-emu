@@ -19,9 +19,19 @@ const DEV = DEVICE === "smk37"
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+const store = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* private mode */ } };
 
-const catalog = await (await fetch("firmwares.json")).json();
+// What the page cannot do without (its list of firmwares, the emulator's module): when one does not load, the status
+// line says so and Start is off; the page would otherwise sit there with a Start that does nothing.
+async function needed(what, load) {
+  try { return await load(); } catch (error) {
+    document.getElementById("status").textContent = `${what} did not load (${error.message}): reload the page to try again`;
+    document.getElementById("start").disabled = true;
+    throw error;
+  }
+}
+const loaded = (r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r; };
+const catalog = await needed("the list of firmwares", async () => loaded(await fetch("firmwares.json")).json());
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
 let hubWait;
@@ -77,10 +87,16 @@ function endTryOut() {
   q.delete("script");
   history.replaceState(null, "", `?${q}`);
 }
-let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
+// ?mhz= or the clock kept from the last visit: a whole number of MHz within the clocks offered (one between two of them
+// is listed with them). Anything else is no clock: it would go to the machine as it is (not a number: 0 MHz; a huge one:
+// a quantum of audio that takes minutes to emulate).
+const clockOf = (v) => { const c = Number(v); return Number.isInteger(c) && c >= CLOCKS[0] && c <= CLOCKS[CLOCKS.length - 1] ? c : null; };
+let mhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
-let latency = params.get("latency") || stored("fm1.latency") || "interactive";
+// (an AudioContext refuses any other word)
+const latencyOf = (v) => (["interactive", "balanced", "playback"].includes(v) ? v : null);
+let latency = latencyOf(params.get("latency")) || latencyOf(stored("fm1.latency")) || "interactive";
 
 const canvas = document.getElementById("panel");
 const ctx = canvas.getContext("2d");
@@ -100,9 +116,9 @@ const memoryRecords = new Map();
 const saveMessage = (text, failed = false) => { saveStatus.textContent = text; saveStatus.dataset.error = String(failed); };
 const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}. Export a backup to keep your changes.`, true);
 
-const wasm = await (await fetch("fm1_web.wasm")).arrayBuffer();   // the worklet gets its own copy
+const wasm = await needed("the emulator", async () => loaded(await fetch("fm1_web.wasm")).arrayBuffer());   // the worklet gets its own copy
 // (the panel's instance runs no machine: its JIT import is never called)
-const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } })).instance.exports;
+const ui = (await needed("the emulator", () => WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } }))).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
 // --above: what sits over the panel in the player (its title, the screen's controls, a warning)
@@ -129,7 +145,8 @@ let frame = null;            // the latest LCD + LEDs from the audio thread
 const down = new Uint8Array(64);           // keys and buttons held (FM-1: matrix ids 0..40; SMK-37: keys 0..36, buttons 37..54)
 const encClicks = new Int32Array(8);
 const turning = new Uint32Array(9);
-let pot = 900;
+const POT_REST = 900;                      // MASTER on a machine just booted (fm1-soc's periph.rs)
+let pot = POT_REST;
 // SMK-37: its analog inputs as set (pads 0..15, faders 16..19, the pitch / mod wheel 20 / 21)
 const PITCH_REST = 535, MOD_REST = 629;
 const analog = new Uint16Array(23);
@@ -306,6 +323,9 @@ const heroPlay = document.getElementById("hero-play");
 // Cached packages are pinned to their exact bytes. Checking for updates is explicit.
 const packages = new Map();
 let localFw = null;
+// M-VAVE's entry, picked without its file while another firmware ran (the page went back to that one): the next file
+// opened is its copy, whatever its name
+let awaited = null;
 class NeedFile extends Error {}
 async function keptEntry(id) {
   try { return await saveStore.entry(DEV.key + id); }
@@ -427,6 +447,7 @@ showFirmware();
 
 fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
+  awaited = null;
   endTryOut();
   loadedUrl = null;
   if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
@@ -447,7 +468,9 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
+  const forMv = mv && (fw.byo || awaited === mv || DEV.stockFile.test(file.name));
+  awaited = null;
+  if (forMv) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -995,22 +1018,33 @@ function setClock(c) {
   boot();
 }
 async function setLatency(l) {
-  await bootQueue;
-  await flushRunning(true);
-  latency = l;
-  store("fm1.latency", l);
-  // a larger buffer needs a new audio context: rebuild the graph, boot again
-  node.port.onmessage = null;
-  node.disconnect();
-  running = null;
-  await ac.close();
-  await startAudio();
-  await boot();
-  await ac.resume();
+  try {
+    await bootQueue;
+    await flushRunning(true);
+    latency = l;
+    store("fm1.latency", l);
+    // a larger buffer needs a new audio context: rebuild the graph, boot again
+    node.port.onmessage = null;
+    node.disconnect();
+    node = null;
+    running = null;
+    await ac.close();
+    await startAudio();
+    if (await boot()) return await ac.resume();
+  } catch (error) {
+    status.textContent = `the audio buffer was not changed: ${error.message}`;
+  }
+  // Not done. The old machine still there (its flash could not be read): it plays on. None (the old graph is
+  // closed, the new one or its boot failed): Start makes one again.
+  if (running) node.port.postMessage({ type: "resume" });
+  else { startBtn.hidden = false; startBtn.disabled = false; }
 }
 
 // ---------------------------------------------------------------- audio: start on a click
 let ac = null, last = null, bootSeq = 0, booting = 0;
+// the boot whose machine the page shows (its screen, LEDs and status line): the latest asked for, or, when that one
+// failed and left the machine before it running, that machine's; and what the failed one said, kept in the status line
+let showing = 0, bootFailed = "";
 
 let bootQueue = Promise.resolve(), running = null, requestId = 0;
 const sessions = new Map(), bootWaiters = new Map(), snapshotWaiters = new Map();
@@ -1082,7 +1116,8 @@ async function flushRunning(pause = false) {
 // Serialize machine replacement, including the snapshot of the old machine. Requests that
 // became obsolete while downloading are skipped; every actual boot receives an acknowledgement.
 function boot(options = {}) {
-  const seq = ++bootSeq, f = fw, clock = mhz;
+  const seq = showing = ++bootSeq, f = fw, clock = mhz;
+  bootFailed = "";
   const task = async () => {
     if (seq !== bootSeq) return false;
     const importedBank = bank;
@@ -1112,7 +1147,7 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
@@ -1147,14 +1182,40 @@ function boot(options = {}) {
       if (bank === importedBank) bank = null;
       booting = 0;
       node?.port.postMessage({ type: "resume" });
-      if (seq === bootSeq) status.textContent = error instanceof NeedFile
-        ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+      if (seq === bootSeq) {
+        status.textContent = error instanceof NeedFile
+          ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+        if (running) {
+          bootFailed = status.textContent;
+          awaited = error instanceof NeedFile ? f : null;
+          backTo(running);
+        }
+      }
       if (trying) tell("error", error.message);
       return false;
     }
   };
   bootQueue = bootQueue.then(task, task);
   return bootQueue;
+}
+
+// A boot that failed left the machine before it running (the worklet keeps it until the next one has booted): the page
+// is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays, and
+// what the next visit opens is what it would have opened before the pick.
+function backTo(session) {
+  fw = session.fw;
+  mhz = session.mhz;
+  showing = session.seq;
+  for (const [k, v] of session.kept) store(k, v);
+  if (fw.id === "local") {
+    localFw = fw;
+    const opt = [...fwSel.options].find((o) => o.value === "local");
+    if (opt) opt.text = `${fw.name} (your file)`;
+  }
+  fwSel.value = fw.id;
+  mhzSel.value = mhz;
+  loadedUrl = session.record.url;
+  showFirmware();
 }
 
 // the audio graph: a context with the chosen buffer, the emulator's worklet node in it
@@ -1193,7 +1254,7 @@ function onWorklet(e) {
     }
     const waiter = bootWaiters.get(m.seq);
     if (waiter) { clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.reject(new Error(m.message)); }
-    if (m.seq === bootSeq) status.textContent = `${fw.name}: ${m.message}`;
+    if (m.seq === showing) status.textContent = `${fw.name}: ${m.message}`;
     return;
   }
   if (m.type === "flash-changed") {
@@ -1219,6 +1280,8 @@ function onWorklet(e) {
     const session = sessions.get(m.seq), waiter = bootWaiters.get(m.seq);
     if (!session || !waiter) return;
     running = session;
+    // (the picks as stored for the next visit while this machine runs: a later pick that does not boot gives them back)
+    session.kept = [DEV.key + "fw", "fm1.mhz"].map((k) => [k, stored(k)]);
     for (const key of sessions.keys()) if (key !== m.seq) sessions.delete(key);
     session.base = m.base;
     session.observedRevision = m.revision;
@@ -1227,11 +1290,14 @@ function onWorklet(e) {
     if (m.seq === bootSeq) {
       booting = 0;
       setBoard(m.board);
+      // the controls that stay where they were put, as the page shows them: a new machine has its own defaults
+      // (MASTER only once it was turned: a try-out's script may set it from its first millisecond)
       if (m.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
+      else if (pot !== POT_REST) send({ type: "pot", value: pot });
     }
     return;
   }
-  if (m.type !== "frame" || booting || m.seq !== bootSeq) return;
+  if (m.type !== "frame" || booting || m.seq !== showing) return;
   if (running?.ephemeral && tryOut?.files && tryOut.told !== m.seq && m.ms >= tryOut.files.end + 500) {
     tryOut.told = m.seq;                          // (its input script has played: the machine is the visitor's)
     tell("playing");
@@ -1243,7 +1309,8 @@ function onWorklet(e) {
   const now = performance.now();
   if (!last || now - last.t > 1000) {
     perf.second(m);
-    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (m.halted ? `${fw.name}: the emulated CPU halted` :
+    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (bootFailed ? `${bootFailed} · ` : "") +
+      (m.halted ? `${fw.name}: the emulated CPU halted` :
       `${fw.name} · ${mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
       `${(m.ms / 1000).toFixed(1)} s`);
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
@@ -1273,11 +1340,19 @@ async function start(auto = false) {
   // a phone on its side: the synth fills the screen, so bring all of it into view
   if (!auto && matchMedia("(orientation: landscape) and (max-height: 560px)").matches) canvas.scrollIntoView({ block: "center" });
 }
-startBtn.addEventListener("click", () => start());
+// What keeps the audio from starting (worklet.js did not load, the device refuses the context) is said, and Start is
+// there to try again, with a graph of its own.
+const tryStart = (auto) => start(auto).catch((error) => {
+  if (!node && ac) { ac.close().catch(() => {}); ac = null; }
+  startBtn.disabled = false;
+  status.textContent = `the audio did not start: ${error.message}`;
+  if (tryOut) tell("error", error.message);
+});
+startBtn.addEventListener("click", () => tryStart());
 if (tryOutError) status.textContent = tryOutError;
 else if (tryOut) {
   saveMessage("A try-out: it starts from the firmware's own flash and is not saved in this browser");
-  start(true);
+  tryStart(true);
 }
 
 // Persistence controls use the running machine's identity, even while another firmware is selected.

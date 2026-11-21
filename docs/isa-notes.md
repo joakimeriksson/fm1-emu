@@ -338,7 +338,8 @@ Felucca's I2S words hold a 24-bit sample in the **low** bits (Q15 << 7,
 
 Fifteen community firmwares (web/firmwares.json, `tools/fetch_firmwares.mjs`) were added as
 corpora: the ISA is mined from 25 listings now (`isa/corpora.txt`, newest versions included; the app listings come from
-`tools/disasm_app.sh`, which wraps a raw app in an ELF for JieLi's objdump). 2765 classes;
+`tools/disasm_app.sh`, which wraps a raw app in an ELF for JieLi's objdump;
+`node tools/fwsc_extract.mjs PACKAGE.fwsc OUT.bin` takes the raw app out of an update package). 2765 classes;
 `tools/isa_stable_names.py` keeps the previous class names (the core keys some decoders on
 them); `tools/gen_isa.py` lets a class the solver could not finish borrow a twin's slot only
 when it reproduces every (raw, value) example the solver kept for it.
