@@ -69,6 +69,9 @@ pub struct Fm1Params {
     pub controller: Mutex<map::Controller>,
     /// What the machine's thread tells the window about the controller (not saved).
     pub map: Mutex<map::MapView>,
+    /// Why the firmware loaded does not run, as the machine's thread tells the window (not saved):
+    /// it did not boot, or it halted.
+    pub halt: Mutex<Option<String>>,
 
     /// The MASTER pot.
     #[id = "master"]
@@ -174,6 +177,7 @@ impl Default for Fm1Params {
             rec: Mutex::new(RecView::default()),
             controller: Mutex::new(map::Controller::default()),
             map: Mutex::new(map::MapView::default()),
+            halt: Mutex::new(None),
             master: FloatParam::new("Master", 900.0 / 1023.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
