@@ -198,6 +198,18 @@ fn catalog() -> Vec<(String, String, String, String)> {
     }).collect()
 }
 
+/// `--fw ID`: the catalog's firmware `want` as (the window's title, its package), or what to say:
+/// the catalog is read from the current directory, so outside a checkout there is none.
+fn catalog_pick(cat: Vec<(String, String, String, String)>, want: &str) -> Result<(String, String), String> {
+    if cat.is_empty() {
+        return Err("--fw: no firmware catalog here: web/firmwares.json is looked for in the current directory, so --fw \
+                    works from the top of a checkout (anywhere else: --fwsc FILE)".into());
+    }
+    let (_, name, ver, path) = cat.into_iter().find(|f| f.0 == want)
+        .ok_or_else(|| format!("--fw: no firmware {want:?} in web/firmwares.json (--fw list lists them)"))?;
+    Ok((format!("{name} {ver}"), path))
+}
+
 fn parse() -> Option<Opts> {
     parse_args(std::env::args().collect())
 }
@@ -250,16 +262,19 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                 // a firmware from web/firmwares.json by id (`--fw list` lists them)
                 let want = a.get(i + 1)?;
                 let cat = catalog();
-                if want == "list" {
+                if want == "list" && !cat.is_empty() {
                     for (id, name, ver, path) in &cat {
                         let have = if std::path::Path::new(path).exists() { "" } else { "  (missing: node tools/fetch_firmwares.mjs)" };
                         println!("{id:14} {name} {ver}{have}");
                     }
                     std::process::exit(0);
                 }
-                let (_, name, ver, path) = cat.into_iter().find(|f| &f.0 == want)?;
+                let (name, path) = catalog_pick(cat, want).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                });
                 o.fwsc = Some(path);
-                o.name = format!("{name} {ver}");
+                o.name = name;
             }
             "--fwsc" => {
                 let path = a.get(i + 1)?;
@@ -2419,6 +2434,19 @@ mod tests {
         assert!(check_opts(&o).is_err());
         let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
         assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn fw_says_why_it_finds_no_firmware() {
+        let cat = || vec![("felucca".to_string(), "Felucca".to_string(), "0.7".to_string(), "reference/firmwares/felucca.fwsc".to_string())];
+        assert_eq!(catalog_pick(cat(), "felucca"), Ok(("Felucca 0.7".into(), "reference/firmwares/felucca.fwsc".into())));
+        let unknown = catalog_pick(cat(), "feluca").unwrap_err();
+        assert!(unknown.contains("no firmware \"feluca\"") && unknown.contains("--fw list"), "{unknown}");
+        // outside a checkout (web/firmwares.json is not there): nothing to pick from, whatever is asked for
+        for want in ["felucca", "list"] {
+            let none = catalog_pick(Vec::new(), want).unwrap_err();
+            assert!(none.contains("web/firmwares.json") && none.contains("--fwsc FILE"), "{none}");
+        }
     }
 
     #[test]
