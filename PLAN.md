@@ -241,7 +241,9 @@ comes out as `work/lcd_<ms>.bmp` snapshots and a 44.1 kHz WAV:
 
     fm1-emu --bin work/felucca_xip.bin --entry 0x02000120 --ms 7000 \
       --keys "800-1500:n7,3300:K1:-2,5200:PLAY" --wav work/demo.wav --snap 400,500,...
-    tools/demo_page.py out.html     # snapshots + WAV + script -> one page
+
+(`tools/demo_page.py`, which put the snapshots, the WAV and the script on one page, has been
+removed: `tools/bench_video.sh` makes a video of an fm1-live run.)
 
 Peripherals added (`crates/fm1-soc/src/periph.rs`, `spiflash.rs`), all from
 Felucca's HAL headers: SPI0 NOR flash, TIMER4 (24 MHz base) and TIMER5
