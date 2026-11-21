@@ -1118,8 +1118,9 @@ async function flushRunning(pause = false) {
 function boot(options = {}) {
   const seq = showing = ++bootSeq, f = fw, clock = mhz;
   // (the picks as stored for the next visit, which are those that ask for this machine: while it runs, a later pick
-  // that does not boot gives them back)
-  const kept = [DEV.key + "fw", "fm1.mhz"].map((k) => [k, stored(k)]);
+  // that does not boot gives them back. Not the firmware in a window on another site, which stores none: it is the
+  // full page's)
+  const kept = [...(EMBED ? [] : [DEV.key + "fw"]), "fm1.mhz"].map((k) => [k, stored(k)]);
   bootFailed = "";
   const task = async () => {
     if (seq !== bootSeq) return false;

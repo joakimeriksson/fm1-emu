@@ -343,6 +343,27 @@ test("a file the emulator refuses in place of M-VAVE's copy is not the entry's p
   assert.deepEqual([p.api.running.mhz, booted(), p.api.running.record.package[0]], [160, 5, 5]);
 });
 
+test('?embed=1 leaves the firmware the full page starts with as it is, also when a pick there does not boot', async t => {
+  const has = Element.prototype.hasAttribute;
+  Element.prototype.hasAttribute = name => name === 'data-embed';        // (what index.html's inline script sets for ?embed=1)
+  t.after(() => { Element.prototype.hasAttribute = has; });
+  const fetchPackage = async f => {
+    if (f.id === 'b') throw new Error('b.fwsc: 503');
+    return { bytes: new Uint8Array(960).fill(1), url: f.package };
+  };
+  const kept = new Map([['fm1.fw', 'a'], ['fm1.mhz', '100']]);
+  const localStorage = { getItem: k => kept.get(k), setItem: (k, v) => kept.set(k, String(v)), removeItem: k => kept.delete(k) };
+  const p = await page(storage(), '?embed=1', '', false, { fetchPackage, localStorage });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  kept.set('fm1.fw', 'z');                           // (picked on the full page, in another tab, meanwhile)
+  p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
+  p.elements.get('fw').value = 'b'; p.elements.get('fw').listeners.change();
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(p.elements.get('status').textContent, 'b: b.fwsc: 503');
+  assert.equal(p.api.fw.id, 'a');
+  assert.deepEqual([kept.get('fm1.fw'), kept.get('fm1.mhz')], ['z', '100']);
+});
+
 test('a machine that booted while a later pick waited is gone back to with its own stored pick, board and MASTER', async () => {
   const cat = { default: 'a', firmwares: ['a', 'b', 'c'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) };
   const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
