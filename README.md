@@ -270,7 +270,8 @@ its first users, the rounds that made it work there, and what fm1-dock's probes 
   workspace, with its own `Cargo.lock`)
 - `web/`: the page; `web/fwsc.js` unpacks the update packages
 - `docs/`: the hardware notes (`recon.md`), the instruction set (`isa-notes.md`), M-VAVE's
-  firmware (`stock-firmware.md`); `PLAN.md` is the work log
+  firmware (`stock-firmware.md`), the `FM1_*` environment variables (`environment.md`); `PLAN.md`
+  is the work log
 - `tools/`, `probes/`: ISA extraction, benchmarks, differential test programs
 - `fm1-sid/`: the SID study and player firmware, [joakimeriksson/fm1-sid](https://github.com/joakimeriksson/fm1-sid) as a submodule
   (its own README; `git submodule update --init` after a plain clone)
