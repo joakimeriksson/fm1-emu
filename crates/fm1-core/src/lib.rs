@@ -13,7 +13,7 @@
 //! - branch/call offsets are byte offsets from pc_next (Rel slots multiplied
 //!   by the solver-found factor).
 
-use fm1_isa::{DecodeError, Instruction, SlotKind};
+use fm1_isa::{DecodeError, Instruction};
 
 /// The memory bus. Implemented by the SoC (or by plain RAM in unit tests).
 ///
@@ -209,8 +209,8 @@ pub struct Cpu {
     /// the block start. `rep_end == 0` means no rep is active.
     pub rep_start: u32,
     pub rep_end: u32,
-    /// Counter register (`rep N rR`, decremented in place) or `None` for
-    /// the immediate-count form, which counts in `rep_count`.
+    /// A register to count in, decremented in place, or `None` to count in `rep_count`: always
+    /// `None`, since `rep N rR` latches its register's count there too (`execute`'s arm).
     pub rep_reg: Option<usize>,
     pub rep_count: u32,
     /// Predicated `if {} else {}` blocks whose then-part is executing:
@@ -275,7 +275,8 @@ pub struct Cpu {
     bresets: u32,
     /// FM1_NO_RAM_BLOCKS: RAM code a step at a time (the reference)
     pub no_ram_blocks: bool,
-    /// Instructions per execute route (index 31 = the micro-op fast path),
+    /// Instructions per execute route (index 31 = the micro-op fast path; 30 = the syntax
+    /// executor's route and every one above it: the FPU's, the raw-decoded 32 to 41),
     /// and per class name on the slow path — for tuning the dispatcher.
     pub route_hist: [u64; 32],
     pub slow_hist: std::collections::HashMap<&'static str, u64>,
@@ -613,8 +614,8 @@ impl Cpu {
 
     /// Run micro-ops back to back: the first instruction has been paid for
     /// by the caller's clock tick, every following one ticks the bus here.
-    /// Stops before an instruction that needs `step` (slow path, dual-issue
-    /// pair, predicated block, rep loop), after `budget` instructions, or
+    /// Stops before an instruction that needs `step` (one without a micro-op: pairs,
+    /// predicated blocks and rep loops run here, careful), after `budget` instructions, or
     /// when the bus reports something due — then the tick for the next
     /// instruction has already happened and `due` is true. Interrupt
     /// readiness can only change at those points, so the caller's per-
@@ -1135,10 +1136,10 @@ impl Cpu {
         len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, self.pc, stop).0
     }
 
-    /// The block of micro-ops starting at pc (XIP code only): built on first
-    /// use from the decoded lines, ending after anything that may jump, before
-    /// an instruction without a micro-op, or at 32 ops. None: pc is outside
-    /// XIP or its first instruction needs `step`.
+    /// The block of micro-ops starting at pc (XIP code, or RAM the bus can show: `ram_code`):
+    /// built on first use from the decoded lines, ending after anything that may jump, before
+    /// an instruction without a micro-op, or at 32 ops. None: pc is in
+    /// neither, or its first instruction needs `step`.
     #[inline]
     fn block_at<B: Bus>(&mut self, bus: &mut B, pc: u32) -> Result<Option<(usize, u32, u32)>, CoreError> {
         let xip = (0x0200_0000..0x0400_0000).contains(&pc);
@@ -1504,8 +1505,8 @@ impl Cpu {
         Ok(())
     }
 
-    /// Fetch/decode/execute one instruction. Fetches a 6-byte window (the
-    /// longest pi32v2 instruction); short instructions zero-extend.
+    /// Fetch/decode/execute one instruction, decoded from an 8-byte window (`fetch_at`; the
+    /// longest pi32v2 instruction is 6): above a shorter one's bytes it holds what follows.
     fn step_one<B: Bus>(&mut self, bus: &mut B) -> Result<(), CoreError> {
         let slot = self.fetch(bus)?;
         let l = self.icache[slot];
@@ -1639,7 +1640,6 @@ impl Cpu {
     /// (always inlined: wasm builds otherwise call it per instruction from the block loop)
     #[inline(always)]
     fn exec_fast<B: Bus>(&mut self, bus: &mut B, f: Fast, next_pc: u32) -> Option<u32> {
-        let _ = next_pc;
         let base = |cpu: &Self, b: Base| match b { Base::Reg(r) => cpu.regs[r as usize], Base::Sp => cpu.sp };
         match f {
             Fast::Mov { d, s } => self.regs[(d & 15) as usize] = self.regs[(s & 15) as usize],
@@ -2113,8 +2113,8 @@ impl Cpu {
         let mut jump: Option<u32> = None;
 
         // ---- special registers to / from the stack (ISR wrappers, prologues, context
-        // switches): first, as interrupt-heavy firmware runs them constantly (the SMK-37's
-        // stock firmware: ~150 k interrupts a second). Push in printed order (first item at the
+        // switches), the lists that are no `PushSregs` / `PopSregs` micro-op (`sreg_list_mask`:
+        // the names in another order than the ISA's). Push in printed order (first item at the
         // highest address), pop ascending assigning the printed list reversed.
         fn named_list(list: &'static str) -> Option<([&'static str; 10], usize)> {
             let inner = list.strip_prefix('{')?.strip_suffix('}')?;
@@ -2837,33 +2837,8 @@ impl Cpu {
         Ok(slots[i].value(insn.raw))
     }
 
-    fn blk(&self, insn: &Instruction, i: usize) -> Result<Vec<u8>, CoreError> {
-        let slots = insn.entry.slots;
-        if i >= slots.len() || slots[i].kind != SlotKind::Blk {
-            return Err(CoreError::MissingSlot {
-                name: insn.entry.name,
-                pc: self.pc,
-                slot: i,
-            });
-        }
-        Ok(slots[i].block_regs(insn.raw))
-    }
-
     fn reg(&self, insn: &Instruction, i: usize) -> Result<usize, CoreError> {
         Ok(self.slot(insn, i)? as usize & 0xf)
-    }
-
-    fn load(&self, insn: &Instruction, i: usize) -> Result<u32, CoreError> {
-        let n = self.blk(insn, i)?;
-        Ok(if n.is_empty() { 0 } else { self.regs[n[0] as usize] })
-    }
-
-    fn store_r(&mut self, insn: &Instruction, i: usize, v: u32) -> Result<(), CoreError> {
-        let n = self.blk(insn, i)?;
-        if !n.is_empty() {
-            self.regs[n[0] as usize] = v;
-        }
-        Ok(())
     }
 
     fn branch(&self, insn: &Instruction, i: usize) -> Result<Option<u32>, CoreError> {
@@ -2887,8 +2862,7 @@ impl Cpu {
 
         let alu4 = pre.alu4;
         let bittest = pre.bittest;
-        #[allow(unused_variables)]
-        let (n, other) = (name, name);
+        let other = name;
         if let Some(f) = pre.fast {
             jumped = self.exec_fast(bus, f, next_pc);
         } else { match pre.route {
@@ -3341,8 +3315,8 @@ impl Cpu {
         Ok(())
     }
 
-    /// The instructions decoded from the raw word alone (execute's routes 16, 18, 19, 21, 22,
-    /// 32 and 27, whose 4-byte form is RAW_POP_RETS_MASK): shared by `execute` and the `Fast::Raw` micro-op, so the two cannot drift.
+    /// The instructions decoded from the raw word alone (routes 16, 18, 19, 21, 22, 32 to 41
+    /// and 27, whose 4-byte form is RAW_POP_RETS_MASK): shared by `execute` and the `Fast::Raw` micro-op, so the two cannot drift.
     fn exec_raw<B: Bus>(&mut self, bus: &mut B, route: u8, raw: u32) {
         let raw = raw as u64;
         match route {
@@ -4591,17 +4565,6 @@ fn raw_v(insn: &Instruction) -> u64 {
     insn.raw
 }
 
-/// Parse the `rHI_rLO` register-pair token from a d-access class name.
-
-fn sext(v: u32, bits: u8) -> i64 {
-    let v = v & ((1u32 << bits) - 1);
-    if bits < 32 && v & (1 << (bits - 1)) != 0 {
-        (v as i64) - (1i64 << bits)
-    } else {
-        v as i64
-    }
-}
-
 #[derive(Debug)]
 pub enum CoreError {
     Decode(DecodeError),
@@ -4609,7 +4572,7 @@ pub enum CoreError {
     MissingSlot { name: &'static str, pc: u32, slot: usize },
 }
 
-/// A flat RAM bus for unit tests — no peripherals, no side effects.
+/// Unit tests, most on `FlatRam`: a flat RAM bus with no peripherals and no side effects.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6898,7 +6861,7 @@ fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) 
             // table's entries on those bytes include the carry rotates (`r15_r14 <c>= #i`, bit 27),
             // which stay unsupported
             "pair_op_raw" => 21,
-            _ if insn.entry.len == 4 && (insn.raw & 0xffff) == 0xe070 || (insn.raw & 0xffff) == 0xf070 => 22,
+            _ if (insn.entry.len == 4 && (insn.raw & 0xffff) == 0xe070) || (insn.raw & 0xffff) == 0xf070 => 22,
             "testset_b_r" | "testset_r" => 23,
             "ifeq_goto_i" | "ifne_goto_i" => 24,
             "if_ret_eq_i_goto_i" | "if_ret_ne_i_goto_i" => 25,
@@ -7115,7 +7078,7 @@ enum Fast {
     /// `R = smin|smax|umin|umax(R, R)`: kind 0 smin, 1 smax, 2 umin, 3 umax
     MinMax { d: u8, a: u8, b: u8, kind: u8 },
     /// predicated `if (..) {` (arm 14): block ends as offsets from the
-    /// instruction's next pc, worked out at decode (XIP code only)
+    /// instruction's next pc, worked out at decode (`fetch_at`: for RAM code too)
     IfBlk { a: u8, rk: u8, fam: u8, alt: bool, has_else: bool, rv: u32, then_d: u16, else_d: u16 },
     // specialised forms of the hottest generic ops (`Fast::specialise`):
     // no inner dispatch on condition, width or operation
