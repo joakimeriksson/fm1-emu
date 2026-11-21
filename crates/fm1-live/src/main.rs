@@ -46,6 +46,8 @@ mod buildinfo;
 mod fit;
 #[cfg(windows)]
 mod exclusive;
+mod ctl;
+mod labels;
 mod panel;
 mod wav;
 mod panel_smk;
@@ -170,6 +172,10 @@ struct Opts {
     buffer: Option<u32>,
     /// --exclusive (Windows): the output in WASAPI exclusive mode
     exclusive: bool,
+    /// --map: the controller profile (crates/fm1-map): auto, none, a profile's name or a .json
+    map: String,
+    /// --midi-log: each MIDI message from the inputs and what the controller profile made of it
+    midi_log: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -211,7 +217,8 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
-                       flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
+                       flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false,
+                       map: "auto".into(), midi_log: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -221,6 +228,11 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
         }
         if a[i] == "--exclusive" {
             o.exclusive = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--midi-log" {
+            o.midi_log = true;
             i += 1;
             continue;
         }
@@ -271,6 +283,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
             "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
+            "--map" => o.map = a.get(i + 1)?.clone(),
             _ => return None,
         }
         i += 2;
@@ -1297,9 +1310,21 @@ fn button(k: Key, shift: bool) -> Option<u8> {
     })
 }
 
-/// Connect the MIDI inputs `--midi` asks for: their bytes go to the MIDI IN jack. The
-/// connections live as long as the returned value.
-fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>) -> Vec<midir::MidiInputConnection<()>> {
+/// The MIDI inputs `--midi` asks for, by name.
+fn midi_input_names(o: &Opts) -> Vec<String> {
+    if o.midi == "none" {
+        return Vec::new();
+    }
+    let Ok(probe) = midir::MidiInput::new("fm1-live") else { return Vec::new() };
+    probe.ports().iter().filter_map(|p| probe.port_name(p).ok())
+        .filter(|n| o.midi == "all" || n.to_lowercase().contains(&o.midi.to_lowercase()))
+        .collect()
+}
+
+/// Connect the MIDI inputs `--midi` asks for: their messages go through the controller profile
+/// (crates/fm1-map) to the panel and the MIDI IN jack, or with `--map none` to the jack as they
+/// are. The connections live as long as the returned value.
+fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> Vec<midir::MidiInputConnection<()>> {
     let mut conns = Vec::new();
     if o.midi == "none" {
         return conns;
@@ -1318,8 +1343,14 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>) -> Vec<midir::MidiInputConne
         }
         let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue };
         input.ignore(midir::Ignore::None);
-        let (tx, ch) = (tx.clone(), o.midi_ch);
+        let (tx, ch, mapping) = (tx.clone(), o.midi_ch, control.clone());
+        // (--map auto: only the controller the profile is for; a DAW's port plays as it comes)
+        let mapped = control.maps(&name);
         let got = input.connect(&port, "fm1-live in", move |_, msg, _| {
+            if mapped && !msg.is_empty() && msg[0] != 0xf0 {
+                mapping.feed(msg, &tx);
+                return;
+            }
             for (i, &b) in msg.iter().enumerate() {
                 let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
                 let _ = tx.send(Action::Midi { b });
@@ -1327,7 +1358,8 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>) -> Vec<midir::MidiInputConne
         }, ());
         match got {
             Ok(c) => {
-                eprintln!("MIDI in: {name}");
+                eprintln!("MIDI in: {name}{}", if mapped { " (through the controller profile)" } else { "" });
+                control.inputs.lock().unwrap().push(name);
                 conns.push(c);
             }
             Err(e) => eprintln!("MIDI in: {name}: {e}"),
@@ -1356,7 +1388,13 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--flash-chip p25q80|uc25hq80]
                                  the FM-1's flash part: the stock Puya P25Q80 (85 60 14), or the
                                  UC25HQ80 (B3 60 14) of units sold since autumn 2026
+         [--map auto|none|NAME|FILE.json]  a MIDI controller as the panel (profiles: crates/fm1-map;
+                                 yours in %APPDATA%\\fm1-emu\\controllers or ~/.config/fm1-emu/controllers);
+                                 auto: the profile made for a controller, for that input only
+         [--midi-log]            print each MIDI message and what the profile made of it
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+window: right-click a control, then move or press one of your controller's: MIDI learn (right-click
+        again: cancel, Delete: unbind); F1 labels, F2 keys: panel / MIDI / auto; F3 records a WAV
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
           --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
@@ -1595,7 +1633,25 @@ fn main() {
     let status = Arc::new(Mutex::new(String::from("booting")));
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Action>();
-    let _midi = midi_inputs(&o, &tx);
+    // the MIDI inputs, through the controller profile (--map) to the panel and the MIDI IN jack
+    // (the profiles are the FM-1's panel: an SMK-37 firmware takes MIDI as it comes)
+    let names = midi_input_names(&o);
+    let profile = match ctl::choose(&o.map, &names) {
+        Ok(p) if board == fm1_soc::Board::Fm1 => p,
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("--map: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(p) = &profile {
+        eprintln!("controller: {} (F1 shows what is bound where; right-click a control to learn)", p.name);
+    }
+    let mut control = ctl::Ctl::new(profile, o.midi_ch);
+    control.log = o.midi_log;
+    control.auto = o.map == "auto";
+    let control = Arc::new(control);
+    let _midi = midi_inputs(&o, &tx, &control);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
     // F3: a WAV of what the firmware plays, written as the emulation makes it
@@ -1751,9 +1807,22 @@ fn main() {
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
+    // the controller: its labels over the panel, MIDI learn, the keys' mode
+    let mut labels = false;
+    let mut right_was = false;
+    let mut note = String::new(); // what the title says for a few seconds
+    let mut note_at = Instant::now();
+    let say = |s: String, note: &mut String, note_at: &mut Instant| {
+        eprintln!("{s}");
+        *note = s;
+        *note_at = Instant::now();
+    };
     let mut space_rec = false;
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
     eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, Shift+Space REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
+    if control.on {
+        eprintln!("controller: right-click a control, then move or press one of yours (MIDI learn; right-click again cancels, Delete unbinds); F1 labels, F2 keys: panel / MIDI / auto");
+    }
 
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
@@ -1841,6 +1910,90 @@ fn main() {
         }
         was_pressed = pressed;
 
+        // ---- MIDI learn: right-click a control, then move or press one of the controller's
+        let right = win.get_mouse_down(MouseButton::Right);
+        if right && !right_was && control.on {
+            if let Some(c) = pos.and_then(|(mx, my)| panel::hit(mx, my)) {
+                let t = ctl::target_of(c);
+                let mut mp = control.mapper.lock().unwrap();
+                if mp.learning() == Some(t) {
+                    mp.learn(None);
+                    drop(mp);
+                    say("learn: cancelled".into(), &mut note, &mut note_at);
+                } else {
+                    mp.learn(Some(t));
+                    drop(mp);
+                    labels = true;
+                    let what = if matches!(t, fm1_map::Target::Key(_)) { "press the note that should play it" } else { "move or press a control" };
+                    say(format!("learn {t}: {what} (right-click again: cancel, Delete: unbind)"), &mut note, &mut note_at);
+                }
+            }
+        }
+        right_was = right;
+
+        // ---- what the controller did since the last frame
+        let midi_down;
+        {
+            let mut v = control.view.lock().unwrap();
+            midi_down = v.down;
+            for i in 0..7 {
+                if v.enc[i] != 0 {
+                    enc_clicks[i] += v.enc[i];
+                    turning[i] = 10;
+                    v.enc[i] = 0;
+                }
+            }
+            if let Some(p) = v.pot.take() {
+                pot = p;
+                turning[7] = 10;
+            }
+            let events = std::mem::take(&mut v.events);
+            drop(v);
+            for e in events {
+                match e {
+                    ctl::Ui::Labels => labels = !labels,
+                    ctl::Ui::Record => toggle_record(&recorder, &o.name),
+                    ctl::Ui::KeysMode(k) => say(format!("keys: {}", k.name()), &mut note, &mut note_at),
+                    ctl::Ui::Learned => {
+                        let p = control.mapper.lock().unwrap().profile().clone();
+                        match fm1_map::save_user(&p) {
+                            Ok(path) => say(format!("learned; {} saved to {}", p.name, path.display()), &mut note, &mut note_at),
+                            Err(e) => say(format!("learned, not saved: {e}"), &mut note, &mut note_at),
+                        }
+                    }
+                }
+            }
+        }
+        for k in win.get_keys_pressed(KeyRepeat::No) {
+            match k {
+                Key::F1 => labels = !labels,
+                Key::F2 if control.on => {
+                    // (mapper, then view: the order the MIDI thread takes them in)
+                    let mut mp = control.mapper.lock().unwrap();
+                    let mut v = control.view.lock().unwrap();
+                    let next = mp.keys_mode().next();
+                    mp.set_keys_mode(next, &mut |out| ctl::apply(out, &tx, &mut v, control.midi_ch));
+                    drop(mp);
+                    v.events.retain(|e| !matches!(e, ctl::Ui::KeysMode(_)));
+                    drop(v);
+                    say(format!("keys: {}", next.name()), &mut note, &mut note_at);
+                }
+                Key::Delete | Key::Backspace if control.on => {
+                    let mut mp = control.mapper.lock().unwrap();
+                    if let Some(t) = mp.learning() {
+                        let t = if matches!(t, fm1_map::Target::Key(_)) { fm1_map::Target::Keys } else { t };
+                        mp.learn(None);
+                        mp.unbind(t);
+                        let p = mp.profile().clone();
+                        drop(mp);
+                        let saved = fm1_map::save_user(&p).map_or_else(|e| format!(", not saved: {e}"), |_| String::new());
+                        say(format!("{t}: unbound{saved}"), &mut note, &mut note_at);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // ---- held keys and buttons: computer keyboard + mouse
         let mut want = [false; 41];
         // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
@@ -1891,8 +2044,16 @@ fn main() {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
             fb.clone_from(&lcd.lock().unwrap());
             let lit = *leds.lock().unwrap();
-            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &down, leds: &lit, turning: &turning };
+            // (the controller's buttons and keys show as pressed too)
+            let mut shown_down = down;
+            for i in 0..41 {
+                shown_down[i] |= midi_down[i];
+            }
+            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &shown_down, leds: &lit, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme);
+        }
+        if labels && control.on {
+            control.draw_labels(&mut buf);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
             let s = w.frames / 44_100;
@@ -1904,7 +2065,15 @@ fn main() {
             break;
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
-            win.set_title(&format!("FM-1 · {} — {}", o.name, status.lock().unwrap()));
+            let mut extra = String::new();
+            if control.on {
+                let mp = control.mapper.lock().unwrap();
+                extra = format!(" | {} · keys: {}", mp.profile().name, mp.keys_mode().name());
+            }
+            if note_at.elapsed() < Duration::from_secs(6) && !note.is_empty() {
+                extra += &format!(" | {note}");
+            }
+            win.set_title(&format!("FM-1 · {} — {}{extra}", o.name, status.lock().unwrap()));
             last_title = Instant::now();
         }
     }
