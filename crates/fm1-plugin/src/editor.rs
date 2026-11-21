@@ -534,7 +534,6 @@ fn file_job(action: FileAction, mut path: std::path::PathBuf, params: Arc<Fm1Par
                     link.cmds.send(Cmd::Load { firmware: data.firmware, sectors: data.sectors, reply: tx })
                         .map_err(|_| "the machine stopped".to_owned())?;
                     rx.recv().map_err(|_| "the machine stopped while loading".to_owned())??;
-                    *link.running.lock().unwrap() = Some(firmware.pkg);
                     Ok(format!("Loaded {}", firmware.name))
                 }
                 FileAction::Export => {

@@ -195,18 +195,17 @@ impl Default for Fm1Params {
 pub struct Link {
     pub shared: Arc<Shared>,
     pub cmds: mpsc::Sender<Cmd>,
-    /// the package the machine runs (to boot only when the project's is another)
-    pub running: Mutex<Option<Arc<Vec<u8>>>>,
 }
 
 impl Link {
-    /// Boot `fw` unless the machine already runs it; `sectors` are the project's saved flash.
+    /// The project's state to the machine: `fw` with `sectors`, its saved flash. The machine's
+    /// thread boots it unless that is what it runs (`Cmd::Boot`): the host initializes again for a
+    /// new sample rate, and also after loading a state, which may be the same firmware with
+    /// other sectors (a preset, an undo).
     pub fn boot(&self, fw: &Firmware, sectors: &[Sector]) {
-        let mut running = self.running.lock().unwrap();
-        if fw.pkg.is_empty() || running.as_ref().is_some_and(|r| Arc::ptr_eq(r, &fw.pkg) || **r == *fw.pkg) {
+        if fw.pkg.is_empty() {
             return;
         }
-        *running = Some(fw.pkg.clone());
         let sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
         let _ = self.cmds.send(Cmd::Boot { pkg: fw.pkg.clone(), sectors });
     }
@@ -283,7 +282,7 @@ impl Fm1 {
         );
         self.midi = Some(midi_tx);
         self.audio = Some(audio_rx);
-        let link = Arc::new(Link { shared, cmds: tx, running: Mutex::new(None) });
+        let link = Arc::new(Link { shared, cmds: tx });
         self.link = Some(link.clone());
         link
     }

@@ -32,7 +32,9 @@ pub struct Midi {
 
 /// What the editor and the plugin ask of the machine.
 pub enum Cmd {
-    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it.
+    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it: the
+    /// project's state, each time the host initializes the plugin. A machine that runs this package
+    /// with these sectors runs on.
     Boot { pkg: Arc<Vec<u8>>, sectors: Vec<(u32, Vec<u8>)> },
     /// Validate and replace a shared setup, including a different save of the same package.
     Load { firmware: crate::Firmware, sectors: Vec<crate::Sector>, reply: mpsc::Sender<Result<(), String>> },
@@ -442,6 +444,16 @@ pub fn run(
             };
             match c {
                 Cmd::Boot { pkg, sectors } => {
+                    // the host initializing again (a new sample rate) sends the package that runs with
+                    // the sectors the project has from this machine, as last saved or as its flash is
+                    // now: nothing to do. Other sectors are a state the host loaded (a preset, an
+                    // undo), booted as another package is, so the project's flash and the machine's
+                    // are the same again and what the firmware writes later is saved on top of that.
+                    let runs = prepared.is_none() && active_pkg.as_ref().is_some_and(|a| Arc::ptr_eq(a, &pkg) || **a == *pkg);
+                    if runs && m.as_ref().is_some_and(|mm| sectors == saved || sectors == mm.changed_sectors()) {
+                        saved = sectors;
+                        continue;
+                    }
                     cancel_snapshots(&mut pending);
                     // (a project's package that does not boot: the window says why, as for a halt)
                     let booted = prepared.map_or_else(|| boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed), Ok);
