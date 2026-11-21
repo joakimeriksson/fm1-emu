@@ -957,11 +957,17 @@ impl Gen<'_> {
             self.op(I32_AND);
         }
         self.if_();
-        self.get(L_OFF);
-        self.i32c(2);
-        self.op(I32_SHR_U);
-        self.mem_op(I32_LOAD8_U, 0, mem.ram_code as u32);
-        self.op(I32_EQZ);
+        if mem.ram_code.is_null() {
+            // (a bus without code flags: no word is one, as the native JITs take it; a load
+            // at the null table would read whatever lies at the offset's quarter)
+            self.i32c(1);
+        } else {
+            self.get(L_OFF);
+            self.i32c(2);
+            self.op(I32_SHR_U);
+            self.mem_op(I32_LOAD8_U, 0, mem.ram_code as u32);
+            self.op(I32_EQZ);
+        }
         self.if_();
         self.count(3);
         self.get(L_OFF);
@@ -2219,7 +2225,8 @@ impl Probe {
             self.writes += 1;
         }
     }
-    /// (the inline windows: the first `len` bytes of the RAM, the first `xip` of the XIP)
+    /// (the inline windows: the first `len` bytes of the RAM, the first `xip` of the XIP; a
+    /// test may take the flags away: `JitMem::ram_code` null)
     fn mem(&mut self, len: u32, xip: u32) -> JitMem {
         JitMem { ram: self.ram.as_mut_ptr(), ram_base: Self::RAM, ram_len: len, ram_code: self.code.as_ptr(), xip: self.xip.as_ptr(), xip_base: Self::XIP, xip_len: xip }
     }
@@ -2293,9 +2300,12 @@ fn exits_selftest() -> u32 {
     // byte short of the access, then just long enough
     for w in [1u8, 2, 4] {
         let all = u32::MAX >> (32 - 8 * w as u32);
-        for (len, inline) in [(w as u32 - 1, false), (w as u32, true)] {
+        for (len, inline, flags) in [(w as u32 - 1, false, true), (w as u32, true, true), (w as u32, true, false)] {
             let mut bus = Probe::new();
-            let mem = bus.mem(len, len);
+            let mut mem = bus.mem(len, len);
+            if !flags {
+                mem.ram_code = std::ptr::null();
+            }
             let ops = [Fast::Ld { d: 0, b: Base::Reg(2), off: 0, w, signed: false }, Fast::Ld { d: 0, b: Base::Reg(3), off: 0, w, signed: false },
                 Fast::St { s: 1, b: Base::Reg(2), off: 0, w }];
             let mut got = [0u32; 3];
