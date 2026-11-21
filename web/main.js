@@ -141,7 +141,8 @@ let frame = null;            // the latest LCD + LEDs from the audio thread
 const down = new Uint8Array(64);           // keys and buttons held (FM-1: matrix ids 0..40; SMK-37: keys 0..36, buttons 37..54)
 const encClicks = new Int32Array(8);
 const turning = new Uint32Array(9);
-let pot = 900;
+const POT_REST = 900;                      // MASTER on a machine just booted (fm1-soc's periph.rs)
+let pot = POT_REST;
 // SMK-37: its analog inputs as set (pads 0..15, faders 16..19, the pitch / mod wheel 20 / 21)
 const PITCH_REST = 535, MOD_REST = 629;
 const analog = new Uint16Array(23);
@@ -1281,7 +1282,10 @@ function onWorklet(e) {
     if (m.seq === bootSeq) {
       booting = 0;
       setBoard(m.board);
+      // the controls that stay where they were put, as the page shows them: a new machine has its own defaults
+      // (MASTER only once it was turned: a try-out's script may set it from its first millisecond)
       if (m.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
+      else if (pot !== POT_REST) send({ type: "pot", value: pot });
     }
     return;
   }

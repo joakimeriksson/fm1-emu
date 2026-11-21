@@ -92,7 +92,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
     startAudio, boot, flushRunning, setLatency, get running() { return running; },
     setFirmware(id) { fw = byId.get(id); fwSel.value = id; }, setBank(bytes) { bank = bytes; },
-    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, get bootSeq() { return bootSeq; }, screen: { lcdRaw, showLcd }
+    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, setPot, get bootSeq() { return bootSeq; }, screen: { lcdRaw, showLcd }
   }; })()`);
   // (a page that could not come up: what it shows, with the error)
   const api = await run(...Object.values(environment)).catch(error => { throw Object.assign(error, { elements }); });
@@ -313,6 +313,16 @@ test('Shift+Space is REC, Space PLAY, and R presses nothing (a slip among the bl
   assert.equal(sent(), '13v 13^');
   key('keydown', ' ', 'Space'); key('keyup', ' ', 'Space', true);
   assert.equal(sent(), '12v 12^');
+});
+
+test('MASTER stays where it was turned to when the machine is replaced', async () => {
+  const p = await page(); await p.api.startAudio(); await p.api.boot(); await settle();
+  const pots = () => p.audio.messages.filter(m => m.type === 'pot').map(m => m.value);
+  assert.deepEqual(pots(), []);                      // (untouched: the machine's own, which the page draws)
+  p.api.setPot(300);
+  p.api.setFirmware('b'); await p.api.boot(); await settle();
+  assert.deepEqual(pots(), [300, 300]);
+  assert.equal(p.audio.messages.at(-1).type, 'pot', 'after the boot, to the new machine');
 });
 
 test('Big screen shows the screen again; Screen colours recolour it by brightness, on the panel too', async () => {
