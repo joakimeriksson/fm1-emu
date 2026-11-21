@@ -680,7 +680,8 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 /// where it finds a lock cpu0 holds (`Soc::waits`: cpu0's slice is next, the rest of this run
 /// forfeited, as a polling loop's) and, given `until` (what cpu0 spins on: `run_dual`), once
 /// cpu0 would get it. Returns the instructions run, `cycles` at most (a stretch may run on a
-/// little past them).
+/// little past them) and 2^20 at most: what a run that used all of those was due beyond them is
+/// counted in `Soc::core1_dropped` and not run.
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
         return Ok(0);
@@ -794,6 +795,10 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
         if until.is_some_and(|w| !soc.still_waits(0, w)) {
             break; // cpu0 would get what it spins on now: back to it
         }
+    }
+    // (a run that used its whole budget, cut by the cap: the rest of what it was due is not run)
+    if left == 0 {
+        soc.core1_dropped += cycles - budget;
     }
     Ok(budget - left)
 }
@@ -2194,5 +2199,31 @@ mod tests {
         assert_eq!((soc.read32(crate::hwsrc::BASE), soc.read32(crate::hwsrc::BASE + 4), soc.read32(crate::hwsrc::BASE + 0x20)), (0, 0, 0));
         assert_eq!(soc.read32(crate::hweq::RAM + 4), 0x3f80_0000, "the EQ's RAM stays, as RAM does");
         assert_eq!((soc.hwdsp.jobs, soc.hweq.runs, soc.hwsrc.runs), (1, 1, 1));
+    }
+
+    #[test]
+    fn core_1s_time_past_a_runs_cap_is_counted() {
+        // core 1 busy (`r5 += 1; goto r6` back to it: never where it started): a run it is due more
+        // than 2^20 instructions of runs 2^20, and the rest is counted as dropped
+        let code = [&add1(5)[..], &goto_r(6)].concat();
+        let busy = |soc: &mut Soc, cycles: u64| {
+            let mut c1 = Cpu::new(XIP_BASE);
+            c1.core_id = 1;
+            c1.regs[6] = XIP_BASE;
+            let ran = run_cpu1(&mut c1, soc, cycles, None).unwrap();
+            assert_eq!(c1.regs[5] as u64, c1.insn_count.div_ceil(2), "it ran them");
+            ran
+        };
+        let (_, mut soc) = machine(&code, &[], false);
+        assert_eq!((busy(&mut soc, 1 << 20), soc.core1_dropped), (1 << 20, 0), "all of a run of 2^20");
+        assert_eq!((busy(&mut soc, (1 << 20) + 5000), soc.core1_dropped), (1 << 20, 5000));
+        assert_eq!((busy(&mut soc, 3 << 20), soc.core1_dropped), (1 << 20, 5000 + (2 << 20)), "it adds up");
+        // a core 1 on the spot (`goto -2`) ends its run where it started: it gave up the rest
+        // itself, nothing was cut
+        let (_, mut soc) = machine(&[0xf7, 0x9f], &[], false);
+        let mut c1 = Cpu::new(XIP_BASE);
+        c1.core_id = 1;
+        assert!(run_cpu1(&mut c1, &mut soc, 3 << 20, None).unwrap() < 1024);
+        assert_eq!(soc.core1_dropped, 0);
     }
 }

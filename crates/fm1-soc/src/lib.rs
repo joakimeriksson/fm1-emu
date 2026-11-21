@@ -301,6 +301,11 @@ pub struct Soc {
     pub core1_charging: bool,
     pub core1_ticks: u64,
     pub core1_debt: u64,
+    /// Core 1's time that was not run, in cycles: a run of it is 2^20 instructions at most
+    /// (`machine::run_cpu1`), and what it was due beyond them, after cpu0's clock moved further
+    /// in one go (an idle skip of more than 4.4 ms at 240 MHz), is dropped when the run used all
+    /// 2^20. A run statistic, as `Periph::skipped`: a chip reset keeps it.
+    pub core1_dropped: u64,
     /// FM1_TPROF: flash cache misses by (core << 32 | line address)
     pub miss_hist: Option<Box<std::collections::HashMap<u64, u64>>>,
     /// Overlay RAM (second bank, 0x04000000), written by the app CRT.
@@ -536,6 +541,7 @@ impl Soc {
             core1_charging: false,
             core1_ticks: 0,
             core1_debt: 0,
+            core1_dropped: 0,
             miss_hist: None,
             ticks: 0,
             periph: Periph::default(),
