@@ -261,6 +261,9 @@ pub struct Cpu {
     /// Per block over RAM: the bus's count of code-word writes when the block was last found
     /// current (`ram_block_ok`: the same count, no compare).
     bver: Vec<u64>,
+    /// How often the block table was emptied and begun again (`build_block`, past its limit): a
+    /// block id or an op index from before one is not this table's.
+    bresets: u32,
     /// FM1_NO_RAM_BLOCKS: RAM code a step at a time (the reference)
     pub no_ram_blocks: bool,
     /// Instructions per execute route (index 31 = the micro-op fast path),
@@ -839,7 +842,14 @@ impl Cpu {
                         Some((Some((f, at, r)), _)) => self.wasm_region_ok(bus, r).then_some((f, at)),
                         Some((None, true)) => {
                             // hot: compile its region (it runs from the next visit on)
+                            let resets = self.bresets;
                             let region = self.wasm_region(bus, id);
+                            // (forming it builds blocks, and one too many begins the block table
+                            // again: the region's ids and this block's are then the old table's,
+                            // which the JIT has forgotten with it: look again)
+                            if self.bresets != resets {
+                                continue;
+                            }
                             let ver = bus.code_writes().unwrap_or(u64::MAX);
                             // (profiling as the core is now: core 1 gets the flag after its release)
                             let profile = self.profile;
@@ -1330,6 +1340,7 @@ impl Cpu {
             self.bbytes.clear();
             self.bver.clear();
             self.bmap.iter_mut().for_each(|x| *x = 0);
+            self.bresets += 1;
             #[cfg(native_jit)]
             if let Some(j) = self.jit.as_mut() {
                 j.reset();
@@ -6350,6 +6361,52 @@ mod tests {
             }
             assert!(inside > 5000, "compiled code ran {inside} instructions inside ({setup:?})");
         }
+    }
+
+    /// The block table past its limit is begun again by the next block built, wherever that is:
+    /// by the loop itself (interpreted: the then-part's block, the first time r0 is not 0), or by
+    /// `then_of` looking for the then-part of the block about to be compiled, whose id and ops
+    /// are then the old table's. Either way the run goes on as `step` runs it.
+    /// `b0 e8 00 10` if (r0 != 0) { `c5 21` r5 += 1 } else { `c6 21` r6 += 1 }; `c4 21` r4 += 1;
+    /// `ff ea f9 ff` goto the if.
+    #[cfg(native_jit)]
+    #[test]
+    fn the_block_table_begun_again_mid_run_changes_nothing() {
+        let mut xip = vec![0u8; 0x100];
+        xip[..14].copy_from_slice(&[0xb0, 0xe8, 0x00, 0x10, 0xc5, 0x21, 0xc6, 0x21, 0xc4, 0x21, 0xff, 0xea, 0xf9, 0xff]);
+        let run = |how: &str| {
+            let mut bus = Clocked { ram: vec![0; 0x1000], xip: xip.clone(), cycles: 0, next_due: u64::MAX, irq: false, due_on_mmio: false, writes: 0 };
+            let mut cpu = Cpu::new(0x0200_0000);
+            (cpu.jit_on, cpu.profile) = (how == "jit", true);
+            for lap in 0..120 {
+                // (the else part until the if's block is compiled, native: 32 runs; then the then-part)
+                cpu.regs[0] = (lap >= 50) as u32;
+                if lap == 10 && how != "step" {
+                    // the table at its limit, with the if's block and the else part's in it
+                    assert_eq!(cpu.blocks.len(), 2, "{how}");
+                    let pad = cpu.bops[0];
+                    cpu.bops.resize((1 << 22) + 1, pad);
+                }
+                let mut left = 4;
+                while left > 0 {
+                    left -= match if how == "step" { 0 } else { cpu.run_fast(&mut bus, left).unwrap().0 } {
+                        0 => cpu.step(&mut bus).map(|_| 1).unwrap(),
+                        k => k,
+                    };
+                }
+                assert_eq!(cpu.pc, 0x0200_0000, "{how}, lap {lap}");
+            }
+            if how != "step" {
+                // (the loop's blocks built anew: three, and compiled code leaves at a fourth pc)
+                assert!(cpu.bresets == 1 && cpu.blocks.len() <= 4, "{how}: begun again {} times, {} blocks", cpu.bresets, cpu.blocks.len());
+                assert!(how != "jit" || cpu.jit_insns > 0, "compiled after it");
+            }
+            (cpu.regs, cpu.insn_count)
+        };
+        let want = run("step");
+        assert_eq!((want.0[4], want.0[5], want.0[6]), (120, 70, 50));
+        assert_eq!(run("interpreted"), want, "interpreted");
+        assert_eq!(run("jit"), want, "compiled");
     }
 }
 
