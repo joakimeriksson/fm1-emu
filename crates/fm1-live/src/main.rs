@@ -488,15 +488,18 @@ fn high_priority() -> Priority {
 
 /// Why `Machine::new` made no machine, for the user. An error that names its file (a package that
 /// does not unpack, a --flash file of another size) is said as it is; one from reading a file is
-/// the first of the run's files that cannot be opened, in the order they are read: the package's
-/// bank, the firmware (the package of --fwsc or --fw, else the --bin image), the --flash file.
+/// the first of the run's files that cannot be read (one that opens may still not read: a folder),
+/// in the order they are read: the package's bank, the firmware (the package of --fwsc or --fw,
+/// else the --bin image), the --flash file, which is read only when it is there.
 fn load_error(o: &Opts, e: &std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::InvalidData {
         return e.to_string();
     }
     let firmware = o.fwsc.as_ref().unwrap_or(&o.bin);
-    let files = [o.syx.as_ref().filter(|_| o.fwsc.is_some()), Some(firmware), o.flash.as_ref()];
-    let which = files.into_iter().flatten().find(|p| std::fs::File::open(p).is_err()).unwrap_or(firmware);
+    let unread = |p: &&String| std::fs::read(p.as_str()).is_err();
+    let which = [o.syx.as_ref().filter(|_| o.fwsc.is_some()), Some(firmware)].into_iter().flatten().find(unread)
+        .or(o.flash.as_ref().filter(|p| std::path::Path::new(p.as_str()).exists() && unread(p)))
+        .unwrap_or(firmware);
     format!("cannot read {which}: {e}")
 }
 
@@ -2486,6 +2489,12 @@ mod tests {
         // and with no package the image is
         let s = said(&["--bin", &gone]);
         assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a file that opens and does not read (a folder) is the one named, not the firmware before it
+        let folder = dir.to_string_lossy().into_owned();
+        let s = said(&["--fwsc", &there, "--syx", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
+        let s = said(&["--bin", &there, "--flash", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
