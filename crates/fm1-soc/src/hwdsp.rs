@@ -127,7 +127,7 @@ pub const FFT_WORK: u64 = 1 << 20;
 pub fn fft_work(n: usize) -> u64 {
     let (mut m, mut sum, mut p) = (n, 0u64, 2);
     while m > 1 {
-        if m % p == 0 {
+        if m.is_multiple_of(p) {
             sum += p as u64;
             m /= p;
         } else {
@@ -183,7 +183,7 @@ pub fn dft(x: &[(f64, f64)], inverse: bool) -> Vec<(f64, f64)> {
     if n <= 1 {
         return x.to_vec();
     }
-    let p = (2..=n).find(|p| n % p == 0).unwrap();
+    let p = (2..=n).find(|p| n.is_multiple_of(*p)).unwrap();
     let m = n / p;
     let subs: Vec<Vec<(f64, f64)>> = (0..p)
         .map(|r| dft(&(0..m).map(|k| x[k * p + r]).collect::<Vec<_>>(), inverse))
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn the_inverse_divides_by_a_power_of_two() {
         // N = 120: by 64, the SDK header's "res x 1.875" (measured)
-        let x: Vec<i32> = (0..240).map(|k| ((k * 7919) % 2001) as i32 - 1000).collect();
+        let x: Vec<i32> = (0..240).map(|k| ((k * 7919) % 2001) - 1000).collect();
         let back = fft(con(120, false, true), &fft(con(120, false, false), &x));
         for (a, b) in back.iter().zip(&x) {
             assert!((*a as f64 - *b as f64 * 120.0 / 64.0).abs() <= 1.0, "{a} {b}");

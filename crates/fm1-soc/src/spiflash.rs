@@ -81,6 +81,12 @@ pub struct SpiFlash {
     pub cut_at: Option<u32>,
 }
 
+impl Default for SpiFlash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpiFlash {
     pub fn new() -> Self {
         Self {

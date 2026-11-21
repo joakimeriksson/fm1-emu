@@ -138,7 +138,7 @@ impl HwEq {
         let (in_step, out_step) = (self.regs[3] & 0xffff, self.regs[3] >> 16);
         let (ia, oa) = (self.regs[4], self.regs[5]);
         // the input's channels: CON2's low half is the step to the last one
-        let ch = if in_ch == 0 { 1 } else { (self.regs[2] & 0xffff) / in_ch + 1 };
+        let ch = (self.regs[2] & 0xffff).checked_div(in_ch).map_or(1, |last| last + 1);
         let mut x = std::mem::take(&mut self.buf);
         for o in 0..och {
             let k = o % ch;
@@ -230,7 +230,7 @@ mod tests {
             ram.0[0x1000 / 4 + k] = v.to_bits();
         }
         let n = x.len() as u32;
-        for (r, v) in [(1, 4 * n << 16 | 4 * n), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, n - 1), (7, 0x3000)] {
+        for (r, v) in [(1, ((4 * n) << 16) | (4 * n)), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, n - 1), (7, 0x3000)] {
             eq.write(ram, BASE + 4 * r, v, 0);
         }
         eq.write(ram, BASE, (2 << 4) | (2 << 6), 0);

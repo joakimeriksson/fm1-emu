@@ -212,7 +212,7 @@ fn resources_n(file: &[u8], blocks: usize) -> Option<(usize, Vec<u8>)> {
         MAGIC_BASE => u32le(e, RES_AT) as usize,
         _ => return None,
     };
-    if base % 0x1000 != 0 || base < RES_LO || base >= RES_HI || data.len() > RES_HI - base {
+    if base % 0x1000 != 0 || !(RES_LO..RES_HI).contains(&base) || data.len() > RES_HI - base {
         return None;
     }
     let len = u32le(data, 4) as usize;

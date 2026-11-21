@@ -887,7 +887,7 @@ impl Periph {
             let nib = (icfg(n) >> ((n & 7) * 4)) & 0xf;
             if nib & 1 != 0 {
                 let prio = ((nib >> 1) & 7) as u8;
-                if best.map_or(true, |(_, p)| prio > p) {
+                if best.is_none_or(|(_, p)| prio > p) {
                     best = Some((n, prio));
                 }
             }
@@ -919,8 +919,8 @@ impl Periph {
         if self.usb_ctrl_irq {
             consider(IRQ_USB_CTRL);
         }
-        for i in 0..4 {
-            if self.tmr[i].pending {
+        for (i, t) in self.tmr.iter().enumerate() {
+            if t.pending {
                 consider(4 + i as u8);
             }
         }
@@ -1289,9 +1289,9 @@ impl Periph {
             if latched & (1 << col) != 0 {
                 continue;
             }
-            for row in 1..5usize {
+            for (row, keys) in KEYMAP.iter().enumerate().take(5).skip(1) {
                 if lines & (1 << row) != 0 {
-                    let id = KEYMAP[row][col];
+                    let id = keys[col];
                     if id >= 0 {
                         self.led_acc[id as usize] += dt;
                     }
@@ -1431,8 +1431,7 @@ impl Periph {
         };
         let t = self.cycles;
         let mut v = 1023.0f32;
-        for col in 0..11usize {
-            let id = KEYMAP[row][col];
+        for (col, &id) in KEYMAP[row].iter().enumerate() {
             if self.sr_latched & (1 << col) == 0 && id >= 0 {
                 v = v.min(pill_reading(self.key_force[id as usize].at(t), rs));
             }
@@ -1449,8 +1448,8 @@ impl Periph {
             if self.sr_latched & (1 << col) != 0 {
                 continue; // column not selected (active low)
             }
-            for row in 0..6usize {
-                let id = KEYMAP[row][col];
+            for (row, keys) in KEYMAP.iter().enumerate() {
+                let id = keys[col];
                 if id >= 0 && self.keys_down[id as usize] {
                     rows |= 1 << row;
                 }
@@ -1738,10 +1737,8 @@ mod tests {
 
     #[test]
     fn led_peek_reads_the_fractions_without_taking_them() {
-        let mut p = Periph::default();
         // LED 5 lit for half of the 1000 cycles since the last take
-        p.cycles = 1000;
-        p.led_last = 1000;
+        let mut p = Periph { cycles: 1000, led_last: 1000, ..Periph::default() };
         p.led_acc[5] = 500;
         assert_eq!(p.led_peek()[5], 0.5);
         assert_eq!(p.led_peek()[5], 0.5, "a peek leaves the window alone");
