@@ -306,6 +306,9 @@ const heroPlay = document.getElementById("hero-play");
 // Cached packages are pinned to their exact bytes. Checking for updates is explicit.
 const packages = new Map();
 let localFw = null;
+// M-VAVE's entry, picked without its file while another firmware ran (the page went back to that one): the next file
+// opened is its copy, whatever its name
+let awaited = null;
 class NeedFile extends Error {}
 async function keptEntry(id) {
   try { return await saveStore.entry(DEV.key + id); }
@@ -427,6 +430,7 @@ showFirmware();
 
 fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
+  awaited = null;
   endTryOut();
   loadedUrl = null;
   if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
@@ -447,7 +451,9 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
+  const forMv = mv && (fw.byo || awaited === mv || DEV.stockFile.test(file.name));
+  awaited = null;
+  if (forMv) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -1011,6 +1017,9 @@ async function setLatency(l) {
 
 // ---------------------------------------------------------------- audio: start on a click
 let ac = null, last = null, bootSeq = 0, booting = 0;
+// the boot whose machine the page shows (its screen, LEDs and status line): the latest asked for, or, when that one
+// failed and left the machine before it running, that machine's; and what the failed one said, kept in the status line
+let showing = 0, bootFailed = "";
 
 let bootQueue = Promise.resolve(), running = null, requestId = 0;
 const sessions = new Map(), bootWaiters = new Map(), snapshotWaiters = new Map();
@@ -1082,7 +1091,8 @@ async function flushRunning(pause = false) {
 // Serialize machine replacement, including the snapshot of the old machine. Requests that
 // became obsolete while downloading are skipped; every actual boot receives an acknowledgement.
 function boot(options = {}) {
-  const seq = ++bootSeq, f = fw, clock = mhz;
+  const seq = showing = ++bootSeq, f = fw, clock = mhz;
+  bootFailed = "";
   const task = async () => {
     if (seq !== bootSeq) return false;
     const importedBank = bank;
@@ -1112,7 +1122,7 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
@@ -1147,14 +1157,38 @@ function boot(options = {}) {
       if (bank === importedBank) bank = null;
       booting = 0;
       node?.port.postMessage({ type: "resume" });
-      if (seq === bootSeq) status.textContent = error instanceof NeedFile
-        ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+      if (seq === bootSeq) {
+        status.textContent = error instanceof NeedFile
+          ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+        if (running) {
+          bootFailed = status.textContent;
+          awaited = error instanceof NeedFile ? f : null;
+          backTo(running);
+        }
+      }
       if (trying) tell("error", error.message);
       return false;
     }
   };
   bootQueue = bootQueue.then(task, task);
   return bootQueue;
+}
+
+// A boot that failed left the machine before it running (the worklet keeps it until the next one has booted): the page
+// is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays.
+function backTo(session) {
+  fw = session.fw;
+  mhz = session.mhz;
+  showing = session.seq;
+  if (fw.id === "local") {
+    localFw = fw;
+    const opt = [...fwSel.options].find((o) => o.value === "local");
+    if (opt) opt.text = `${fw.name} (your file)`;
+  }
+  fwSel.value = fw.id;
+  mhzSel.value = mhz;
+  loadedUrl = session.record.url;
+  showFirmware();
 }
 
 // the audio graph: a context with the chosen buffer, the emulator's worklet node in it
@@ -1193,7 +1227,7 @@ function onWorklet(e) {
     }
     const waiter = bootWaiters.get(m.seq);
     if (waiter) { clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.reject(new Error(m.message)); }
-    if (m.seq === bootSeq) status.textContent = `${fw.name}: ${m.message}`;
+    if (m.seq === showing) status.textContent = `${fw.name}: ${m.message}`;
     return;
   }
   if (m.type === "flash-changed") {
@@ -1231,7 +1265,7 @@ function onWorklet(e) {
     }
     return;
   }
-  if (m.type !== "frame" || booting || m.seq !== bootSeq) return;
+  if (m.type !== "frame" || booting || m.seq !== showing) return;
   if (running?.ephemeral && tryOut?.files && tryOut.told !== m.seq && m.ms >= tryOut.files.end + 500) {
     tryOut.told = m.seq;                          // (its input script has played: the machine is the visitor's)
     tell("playing");
@@ -1243,7 +1277,8 @@ function onWorklet(e) {
   const now = performance.now();
   if (!last || now - last.t > 1000) {
     perf.second(m);
-    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (m.halted ? `${fw.name}: the emulated CPU halted` :
+    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (bootFailed ? `${bootFailed} · ` : "") +
+      (m.halted ? `${fw.name}: the emulated CPU halted` :
       `${fw.name} · ${mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
       `${(m.ms / 1000).toFixed(1)} s`);
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)

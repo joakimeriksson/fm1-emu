@@ -56,6 +56,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
         queueMicrotask(() => {
           if (message.type === 'boot') {
             if (this.hangBoot) return;
+            if (this.failBoot) return this.port.onmessage({ data: { type: 'error', seq: message.seq, message: 'boot: not a package' } });
             this.seq = message.seq;
             this.base = new Uint8Array(persistence.FLASH_SIZE).fill(170);
             this.flash = this.base.slice();
@@ -200,6 +201,42 @@ test('a boot timeout cancels the machine and the next firmware selection recover
   assert.ok(p.audio.messages.some(m => m.type === 'cancel-boot'));
   p.audio.hangBoot = false; p.api.setFirmware('b');
   assert.equal(await p.api.boot(), true);
+});
+
+test('a boot that fails leaves the page with the firmware that still runs: its frames shown, the pick back to it', async () => {
+  const fetchPackage = async f => {
+    if (f.id === 'b') throw new Error('b.fwsc: 503');
+    return { bytes: new Uint8Array(960).fill(1), url: f.package };
+  };
+  const p = await page(storage(), '', '', false, { fetchPackage });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  const first = p.api.running, status = p.elements.get('status');
+  const frame = () => p.audio.port.onmessage({ data: { type: 'frame', seq: first.seq, lcd: null, leds: new Float32Array(41), ms: 5000,
+    short: 0, halted: false, jit: null, playing: true, busy: 400, worst: 1, emulated: 1000, idle: 0, quanta: 345, frames: 128 } });
+  // its package does not come: the machine was never touched
+  p.api.setFirmware('b'); p.elements.get('fw').listeners.change();
+  for (let i = 0; i < 20; i++) await settle();
+  assert.equal(status.textContent, 'b: b.fwsc: 503');
+  assert.equal(p.api.running, first);
+  assert.equal(p.api.fw.id, 'a');
+  assert.equal(p.elements.get('fw').value, 'a');
+  assert.match(p.location.search, /fw=a\b/);
+  frame();
+  assert.match(status.textContent, /^b: b\.fwsc: 503 · a · 100 MHz · 2\.5x real time/);
+  // the worklet refuses the new machine (the old one paused for it, then resumed), at another clock too
+  p.audio.failBoot = true; p.api.setMhz(160);
+  assert.equal(await p.api.boot(), false);
+  assert.equal(p.audio.messages.at(-1).type, 'resume');
+  assert.equal(p.api.running, first);
+  assert.equal(p.elements.get('mhz').value, 100);
+  frame();
+  assert.match(status.textContent, /^a: boot: not a package · a · 100 MHz · /);
+  // the next boot that works clears what the failed one said
+  p.audio.failBoot = false;
+  assert.equal(await p.api.boot(), true);
+  p.audio.port.onmessage({ data: { type: 'frame', seq: p.api.bootSeq, lcd: null, leds: new Float32Array(41), ms: 100,
+    short: 0, halted: false, jit: null, playing: true, busy: 1, worst: 1, emulated: 1, idle: 0, quanta: 1, frames: 128 } });
+  assert.match(status.textContent, /^a · 100 MHz · /);
 });
 
 test('Shift+Space is REC, Space PLAY, and R presses nothing (a slip among the black keys must not record)', async () => {
