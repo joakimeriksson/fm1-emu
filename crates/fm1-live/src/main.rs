@@ -486,10 +486,24 @@ fn high_priority() -> Priority {
     Priority
 }
 
+/// Why `Machine::new` made no machine, for the user. An error that names its file (a package that
+/// does not unpack, a --flash file of another size) is said as it is; one from reading a file is
+/// the first of the run's files that cannot be opened, in the order they are read: the package's
+/// bank, the firmware (the package of --fwsc or --fw, else the --bin image), the --flash file.
+fn load_error(o: &Opts, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        return e.to_string();
+    }
+    let firmware = o.fwsc.as_ref().unwrap_or(&o.bin);
+    let files = [o.syx.as_ref().filter(|_| o.fwsc.is_some()), Some(firmware), o.flash.as_ref()];
+    let which = files.into_iter().flatten().find(|p| std::fs::File::open(p).is_err()).unwrap_or(firmware);
+    format!("cannot read {which}: {e}")
+}
+
 fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_BENCH_NOKEYS").is_ok() {
@@ -911,7 +925,7 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     }
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_NO_SKIP").is_ok() {
@@ -1601,7 +1615,7 @@ fn main() {
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("cannot read {}: {e}", o.bin);
+            eprintln!("{}", load_error(&o, &e));
             if std::env::args().len() == 1 {
                 eprintln!("(no firmware given)\n{USAGE}");
             }
@@ -2447,6 +2461,32 @@ mod tests {
             let none = catalog_pick(Vec::new(), want).unwrap_err();
             assert!(none.contains("web/firmwares.json") && none.contains("--fwsc FILE"), "{none}");
         }
+    }
+
+    #[test]
+    fn a_firmware_that_does_not_load_is_named_by_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("fm1-live-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (there, gone) = (dir.join("there.fwsc"), dir.join("gone.fwsc"));
+        std::fs::write(&there, [0u8; 16]).unwrap();
+        let (there, gone, bank) = (there.to_string_lossy().into_owned(), gone.to_string_lossy().into_owned(), dir.join("gone.syx").to_string_lossy().into_owned());
+        let said = |a: &[&str]| {
+            let o = parse_args(args(a)).unwrap();
+            let e = Machine::new(&o).err().expect("nothing to boot");
+            load_error(&o, &e)
+        };
+        // a package that is not there: its own name, not the default --bin image's
+        let s = said(&["--fwsc", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a package that is there and is none says so itself, once; its bank that is not there is the file named
+        let s = said(&["--fwsc", &there]);
+        assert!(s.starts_with(&format!("{there}: ")) && !s.contains("cannot read"), "{s}");
+        let s = said(&["--fwsc", &there, "--syx", &bank]);
+        assert!(s.starts_with(&format!("cannot read {bank}: ")), "{s}");
+        // and with no package the image is
+        let s = said(&["--bin", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
