@@ -1211,7 +1211,11 @@ impl Bus for Soc {
     }
 
     // RAM fast paths: same results as the region dispatch below (byte and
-    // halfword accesses select within the aligned word), without walking it
+    // halfword accesses select within the aligned word), without walking it.
+    // Whether an access lies in a memory is `offset + bytes <= length` with the sum made in 64
+    // bits: the offset is the address less the memory's base, any 32 bits, and where an address
+    // is 32 bits wide (the browser) a sum made there wraps for the last bytes below the base and
+    // takes them for the memory's first.
 
     #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
@@ -1236,16 +1240,16 @@ impl Bus for Soc {
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+        if addr & 3 != 0 && self.strict_align && (o & !3) as u64 + 4 <= self.ram.len() as u64 {
             // the aligned-down word, as an FM-1 loads it (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1; RAM's last word too)
             self.misaligned(addr, 4);
             return self.ram.read32((o & !3) as u32);
         }
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.read32(o as u32);
         }
         let x = addr.wrapping_sub(XIP_BASE) as usize;
-        if x + 4 <= self.xip.len() {
+        if x as u64 + 4 <= self.xip.len() as u64 {
             if let Some(c) = self.xip_cache.as_mut() {
                 if c.access(addr) {
                     self.xip_charge(XipCache::MISS_TICKS);
@@ -1274,7 +1278,7 @@ impl Bus for Soc {
     #[inline(always)]
     fn fetch32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.read32(o as u32);
         }
         self.read32(addr)
@@ -1296,7 +1300,7 @@ impl Bus for Soc {
         }
         // merged at (addr & 2) within the aligned word, as the slow path does
         let o = (addr & !1).wrapping_sub(RAM_BASE) as usize;
-        if o + 2 <= self.ram.len() && addr & 1 == 0 {
+        if o as u64 + 2 <= self.ram.len() as u64 && addr & 1 == 0 {
             return self.ram.write16(o as u32, value);
         }
         self.write16_slow(addr, value)
@@ -1305,13 +1309,13 @@ impl Bus for Soc {
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+        if addr & 3 != 0 && self.strict_align && (o & !3) as u64 + 4 <= self.ram.len() as u64 {
             // the whole word at the aligned-down address, as an FM-1 stores it (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1;
             // RAM's last word too)
             self.misaligned(addr, 4);
             return self.ram.write32((o & !3) as u32, value);
         }
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.write32(o as u32, value);
         }
         self.write32_slow(addr, value)
@@ -2067,6 +2071,32 @@ mod tests {
             assert_eq!(soc.read32(end - 4), 0x77aa_2211);
             assert_eq!(soc.read32(end), 0, "{base:#x}: nothing past it");
         }
+    }
+
+    #[test]
+    fn the_bytes_below_a_memory_are_not_its_first() {
+        // the 4 bytes below RAM and below XIP, at every width and aligned or not: nothing answers
+        // (0 read, a store changes nothing), where their offsets from the base, 0xFFFFFFFC.., plus
+        // the access's bytes come to 0..3 in 32 bits
+        let mut soc = Soc::new(1 << 16, vec![0x5a; 0x1000]);
+        soc.write32(RAM_BASE, 0x1122_3344);
+        for strict in [false, true] {
+            soc.strict_align = strict;
+            for base in [RAM_BASE, XIP_BASE] {
+                for a in base - 4..base {
+                    assert_eq!((soc.read32(a), soc.read16(a), soc.read8(a), soc.fetch32(a)), (0, 0, 0, 0), "{a:#x}");
+                    soc.write32(a, !0);
+                    soc.write16(a, !0);
+                    soc.write8(a, !0);
+                }
+            }
+            assert_eq!((soc.read32(RAM_BASE), soc.read32(XIP_BASE)), (0x1122_3344, 0x5a5a_5a5a));
+            assert_eq!(soc.emu_cause, 0, "none of them a misaligned RAM access");
+        }
+        // (the first and last words of each still are theirs)
+        soc.write32(RAM_BASE + (1 << 16) - 4, 0x5566_7788);
+        assert_eq!((soc.read32(RAM_BASE + (1 << 16) - 4), soc.fetch32(RAM_BASE)), (0x5566_7788, 0x1122_3344));
+        assert_eq!((soc.read32(XIP_BASE + 0xffc), soc.read16(XIP_BASE + 0xffe)), (0x5a5a_5a5a, 0x5a5a));
     }
 }
 
