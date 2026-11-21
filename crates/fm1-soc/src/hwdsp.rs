@@ -54,6 +54,12 @@ pub struct HwDsp {
 }
 
 impl HwDsp {
+    /// A chip reset: the unit as at power-on (its registers 0, no job done). The jobs it ran
+    /// still count.
+    pub fn chip_reset(&mut self) {
+        *self = HwDsp { jobs: self.jobs, ..Default::default() };
+    }
+
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
         match addr {
             0x1ee0400 => {

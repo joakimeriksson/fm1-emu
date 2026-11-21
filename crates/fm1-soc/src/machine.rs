@@ -2158,4 +2158,41 @@ mod tests {
             assert_eq!((a.pc, a.insn_count, sa.periph.cycles), (b.pc, b.insn_count, sb.periph.cycles), "call {i}");
         }
     }
+
+    #[test]
+    fn a_chip_reset_clears_the_hw_units() {
+        // the FFT / vector unit, the EQ and the sample-rate converter with a job done and their
+        // registers set: after a reset they read as at power-on (JL_FFT's CON 0, not the 0x10100
+        // it reads between jobs), the EQ's RAM as the firmware left it, and their jobs still count
+        let code = [0x20u8, 0x00].repeat(32);
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap(); // (the boot state taken)
+        let d = RAM_BASE + 0x100;
+        soc.write32(d, (64 << 16) | 2); // a 64-point real FFT
+        soc.write32(d + 4, RAM_BASE + 0x1000);
+        soc.write32(d + 8, RAM_BASE + 0x2000);
+        soc.write32(0x1ee0404, d);
+        soc.write32(0x1ee0408, 0x1234);
+        soc.write32(0x1ee0400, (1 << 8) | (1 << 6) | 1);
+        soc.write32(crate::hweq::RAM + 4, 0x3f80_0000);
+        soc.write32(crate::hweq::BASE + 0x10, RAM_BASE + 0x3000);
+        soc.write32(crate::hweq::BASE + 0x14, RAM_BASE + 0x3800);
+        soc.write32(crate::hweq::BASE, 1);
+        soc.write32(crate::hwsrc::BASE + 4, 48_000 << 16 | 44_100);
+        soc.write32(crate::hwsrc::BASE + 0x20, RAM_BASE + 0x4000);
+        soc.write32(crate::hwsrc::BASE, 8);
+        soc.periph.cycles += 1_000_000;
+        assert_eq!(soc.read32(0x1ee0400), 0x1_0180, "JL_FFT: a job done");
+        assert_eq!(soc.read32(crate::hweq::BASE), 0x8000_0000, "JL_EQ: a run done");
+        assert_eq!(soc.read32(crate::hwsrc::BASE), 0x80, "JL_SRC: a run done");
+        soc.reset_req = Some(crate::p33::P33::RST_SOFT);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_eq!(soc.resets, 1);
+        assert_eq!((soc.read32(0x1ee0400), soc.read32(0x1ee0404), soc.read32(0x1ee0408)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hweq::BASE), soc.read32(crate::hweq::BASE + 0x10), soc.read32(crate::hweq::BASE + 0x14)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hwsrc::BASE), soc.read32(crate::hwsrc::BASE + 4), soc.read32(crate::hwsrc::BASE + 0x20)), (0, 0, 0));
+        assert_eq!(soc.read32(crate::hweq::RAM + 4), 0x3f80_0000, "the EQ's RAM stays, as RAM does");
+        assert_eq!((soc.hwdsp.jobs, soc.hweq.runs, soc.hwsrc.runs), (1, 1, 1));
+    }
 }

@@ -611,9 +611,10 @@ impl Soc {
 
     /// The reset that is due: cpu0 back where the loader started it, the chip's registers as
     /// the loader left them, core 1 held (the runner drops it: `resets` counts up), the boot
-    /// parameters written again, the cause in P33's `RST_SRC`. What is not the chip's stays:
-    /// RAM (a word a firmware leaves itself there, Felucca's "usb_update_mode" mailbox), the
-    /// flash, the screen, and what `Periph::chip_reset` keeps.
+    /// parameters written again, the cause in P33's `RST_SRC`, the HW DSP, EQ and SRC units'
+    /// registers as at power-on. What is not the chip's stays:
+    /// RAM (a word a firmware leaves itself there, Felucca's "usb_update_mode" mailbox; the EQ's
+    /// own RAM too), the flash, the screen, and what `Periph::chip_reset` keeps.
     pub fn chip_reset(&mut self, cpu: &mut fm1_core::Cpu) {
         let Some(cause) = self.reset_req.take() else { return };
         let Some(boot) = self.boot.take() else {
@@ -637,6 +638,10 @@ impl Soc {
         (self.cpu1_running, self.waits) = (false, [None; 2]);
         self.flash.chip_reset();
         self.refill.chip_reset();
+        // (the FFT / vector unit, the EQ and the sample-rate converter: their registers, a job done)
+        self.hwdsp.chip_reset();
+        self.hweq.chip_reset();
+        self.hwsrc.chip_reset();
         cpu.set_plain_state(&boot.cpu);
         // the guards as at power-on: no causes, the PC limits as `new` sets them (the restored
         // SFRs; the runner gives the core `pc_windows` again before its next block)

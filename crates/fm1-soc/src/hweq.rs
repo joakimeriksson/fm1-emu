@@ -53,6 +53,12 @@ impl HwEq {
         HwEq { ram: vec![0; RAM_WORDS as usize], ..Default::default() }
     }
 
+    /// A chip reset: the registers as at power-on (0, no run done). The unit's RAM is a memory
+    /// and stays as the chip's other RAMs do, the sections' states with it; the runs still count.
+    pub fn chip_reset(&mut self) {
+        (self.regs, self.pending, self.done_at) = ([0; 8], false, 0);
+    }
+
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
         if (RAM..=RAM_END).contains(&addr) {
             return self.ram.get(((addr - RAM) / 4) as usize).copied().unwrap_or(0);

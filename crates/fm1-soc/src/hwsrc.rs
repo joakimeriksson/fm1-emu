@@ -54,6 +54,11 @@ fn h(u: f64) -> f64 {
 }
 
 impl HwSrc {
+    /// A chip reset: the unit as at power-on (its registers 0, no run done). The runs still count.
+    pub fn chip_reset(&mut self) {
+        *self = HwSrc { runs: self.runs, ..Default::default() };
+    }
+
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
         let i = ((addr - BASE) / 4) as usize;
         let v = self.regs.get(i).copied().unwrap_or(0);
