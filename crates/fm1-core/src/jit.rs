@@ -44,7 +44,9 @@ use x64::compile;
 /// run together: `ram` is `ram_len` bytes to read and write and `xip` `xip_len` bytes to read
 /// (a length of 0: no such window, its pointer is never used), neither moving nor going while a
 /// call of `Cpu::run_fast` lasts; `ram_code`, unless null, a byte for each 4 bytes of RAM (a
-/// store reads the one of the word it starts in); the bases and lengths the same in every
+/// store reads the one of the word it starts in; null only on a bus whose `code_writes` is
+/// None: with no flags every store is inline and none is counted, and the wasm regions take
+/// the count alone as proof that their RAM code is unchanged); the bases and lengths the same in every
 /// answer (compiled code holds them as constants). Compiled code reads and writes those bytes
 /// itself, between the bus's own accesses, never during one.
 /// (The wasm JIT holds the pointers as constants too, jit_wasm.rs: there they never change.)
