@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Play every catalog firmware with the JIT and interpreted, and check the audio against tests/catalog.json.
 
-    tools/catalog_check.py [--live target/release/fm1-live] [--shard I/N] [--jobs N] [--update] [ID ...]
+    tools/catalog_check.py [--live target/release/fm1-live] [--shard I/N] [--jobs N] [--update]
+                           [--max-unchecked N] [ID ...]
 
 Each firmware in web/firmwares.json (fetched into reference/firmwares/ by tools/fetch_firmwares.mjs)
 plays 8 s at 240 MHz with keys, MIDI and PLAY on a script, as a fm1-live --bench, booted from its
@@ -15,8 +16,13 @@ A firmware that is missing (its site was down) is reported, not failed: the chec
 One whose package is not the one hashed (its author published a new build) is still checked JIT
 against interpreter; its audio is compared again after an --update.
 
-M-VAVE's stock firmware and FM1 Open are not in the catalog (bring your own); the release checklist
-runs them by hand.
+Neither of those two compares the audio with its hash, so a run can pass having compared little.
+--max-unchecked N fails a run where more than N firmwares are missing or rebuilt (CI passes it, and
+tools/fetch_firmwares.mjs --keep holds on to the hashed packages); the count is in the last line
+and, in GitHub Actions, in the job's summary.
+
+M-VAVE's current stock firmware is not in the catalog (bring your own); the release checklist runs
+it by hand. V15, the recovery image M-VAVE publishes, is (mvave-v15).
 """
 import concurrent.futures, hashlib, json, os, subprocess, sys, tempfile
 
@@ -31,6 +37,8 @@ def opt(name, default):
 live = opt("--live", "target/release/fm1-live")
 shard, shards = map(int, opt("--shard", "0/1").split("/"))
 jobs = int(opt("--jobs", str(os.cpu_count() or 2)))
+max_unchecked = opt("--max-unchecked", None)
+max_unchecked = None if max_unchecked is None else int(max_unchecked)
 update = "--update" in args
 ids = [a for a in args if not a.startswith("--")]
 
@@ -50,8 +58,11 @@ def play(pkg, jit, tmp):
     env.pop("FM1_NO_JIT", None)
     if not jit:
         env["FM1_NO_JIT"] = "1"
-    r = subprocess.run([live, "--fwsc", pkg, "--mhz", "240", "--bench", str(MS)], env=env,
-                       capture_output=True, text=True, timeout=600)
+    try:
+        r = subprocess.run([live, "--fwsc", pkg, "--mhz", "240", "--bench", str(MS)], env=env,
+                           capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return b"", "(timed out) 0"      # (one firmware that hangs is one FAIL, not the end of the table)
     speed = next((w[:-1] for line in r.stdout.splitlines() if "ms emulated" in line
                   for w in line.split() if w.endswith("x")), "?")
     audio = open(wav, "rb").read() if os.path.exists(wav) else b""
@@ -108,6 +119,19 @@ if update:
     with open(golden_path, "w") as f:
         json.dump(dict(sorted(golden.items())), f, indent=1)
         f.write("\n")
+    changed = [fid for fid, status, _, _ in results if status == "changed"]
+    if changed:
+        print(f"the minimums in web/firmwares.json may need tools/clock_floors.py {' '.join(changed)}")
 if orphans and (not update or ids or shards > 1):
     print(f"in tests/catalog.json, not in the catalog: {', '.join(orphans)} (a whole --update drops them)")
-sys.exit(1 if count["FAIL"] else 0)
+# (an --update has just hashed the rebuilt ones: what stays unchecked then is what was not fetched)
+unchecked = sorted(r[0] for r in results if r[1] == "missing" or r[1] == "rebuilt" and not update)
+over = max_unchecked is not None and len(unchecked) > max_unchecked
+if over:
+    print(f"audio not compared with its hash: {len(unchecked)} firmwares, more than the {max_unchecked} allowed: "
+          "refresh the catalog (tools/catalog_refresh.py)")
+if os.environ.get("GITHUB_STEP_SUMMARY"):
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+        f.write(f"Audio compared with its hash: **{count['ok']} of {len(results)}**"
+                + (f". Not compared: {', '.join(unchecked)}" if unchecked else "") + "\n")
+sys.exit(1 if count["FAIL"] or over else 0)

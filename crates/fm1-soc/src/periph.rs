@@ -719,6 +719,13 @@ impl Periph {
         };
     }
 
+    /// Apply `a` at cycle `at`, after the actions already scheduled for that cycle.
+    pub fn schedule(&mut self, at: u64, a: Action) {
+        let i = self.script.partition_point(|(c, _)| *c <= at);
+        self.script.insert(i, (at, a));
+        self.next_due = 0;
+    }
+
     pub fn apply(&mut self, a: &Action) {
         self.next_due = 0;
         match *a {
