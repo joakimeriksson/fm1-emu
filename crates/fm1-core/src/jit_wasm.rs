@@ -2229,8 +2229,9 @@ impl Bus for Probe {
 
 /// Where compiled code leaves, in the engine at hand (`int_selftest` adds its count): a store
 /// through the executor's helper to a word of RAM code ends the run after its instruction, as
-/// one through `h_write` does, and to any other word does not. The mismatches, described in
-/// `SELFTEST_DETAIL`.
+/// one through `h_write` does, and to any other word does not; a return to a pc that is no
+/// block's goes back to Rust (to 1 too: no free slot of the jump table holds its own pc), to a
+/// block of the region goes on there. The mismatches, described in `SELFTEST_DETAIL`.
 #[allow(static_mut_refs)]
 fn exits_selftest() -> u32 {
     let mut fails = 0u32;
@@ -2262,20 +2263,43 @@ fn exits_selftest() -> u32 {
         check((k, cpu.pc, cpu.regs[4]) == want && cpu.regs[2] == Probe::RAM + 12 && bus.stores == 1,
             format!("a helper's store to a {} word: ran {k} to pc {:08x}, r4 {}, {} stores", if flagged { "code" } else { "data" }, cpu.pc, cpu.regs[4], bus.stores));
     }
+    // `rts` at PC + 2, `r4 = 99` at PC + 4 (the table's slots 1 and 2 of 8: slot 0, where pc 0
+    // and 1 are looked up, is free)
+    for size in [8usize, 64, 4096] {
+        check((0..size).all(|h| ((jump_free(h) >> 1) as usize & (size - 1)) != h), format!("a free slot of {size} holds a pc of its own"));
+    }
+    let mut bus = Probe::new();
+    let mem = bus.mem(64);
+    let f = build(&[(0, PC + 2, vec![bop(Fast::Rts)]), (1, PC + 4, vec![bop(Fast::MovI { d: 4, v: 99 })])], &mem);
+    for (rets, want) in [(1, (1, 1, 0)), (0, (1, 0, 0)), (2, (1, 2, 0)), (PC, (1, PC, 0)), (PC + 4, (2, PC + 6, 99))] {
+        let mut cpu = Cpu::new(PC + 2);
+        cpu.rets = rets;
+        // SAFETY: as above
+        let k = if f == 0 { 0 } else { unsafe { run::<Probe>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) } };
+        check((k, cpu.pc, cpu.regs[4]) == want, format!("a return to {rets:08x}: ran {k} to pc {:08x}, r4 {}", cpu.pc, cpu.regs[4]));
+    }
     fails
 }
 
+/// The pc a free slot `h` of a region's jump table holds: one of another slot (h ^ 1), so no
+/// pc looked up there matches it, as `jit::itab_empty`'s. (A pc no block starts at, such as 1,
+/// still matches a guest that jumps there, through a trashed rets or a null pointer's field:
+/// it went on in the region's code instead of back to Rust.)
+fn jump_free(h: usize) -> u32 {
+    ((h as u32) ^ 1) << 1
+}
+
 /// A region's blocks as a table for `Gen::jump_local`: the smallest power-of-two size (at least
-/// twice the blocks) where (pc >> 1) & mask sets them all apart. Free slots hold pc 1 (no
-/// block starts at an odd pc). Lives as long as the program (as the regions' code does).
+/// twice the blocks) where (pc >> 1) & mask sets them all apart. Free slots hold `jump_free`'s
+/// pc. Lives as long as the program (as the regions' code does).
 fn jump_table(blocks: &[(usize, u32, Vec<crate::BOp>)]) -> Option<(u32, u32)> {
     let mut size = (2 * blocks.len()).next_power_of_two().max(8);
     while size <= 4096 {
         let mask = size as u32 - 1;
-        let mut t = vec![1u32; 2 * size];
+        let mut t: Vec<u32> = (0..size).flat_map(|h| [jump_free(h), 0]).collect();
         let fits = blocks.iter().enumerate().all(|(k, b)| {
             let h = ((b.1 >> 1) & mask) as usize;
-            let free = t[2 * h] == 1;
+            let free = t[2 * h] == jump_free(h);
             t[2 * h] = b.1;
             t[2 * h + 1] = k as u32;
             free
