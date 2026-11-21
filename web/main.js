@@ -1018,11 +1018,11 @@ function setClock(c) {
   boot();
 }
 async function setLatency(l) {
+  const was = latency;
   try {
     await bootQueue;
     await flushRunning(true);
     latency = l;
-    store("fm1.latency", l);
     // a larger buffer needs a new audio context: rebuild the graph, boot again
     node.port.onmessage = null;
     node.disconnect();
@@ -1030,9 +1030,15 @@ async function setLatency(l) {
     running = null;
     await ac.close();
     await startAudio();
+    store("fm1.latency", l);              // (kept once there is a graph with it)
     if (await boot()) return await ac.resume();
   } catch (error) {
     status.textContent = `the audio buffer was not changed: ${error.message}`;
+    // no graph came of it: the buffer is the one it was, for the graph Start makes, and a context half made is closed
+    if (!node) {
+      latency = was;
+      if (ac) { ac.close().catch(() => {}); ac = null; }
+    }
   }
   // Not done. The old machine still there (its flash could not be read): it plays on. None (the old graph is
   // closed, the new one or its boot failed): Start makes one again.

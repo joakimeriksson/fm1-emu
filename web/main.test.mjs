@@ -252,10 +252,12 @@ test('Start says what kept the audio from starting and is there to try again', a
   let fail = true;
   const contexts = [];
   class AudioContext {
-    constructor() { contexts.push(this); this.state = 'running'; this.audioWorklet = { addModule: async () => { if (fail) throw new Error('worklet.js: 404'); } }; }
+    constructor(options) { contexts.push(this); this.hint = options.latencyHint; this.state = 'running'; this.audioWorklet = { addModule: async () => { if (fail) throw new Error('worklet.js: 404'); } }; }
     async resume() { this.state = 'running'; } async close() { this.state = 'closed'; }
   }
-  const p = await page(storage(), '', '', false, { AudioContext });
+  const kept = new Map();
+  const localStorage = { getItem: k => kept.get(k), setItem: (k, v) => kept.set(k, String(v)), removeItem: k => kept.delete(k) };
+  const p = await page(storage(), '', '', false, { AudioContext, localStorage });
   const start = p.elements.get('start'), status = p.elements.get('status');
   await start.listeners.click();
   assert.equal(start.disabled, false);
@@ -272,9 +274,17 @@ test('Start says what kept the audio from starting and is there to try again', a
   assert.equal(status.textContent, 'the audio buffer was not changed: worklet.js: 404');
   assert.equal(start.hidden, false);
   assert.equal(start.disabled, false);
+  // the buffer is the one it was, now and at the next visit, and the context that got no worklet is closed
+  assert.deepEqual([contexts.at(-1).hint, contexts.at(-1).state], ['playback', 'closed']);
+  assert.equal(kept.has('fm1.latency'), false);
   fail = false;
   await start.listeners.click(); await settle();
   assert.equal(p.api.running.record.name, 'a');
+  assert.equal(contexts.at(-1).hint, 'interactive');
+  // a change that works is kept
+  await p.api.setLatency('playback'); await settle();
+  assert.deepEqual([contexts.at(-1).hint, kept.get('fm1.latency'), p.api.running.record.name], ['playback', 'playback', 'a']);
+  assert.deepEqual(contexts.map(c => c.state), ['closed', 'closed', 'closed', 'closed', 'running']);
 });
 
 test('?latency= is one of the audio buffers an AudioContext knows; any other word is not passed to it', async () => {
