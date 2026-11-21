@@ -107,14 +107,18 @@ const _: () = assert!(std::mem::offset_of!(Ctx, slot) == OFF_SLOT as usize);
 #[cfg(not(windows))]
 extern "C" {
     fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void;
+    fn munmap(addr: *mut c_void, len: usize) -> c_int;
 }
 #[cfg(windows)]
 #[link(name = "kernel32")]
 extern "system" {
     fn VirtualAlloc(addr: *mut c_void, len: usize, alloc_type: u32, protect: u32) -> *mut c_void;
+    fn VirtualFree(addr: *mut c_void, len: usize, free_type: u32) -> i32;
 }
 #[cfg(windows)]
 const MEM_COMMIT_RESERVE: u32 = 0x1000 | 0x2000;
+#[cfg(windows)]
+const MEM_RELEASE: u32 = 0x8000;
 #[cfg(windows)]
 const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 #[cfg(target_os = "macos")]
@@ -197,6 +201,23 @@ impl CodeCache {
             std::ptr::copy_nonoverlapping(code.as_ptr(), dst, bytes);
             self.used += bytes;
             Some(dst as *const u8)
+        }
+    }
+}
+
+// The mapping goes with the cache (a Cpu's: a machine made anew for each firmware would keep 64 MB
+// of address space, on Windows of commit charge too, per core and boot): whole, as each system
+// gives one back (munmap of its range, the MAP_JIT one on macOS as any other; VirtualFree of the
+// base with MEM_RELEASE and no length).
+impl Drop for CodeCache {
+    fn drop(&mut self) {
+        // SAFETY: base and size are the mapping `new` made, and no code in it runs or is referred
+        // to any more: compiled code is entered only through the Jit that owns this cache.
+        unsafe {
+            #[cfg(not(windows))]
+            munmap(self.base as *mut c_void, self.size);
+            #[cfg(windows)]
+            VirtualFree(self.base as *mut c_void, 0, MEM_RELEASE);
         }
     }
 }
@@ -2083,6 +2104,30 @@ mod tests {
     fn hot(j: &mut Jit, id: usize, pc: u32, ops: &[BOp], mem: &JitMem) -> *const u8 {
         for _ in 0..HOT { j.entry::<Memory>(id, ops, &[], None, pc, mem, true, false); }
         j.entry::<Memory>(id, ops, &[], None, pc, mem, true, false).unwrap().code
+    }
+    /// A dropped cache gives its mapping back: far more of them than would fit were they kept
+    /// (Windows commits each one's 64 MB), and where the system can tell, the range is mapped no
+    /// more (msync fails on one that is not; a range another thread's mapping took at once says
+    /// nothing, so several are tried).
+    #[test]
+    fn a_dropped_code_cache_is_unmapped() {
+        for _ in 0..4096 {
+            assert!(CodeCache::new(64 << 20).is_some());
+        }
+        #[cfg(not(windows))]
+        {
+            extern "C" {
+                fn msync(addr: *mut c_void, len: usize, flags: c_int) -> c_int;
+            }
+            let gone = (0..64).any(|_| {
+                let cache = CodeCache::new(64 << 20).unwrap();
+                let (base, size) = (cache.base as *mut c_void, cache.size);
+                drop(cache);
+                // SAFETY: msync (MS_ASYNC) of a private mapping, or of no mapping, changes nothing
+                unsafe { msync(base, size, 1) != 0 }
+            });
+            assert!(gone, "a dropped cache's range is still mapped");
+        }
     }
     #[test]
     fn ram_chain_rejects_changed_target_and_respects_budget() {
