@@ -5,6 +5,13 @@ import { readFileSync } from 'node:fs';
 import * as persistence from './persistence.js';
 import * as tryout from './tryout.js';
 const settle = () => new Promise(resolve => setImmediate(resolve));
+// What a pick sets going has come to rest. Its boot hashes the package on a thread of its own and takes a snapshot
+// from the worklet: turns of the loop alone do not wait for those on a loaded machine, so some real time is given too.
+const quiet = async () => {
+  for (let i = 0; i < 20; i++) await settle();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  for (let i = 0; i < 20; i++) await settle();
+};
 class Element {
   constructor(text = '', value = '') {
     this.text = this.textContent = text; this.value = String(value); this.options = []; this.listeners = {};
@@ -92,7 +99,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
     startAudio, boot, flushRunning, setLatency, get running() { return running; },
     setFirmware(id) { fw = byId.get(id); fwSel.value = id; }, setBank(bytes) { bank = bytes; },
-    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, setPot, get bootSeq() { return bootSeq; }, screen: { lcdRaw, showLcd }
+    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, setPot, get bootSeq() { return bootSeq; }, get bootQueue() { return bootQueue; }, screen: { lcdRaw, showLcd }
   }; })()`);
   // (a page that could not come up: what it shows, with the error)
   const api = await run(...Object.values(environment)).catch(error => { throw Object.assign(error, { elements }); });
@@ -218,7 +225,7 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
     short: 0, halted: false, jit: null, playing: true, busy: 400, worst: 1, emulated: 1000, idle: 0, quanta: 345, frames: 128 } });
   // its package does not come: the machine was never touched
   p.api.setFirmware('b'); p.elements.get('fw').listeners.change();
-  for (let i = 0; i < 20; i++) await settle();
+  await p.api.bootQueue; await quiet();
   assert.equal(status.textContent, 'b: b.fwsc: 503');
   assert.equal(p.api.running, first);
   assert.equal(p.api.fw.id, 'a');
@@ -237,7 +244,7 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.match(status.textContent, /^a: boot: not a package · a · 100 MHz · /);
   // a clock picked from the list is stored as it is picked: a machine that then does not boot takes it back
   p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
-  for (let i = 0; i < 20; i++) await settle();
+  await p.api.bootQueue; await quiet();
   assert.equal(p.api.running, first);
   assert.equal(kept.get('fm1.mhz'), '100');
   // the next boot that works clears what the failed one said
@@ -262,7 +269,7 @@ test("M-VAVE's entry picked without its file stays picked while the machine befo
   // a second of frames in which the firmware ran out of time (some of those in a row bring up the warning)
   const second = () => { t += 1001; p.audio.port.onmessage({ data: { type: 'frame', seq: p.api.running.seq, lcd: null, leds: new Float32Array(41), ms: t,
     short: 0, halted: false, jit: null, playing: true, busy: 400, worst: 1, emulated: 1000, idle: 0, starved: 5, quanta: 345, frames: 128 } }); };
-  const pick = async (id, value) => { p.elements.get(id).value = value; p.elements.get(id).listeners.change(); for (let i = 0; i < 20; i++) await settle(); };
+  const pick = async (id, value) => { p.elements.get(id).value = value; p.elements.get(id).listeners.change(); await quiet(); };
   let about = [];
   p.elements.get('about').replaceChildren = (...parts) => { about = parts.map(e => e.textContent ?? e); };
   await pick('fw', 'mv');
@@ -287,7 +294,7 @@ test("M-VAVE's entry picked without its file stays picked while the machine befo
   const open = p.elements.get('open');
   open.files = [{ name: 'my copy.fwsc', arrayBuffer: async () => new Uint8Array(960).fill(7).buffer }];
   open.listeners.change();
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.deepEqual([p.api.running.fw.id, p.api.running.mhz, p.api.running.record.byo, p.api.running.record.package[0]], ['mv', 160, true, 7]);
   for (let i = 0; i < 8; i++) second();
   assert.match(status.textContent, /^M-VAVE · 160 MHz · /);
@@ -311,7 +318,7 @@ test("going back to a machine from a ?package= link puts the link back in the ad
   assert.deepEqual(address(), linked);
   p.elements.get('fw').value = 'b'; p.elements.get('fw').listeners.change();
   assert.deepEqual(address(), { jit: '0', fw: 'b', mhz: '100' });       // (the pick: no link's)
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.equal(p.elements.get('status').textContent, 'b: b.fwsc: 503');
   assert.equal(p.api.fw.id, 'link');
   assert.deepEqual(address(), linked);
@@ -326,7 +333,7 @@ test("a file the emulator refuses in place of M-VAVE's copy is not the entry's p
   const open = async (name, fill) => {
     p.elements.get('open').files = [{ name, arrayBuffer: async () => new Uint8Array(960).fill(fill).buffer }];
     p.elements.get('open').listeners.change();
-    for (let i = 0; i < 20; i++) await settle();
+    await quiet();
   };
   const booted = () => new Uint8Array(p.audio.messages.filter(m => m.type === 'boot').at(-1).package)[0];
   await open('FM-1.fwsc', 5);
@@ -339,7 +346,7 @@ test("a file the emulator refuses in place of M-VAVE's copy is not the entry's p
   // another clock boots the copy that plays, not the file refused
   p.audio.failBoot = false;
   p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.deepEqual([p.api.running.mhz, booted(), p.api.running.record.package[0]], [160, 5, 5]);
 });
 
@@ -358,7 +365,7 @@ test('?embed=1 leaves the firmware the full page starts with as it is, also when
   kept.set('fm1.fw', 'z');                           // (picked on the full page, in another tab, meanwhile)
   p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
   p.elements.get('fw').value = 'b'; p.elements.get('fw').listeners.change();
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.equal(p.elements.get('status').textContent, 'b: b.fwsc: 503');
   assert.equal(p.api.fw.id, 'a');
   assert.deepEqual([kept.get('fm1.fw'), kept.get('fm1.mhz')], ['z', '100']);
@@ -383,14 +390,14 @@ test('a machine that booted while a later pick waited is gone back to with its o
   // b is in the worklet when c is picked; b boots (as an SMK-37's package here), then c's package does not come
   p.audio.hangBoot = true;
   pick('b');
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   const asked = p.audio.messages.at(-1);
   assert.equal(asked.type, 'boot');
   pick('c');
   const base = new Uint8Array(persistence.FLASH_SIZE).fill(170);
   Object.assign(p.audio, { seq: asked.seq, base, flash: base.slice() });
   p.audio.port.onmessage({ data: { type: 'booted', seq: asked.seq, base, flash: base.slice(), board: 1 } });
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.equal(p.elements.get('status').textContent, 'c: c.fwsc: 503');
   assert.deepEqual([p.api.running.fw.id, p.api.fw.id, p.elements.get('fw').value], ['b', 'b', 'b']);
   assert.equal(kept.get('fm1.fw'), 'b');             // (what asked for the machine that plays; c was stored when b booted)
@@ -398,11 +405,11 @@ test('a machine that booted while a later pick waited is gone back to with its o
   assert.deepEqual(p.audio.messages.filter(m => m.type === 'analog').map(m => m.idx), [16, 17, 18, 19, 20, 21]);
   // and once: another pick that fails sends them no second time; an FM-1 machine gets MASTER as it was turned
   pick('c');
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.equal(p.audio.messages.filter(m => m.type === 'analog').length, 6);
   p.audio.hangBoot = false;
   pick('a');
-  for (let i = 0; i < 20; i++) await settle();
+  await quiet();
   assert.deepEqual([p.api.running.fw.id, boards.at(-1), p.audio.messages.at(-1)], ['a', 0, { type: 'pot', value: 300 }]);
 });
 
