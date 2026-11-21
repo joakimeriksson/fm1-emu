@@ -80,7 +80,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     document, location, history: { replaceState(_a, _b, url) { location.search = url; } },
     localStorage: { getItem: key => local.get(key), setItem: (key, value) => local.set(key, value) },
     ResizeObserver: class { observe() {} }, scrollY: 0, Option: Element, navigator: {},
-    fetch: async url => ({ json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : cat,
+    fetch: async url => ({ ok: true, json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : cat,
       arrayBuffer: async () => new ArrayBuffer(0) }),
     WebAssembly: { instantiate: async () => ({ instance: { exports: { panel_board() {}, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1, panel_theme_name: () => 0, panel_theme() {}, memory: { buffer: new ArrayBuffer(256) } } } }) },
     requestAnimationFrame() {}, addEventListener() {}, AudioContext, AudioWorkletNode,
@@ -94,7 +94,8 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
     setFirmware(id) { fw = byId.get(id); fwSel.value = id; }, setBank(bytes) { bank = bytes; },
     get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, get bootSeq() { return bootSeq; }, screen: { lcdRaw, showLcd }
   }; })()`);
-  const api = await run(...Object.values(environment));
+  // (a page that could not come up: what it shows, with the error)
+  const api = await run(...Object.values(environment)).catch(error => { throw Object.assign(error, { elements }); });
   return { api, disk, elements, location, expireBoot: () => bootTimer(), get audio() { return audio; } };
 }
 test('firmware switch, clock reboot and audio-context replacement retain the latest flash', async () => {
@@ -239,6 +240,63 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.match(status.textContent, /^a · 100 MHz · /);
 });
 
+test('Start says what kept the audio from starting and is there to try again', async () => {
+  let fail = true;
+  const contexts = [];
+  class AudioContext {
+    constructor() { contexts.push(this); this.state = 'running'; this.audioWorklet = { addModule: async () => { if (fail) throw new Error('worklet.js: 404'); } }; }
+    async resume() { this.state = 'running'; } async close() { this.state = 'closed'; }
+  }
+  const p = await page(storage(), '', '', false, { AudioContext });
+  const start = p.elements.get('start'), status = p.elements.get('status');
+  await start.listeners.click();
+  assert.equal(start.disabled, false);
+  assert.equal(status.textContent, 'the audio did not start: worklet.js: 404');
+  assert.equal(contexts[0].state, 'closed');       // (the next Start makes its own)
+  fail = false;
+  await start.listeners.click(); await settle();
+  assert.equal(p.api.running.record.name, 'a');
+  assert.equal(start.hidden, true);
+  // the larger buffer's context refused: the page says so, and Start is back to make a graph again
+  fail = true;
+  await p.api.setLatency('playback');
+  assert.equal(p.api.running, null);
+  assert.equal(status.textContent, 'the audio buffer was not changed: worklet.js: 404');
+  assert.equal(start.hidden, false);
+  assert.equal(start.disabled, false);
+  fail = false;
+  await start.listeners.click(); await settle();
+  assert.equal(p.api.running.record.name, 'a');
+});
+
+test('?latency= is one of the audio buffers an AudioContext knows; any other word is not passed to it', async () => {
+  const hints = [];
+  class AudioContext {
+    constructor(options) { hints.push(options.latencyHint); this.state = 'running'; this.audioWorklet = { addModule: async () => {} }; }
+    async resume() {} async close() {}
+  }
+  for (const q of ['?latency=foo', '?latency=0.5', '', '?latency=playback', '?latency=balanced']) {
+    const p = await page(storage(), q, '', false, { AudioContext });
+    await p.api.startAudio();
+  }
+  assert.deepEqual(hints, ['interactive', 'interactive', 'interactive', 'playback', 'balanced']);
+});
+
+test('a page whose list of firmwares or emulator does not load says so, with Start off', async () => {
+  const cat = { default: 'a', firmwares: [{ id: 'a', name: 'a', version: '1', package: 'https://example.test/a.fwsc', author: 't', license: 'MIT', about: '' }] };
+  const fetch = (missing) => async url => (url === missing ? { ok: false, status: 404 }
+    : { ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
+  const down = async (extra) => { let shown; await assert.rejects(page(storage(), '', '', false, extra), e => (shown = e.elements, true)); return shown; };
+  let e = await down({ fetch: fetch('firmwares.json') });
+  assert.equal(e.get('status').textContent, 'the list of firmwares did not load (HTTP 404): reload the page to try again');
+  assert.equal(e.get('start').disabled, true);
+  e = await down({ fetch: fetch('fm1_web.wasm') });
+  assert.equal(e.get('status').textContent, 'the emulator did not load (HTTP 404): reload the page to try again');
+  e = await down({ WebAssembly: { instantiate: async () => { throw new Error('CompileError: bad magic'); } } });
+  assert.equal(e.get('status').textContent, 'the emulator did not load (CompileError: bad magic): reload the page to try again');
+  assert.equal(e.get('start').disabled, true);
+});
+
 test('Shift+Space is REC, Space PLAY, and R presses nothing (a slip among the black keys must not record)', async () => {
   const on = {};
   const p = await page(storage(), '', '', false, { addEventListener(type, fn) { on[type] = fn; }, HTMLSelectElement: class {} });
@@ -354,7 +412,7 @@ test("a try-out boots with its sectors and script from this origin, starts by it
   const fetch = async (url, init) => {
     fetched.push([url, init]);
     if (url in files) return { ok: true, arrayBuffer: async () => files[url].buffer, text: async () => files[url] };
-    return { json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: ['a', 'b'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) },
+    return { ok: true, json: async () => url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: ['a', 'b'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) },
       arrayBuffer: async () => new ArrayBuffer(0) };
   };
   const window = { parent: { postMessage(m, origin) { told.push([m.state, origin]); } } };
@@ -387,7 +445,7 @@ test("a try-out boots with its sectors and script from this origin, starts by it
 test('a try-out from another site is refused: nothing fetched, nothing started', async () => {
   const fetched = [];
   const base = await page();
-  const fetch = async (url) => { fetched.push(url); return { json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: [{ id: 'a', name: 'a', version: '1', package: 'https://example.test/a.fwsc', author: 't', license: 'MIT', about: '' }] }), arrayBuffer: async () => new ArrayBuffer(0) }; };
+  const fetch = async (url) => { fetched.push(url); return { ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : { default: 'a', firmwares: [{ id: 'a', name: 'a', version: '1', package: 'https://example.test/a.fwsc', author: 't', license: 'MIT', about: '' }] }), arrayBuffer: async () => new ArrayBuffer(0) }; };
   for (const q of ['?flash=https://evil.test/m.flash', '?script=//evil.test/m.txt', '?flash=data:,x']) {
     const p = await page(storage(), q, '', false, { fetch });
     await settle();

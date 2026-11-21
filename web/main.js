@@ -21,7 +21,17 @@ const params = new URLSearchParams(location.search);
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
 const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
-const catalog = await (await fetch("firmwares.json")).json();
+// What the page cannot do without (its list of firmwares, the emulator's module): when one does not load, the status
+// line says so and Start is off; the page would otherwise sit there with a Start that does nothing.
+async function needed(what, load) {
+  try { return await load(); } catch (error) {
+    document.getElementById("status").textContent = `${what} did not load (${error.message}): reload the page to try again`;
+    document.getElementById("start").disabled = true;
+    throw error;
+  }
+}
+const loaded = (r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r; };
+const catalog = await needed("the list of firmwares", async () => loaded(await fetch("firmwares.json")).json());
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
 let hubWait;
@@ -80,7 +90,9 @@ function endTryOut() {
 let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 100);
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
-let latency = params.get("latency") || stored("fm1.latency") || "interactive";
+// (an AudioContext refuses any other word)
+const latencyOf = (v) => (["interactive", "balanced", "playback"].includes(v) ? v : null);
+let latency = latencyOf(params.get("latency")) || latencyOf(stored("fm1.latency")) || "interactive";
 
 const canvas = document.getElementById("panel");
 const ctx = canvas.getContext("2d");
@@ -100,9 +112,9 @@ const memoryRecords = new Map();
 const saveMessage = (text, failed = false) => { saveStatus.textContent = text; saveStatus.dataset.error = String(failed); };
 const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}. Export a backup to keep your changes.`, true);
 
-const wasm = await (await fetch("fm1_web.wasm")).arrayBuffer();   // the worklet gets its own copy
+const wasm = await needed("the emulator", async () => loaded(await fetch("fm1_web.wasm")).arrayBuffer());   // the worklet gets its own copy
 // (the panel's instance runs no machine: its JIT import is never called)
-const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } })).instance.exports;
+const ui = (await needed("the emulator", () => WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } }))).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
 // --above: what sits over the panel in the player (its title, the screen's controls, a warning)
@@ -1001,18 +1013,26 @@ function setClock(c) {
   boot();
 }
 async function setLatency(l) {
-  await bootQueue;
-  await flushRunning(true);
-  latency = l;
-  store("fm1.latency", l);
-  // a larger buffer needs a new audio context: rebuild the graph, boot again
-  node.port.onmessage = null;
-  node.disconnect();
-  running = null;
-  await ac.close();
-  await startAudio();
-  await boot();
-  await ac.resume();
+  try {
+    await bootQueue;
+    await flushRunning(true);
+    latency = l;
+    store("fm1.latency", l);
+    // a larger buffer needs a new audio context: rebuild the graph, boot again
+    node.port.onmessage = null;
+    node.disconnect();
+    node = null;
+    running = null;
+    await ac.close();
+    await startAudio();
+    if (await boot()) return await ac.resume();
+  } catch (error) {
+    status.textContent = `the audio buffer was not changed: ${error.message}`;
+  }
+  // Not done. The old machine still there (its flash could not be read): it plays on. None (the old graph is
+  // closed, the new one or its boot failed): Start makes one again.
+  if (running) node.port.postMessage({ type: "resume" });
+  else { startBtn.hidden = false; startBtn.disabled = false; }
 }
 
 // ---------------------------------------------------------------- audio: start on a click
@@ -1308,11 +1328,19 @@ async function start(auto = false) {
   // a phone on its side: the synth fills the screen, so bring all of it into view
   if (!auto && matchMedia("(orientation: landscape) and (max-height: 560px)").matches) canvas.scrollIntoView({ block: "center" });
 }
-startBtn.addEventListener("click", () => start());
+// What keeps the audio from starting (worklet.js did not load, the device refuses the context) is said, and Start is
+// there to try again, with a graph of its own.
+const tryStart = (auto) => start(auto).catch((error) => {
+  if (!node && ac) { ac.close().catch(() => {}); ac = null; }
+  startBtn.disabled = false;
+  status.textContent = `the audio did not start: ${error.message}`;
+  if (tryOut) tell("error", error.message);
+});
+startBtn.addEventListener("click", () => tryStart());
 if (tryOutError) status.textContent = tryOutError;
 else if (tryOut) {
   saveMessage("A try-out: it starts from the firmware's own flash and is not saved in this browser");
-  start(true);
+  tryStart(true);
 }
 
 // Persistence controls use the running machine's identity, even while another firmware is selected.
