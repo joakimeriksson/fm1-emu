@@ -84,9 +84,11 @@ test("a newcomer's links are https: another scheme in the Hub's catalog is no li
     ['a', 'https://thefirmwarehub.com/#fw-a'], ['b', 'https://thefirmwarehub.com/#fw-b'], ['c', 'https://c.example/synth'],
     ['d', 'https://thefirmwarehub.com/#fw-d'], ['g', 'https://thefirmwarehub.com/#fw-g']]);
   assert.equal(got.at(-1).package, 'https://cdn.example/g-1.fwsc');
-  // the package fallback takes no other scheme from the Hub either
+  // the package fallback takes no other scheme from the Hub either: it is not asked for
+  const asked = [];
   await assert.rejects(fetchPackage({ id: 'e', package: 'https://thefirmwarehub.com/fw/e-0.fwsc', hub: 'e' },
-    async (url) => (url.endsWith('catalog.json') ? new Response(JSON.stringify(hub)) : new Response('', { status: 404 }))), /e-0\.fwsc: 404/);
+    async (url) => { asked.push(url); return url.endsWith('catalog.json') ? new Response(JSON.stringify(hub)) : new Response('', { status: 404 }); }), /e-0\.fwsc: 404/);
+  assert.deepEqual(asked, ['https://thefirmwarehub.com/fw/e-0.fwsc', 'https://thefirmwarehub.com/catalog.json']);
   assert.equal(httpsUrl('fw/x.fwsc', 'https://thefirmwarehub.com/'), 'https://thefirmwarehub.com/fw/x.fwsc');
   assert.equal(httpsUrl(undefined), null);
 });
