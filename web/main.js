@@ -832,6 +832,9 @@ const warnBox = document.getElementById("perfwarn");
 // user settles on is stored, and a firmware or emulator update can change where the floor is.
 const outOfTime = new Map();
 const fwKey = () => `${fw.id}@${fw.version || fw.name}`;   // (every package from this computer is "local")
+// The advice offers no clock below the catalog's minimum either (tools/clock_floors.py), which
+// holds only for the package it was measured on: another build of the firmware can need more or less.
+const catalogMin = () => fw.minMhz && running?.record.hash.slice(0, 16) === fw.minMhzPackage ? fw.minMhz : 0;
 const perf = {
   reset() {
     this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.idleShare = 0; this.worst = 0;
@@ -902,7 +905,7 @@ const perf = {
     return pick && at(pick) < 0.85 * load ? pick : null;     // only where it clearly helps
   },
   lowerClocks() {
-    return CLOCKS.filter((c) => c < mhz && c > (outOfTime.get(fwKey()) ?? 0));
+    return CLOCKS.filter((c) => c < mhz && c > (outOfTime.get(fwKey()) ?? 0) && c >= catalogMin());
   },
   warn(over, hungry) {
     const load = this.load();
@@ -914,7 +917,7 @@ const perf = {
     fix.hidden = false;
     if (hungry) {
       // (a higher clock costs this device more; overloaded already, it would only trade one dropout for another)
-      const up = over ? null : CLOCKS.find((c) => c > Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
+      const up = over ? null : CLOCKS.find((c) => c > Math.max(mhz, outOfTime.get(fwKey()) ?? 0) && c >= catalogMin());
       text.textContent = `${fw.name} runs out of time at ${mhz} MHz: the emulated chip is too slow for it, so its ` +
         `own sound breaks up, on any device.` + (up ? " The real FM-1 runs at 240 MHz." : !over ?
           " No higher clock gives it enough, the desktop version too." :
