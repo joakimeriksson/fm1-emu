@@ -97,6 +97,29 @@ impl Ram {
         self.data[a..a + 4].copy_from_slice(&value.to_le_bytes());
     }
 
+    /// The word at an offset inside the RAM, which may end past it (an unaligned load over the
+    /// last 1-3 bytes): the bytes that are there, 0 for the rest, as bytes past a RAM read.
+    pub fn read32_end(&self, addr: u32) -> u32 {
+        let a = addr as usize;
+        match a.checked_add(4).and_then(|e| self.data.get(a..e)) {
+            Some(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            None => u32::from_le_bytes(std::array::from_fn(|i| a.checked_add(i).and_then(|x| self.data.get(x)).copied().unwrap_or(0))),
+        }
+    }
+
+    /// The same of a store: the bytes that lie in the RAM are stored.
+    pub fn write32_end(&mut self, addr: u32, value: u32) {
+        let a = addr as usize;
+        if a.checked_add(4).is_some_and(|e| e <= self.data.len()) {
+            return self.write32(addr, value);
+        }
+        for (i, b) in value.to_le_bytes().into_iter().enumerate() {
+            if a.checked_add(i).is_some_and(|x| x < self.data.len()) {
+                self.write8(addr + i as u32, b);
+            }
+        }
+    }
+
     /// A word put back as it was (the polling-loop probe undoing its stores): not counted.
     pub(crate) fn restore32(&mut self, addr: u32, value: u32) {
         let a = addr as usize;

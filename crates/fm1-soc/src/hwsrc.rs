@@ -29,6 +29,11 @@ pub const BASE: u32 = 0x14300;
 pub const END: u32 = 0x14323;
 const TAPS: usize = 24;
 const PHASES: usize = 256;
+/// The most outputs a run makes, and the most inputs it takes: 2^19, a mebibyte of 16-bit
+/// samples, which is all the RAM there is (the lengths are the firmware's words, any 32 bits:
+/// an output length of 2^32 at an input rate of 0, which takes no input, ran for hours). A run
+/// that gets there ends as one whose output is full, the lengths reading back what is left.
+pub const RUN_MAX: u32 = 1 << 19;
 
 #[derive(Default, Clone, Debug)]
 pub struct HwSrc {
@@ -54,6 +59,11 @@ fn h(u: f64) -> f64 {
 }
 
 impl HwSrc {
+    /// A chip reset: the unit as at power-on (its registers 0, no run done). The runs still count.
+    pub fn chip_reset(&mut self) {
+        *self = HwSrc { runs: self.runs, ..Default::default() };
+    }
+
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
         let i = ((addr - BASE) / 4) as usize;
         let v = self.regs.get(i).copied().unwrap_or(0);
@@ -95,20 +105,18 @@ impl HwSrc {
         let (ia, mut ileft, oa, mut oleft) = (self.regs[4], self.regs[5], self.regs[6], self.regs[7]);
         let fltb = self.regs[8];
         let rd16 = |m: &mut dyn FnMut(u32) -> u32, a: u32| -> i16 { (m(a & !3) >> ((a & 2) * 8)) as u16 as i16 };
-        // the history, channel by channel (24 halfwords each, from FLTB_ADR on)
-        let mut hist: Vec<[i16; TAPS]> = (0..ch)
-            .map(|k| {
-                let mut r = [0i16; TAPS];
-                for (t, s) in r.iter_mut().enumerate() {
-                    *s = rd16(&mut |a| m.rd(a), fltb.wrapping_add(48 * k + 2 * t as u32));
-                }
-                r
-            })
-            .collect();
+        // the history, channel by channel (24 halfwords each, from FLTB_ADR on; 8 channels at most)
+        let mut hist = [[0i16; TAPS]; 8];
+        let hist = &mut hist[..ch as usize];
+        for (k, r) in hist.iter_mut().enumerate() {
+            for (t, s) in r.iter_mut().enumerate() {
+                *s = rd16(&mut |a| m.rd(a), fltb.wrapping_add(48 * k as u32 + 2 * t as u32));
+            }
+        }
         let (mut s, mut o, mut taken) = (0u32, 0u32, 0u64);
-        'out: while oleft > 0 {
+        'out: while oleft > 0 && o < RUN_MAX {
             while phase >= out_rate {
-                if ileft == 0 {
+                if ileft == 0 || taken >= RUN_MAX as u64 {
                     break 'out;
                 }
                 off = (off + TAPS - 1) % TAPS;
@@ -127,7 +135,7 @@ impl HwSrc {
                 break;
             }
             let f = phase as f64 / out_rate as f64;
-            let c: Vec<f64> = (0..TAPS).map(|t| h(t as f64 + f)).collect();
+            let c: [f64; TAPS] = std::array::from_fn(|t| h(t as f64 + f));
             for (k, r) in hist.iter().enumerate() {
                 let y: f64 = (0..TAPS).map(|t| r[(off + t) % TAPS] as f64 * c[t]).sum();
                 let y = (y + 0.5).floor().clamp(-32768.0, 32767.0) as i32;
@@ -216,5 +224,41 @@ mod tests {
         let mut parts = mono(&mut u, &mut ram, 44100, 48000, &x[..250], 700);
         parts.extend(mono(&mut u, &mut ram, 44100, 48000, &x[250..], 700));
         assert_eq!(parts, whole);
+    }
+
+    /// A RAM that counts its reads and writes, and stops a run that goes on for ever.
+    struct Counted(Ram, u64);
+    impl Mem for Counted {
+        fn rd(&mut self, a: u32) -> u32 {
+            self.1 += 1;
+            assert!(self.1 < 1 << 23, "the run goes on");
+            self.0.rd(a)
+        }
+        fn wr(&mut self, a: u32, v: u32) {
+            self.1 += 1;
+            self.0.wr(a, v)
+        }
+    }
+
+    #[test]
+    fn a_run_ends_at_run_max_whatever_the_lengths_say() {
+        // an output length of all ones at an input rate of 0 (no input is ever taken), every
+        // sample to the same halfword: RUN_MAX outputs, the rest left in the length
+        let mut ram = Counted(Ram(vec![0; 0x5000]), 0);
+        let mut u = HwSrc::default();
+        let run = |u: &mut HwSrc, ram: &mut Counted, rates: u32, ilen: u32, olen: u32| {
+            for (r, v) in [(8, 0x10000), (1, rates), (2, 0), (3, 0), (7, olen), (6, 0x8000), (5, ilen), (4, 0x1000)] {
+                u.write(ram, BASE + 4 * r, v, 0);
+            }
+            u.write(ram, BASE, 0x40, 0);
+            u.write(ram, BASE, 8, 0);
+            assert_ne!(u.read(BASE, 1 << 60) & 0x80, 0, "done");
+        };
+        run(&mut u, &mut ram, 48000 << 16, 100, u32::MAX);
+        assert_eq!((u.regs[5], u.regs[7]), (100, u32::MAX - RUN_MAX));
+        // an input length of all ones at 65535 inputs to an output: RUN_MAX inputs taken, the 9
+        // outputs made on the way, the rest left
+        run(&mut u, &mut ram, 1 << 16 | 0xffff, u32::MAX, u32::MAX);
+        assert_eq!((u.regs[5], u32::MAX - u.regs[7]), (u32::MAX - RUN_MAX, 9));
     }
 }
