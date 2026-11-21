@@ -49,6 +49,10 @@ impl Core1Bus<'_> {
     }
 }
 
+// Every method of `Bus` is spelled out here, none left to its default. Not passed on to the SoC:
+// the clock (`tick`, `tick_room`, `add_ticks`, `next_tick_due`: the budget instead, time stands
+// still while core 1 runs), `irq_window` and `service` (they end the run; the SoC's `next_due` is
+// cpu0's to zero) and `idle` (core 1's sleep, not cpu0's idle skip).
 impl Bus for Core1Bus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.soc.core1_read8(a)
@@ -146,6 +150,9 @@ impl Bus for Core1Bus<'_> {
 /// the SoC as it is, but for a flaky core 1's misreads (`Soc::flaky_core1`).
 pub struct Core1Loads<'a>(pub &'a mut Soc);
 
+// The SoC's own answers but for the loads. Not passed on: `jit_mem` (None, see there) and
+// `fetch_cost` (its default, nothing: the flash cache it would charge is FM1_STRICT's, and a
+// runner with that clock runs core 1 through `Core1Bus`).
 impl Bus for Core1Loads<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.0.core1_read8(a)
@@ -366,6 +373,10 @@ impl ProbeBus<'_> {
     }
 }
 
+// Left to `Bus`'s defaults on purpose: `tick` (`probe_loop` ticks the SoC itself, between steps),
+// `jit_mem`, `tick_room`, `add_ticks`, `next_tick_due`, `code_writes` and `code_mark` (a probe
+// steps: no compiled code, no blocks built, and a store into code ends it) and `fetch_cost` (no
+// probe runs with the cost model: `run_blocks`).
 impl Bus for ProbeBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         if self.load(a & !3) { self.soc.read8(a) } else { 0 }
@@ -462,6 +473,11 @@ fn probe_loop(cpu: &mut Cpu, soc: &mut Soc, budget: u32) -> u32 {
             }
         }
         if i >= budget || i >= PROBE_MAX {
+            break Err(false);
+        }
+        // (code outside the PC limits is the block loop's: it raises the guard where a block out
+        // there is entered, and a step checks no limits)
+        if cpu.pc_win.is_some_and(|w| w.iter().all(|&(lo, hi)| !(lo..=hi).contains(&cpu.pc))) {
             break Err(false);
         }
         // (the first instruction's tick is paid; with something due the block loop goes on)
@@ -602,7 +618,12 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
         let now = soc.periph.cycles;
         // not while a release is latched: run_fast's return must break below where it would
         // without the skip (lib.rs latches again on any later 0 -> 1 of 0x10008 bit 3)
-        if soc.loop_skip.enabled && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
+        // nor on FM1_STRICT's clock, whichever part of it is on: a probe counts an instruction as one
+        // tick (the cost model: each its own), its loads from XIP would move the flash cache and
+        // charge its misses, and a misaligned access raised in a probe that is then undone would
+        // stay raised
+        let exact = soc.xip_cache.is_none() && !soc.strict_align && !cpu.cost_model;
+        if soc.loop_skip.enabled && exact && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
             if soc.periph.next_due < soc.periph.cycles + PROBE_MIN as u64 {
                 soc.loop_skip.next_try = soc.periph.next_due; // too close to the next event
             } else {
@@ -680,7 +701,8 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 /// where it finds a lock cpu0 holds (`Soc::waits`: cpu0's slice is next, the rest of this run
 /// forfeited, as a polling loop's) and, given `until` (what cpu0 spins on: `run_dual`), once
 /// cpu0 would get it. Returns the instructions run, `cycles` at most (a stretch may run on a
-/// little past them).
+/// little past them) and 2^20 at most: what a run that used all of those was due beyond them is
+/// counted in `Soc::core1_dropped` and not run.
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
         return Ok(0);
@@ -794,6 +816,10 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
         if until.is_some_and(|w| !soc.still_waits(0, w)) {
             break; // cpu0 would get what it spins on now: back to it
         }
+    }
+    // (a run that used its whole budget, cut by the cap: the rest of what it was due is not run)
+    if left == 0 {
+        soc.core1_dropped += cycles - budget;
     }
     Ok(budget - left)
 }
@@ -924,12 +950,11 @@ fn run_dual_from(
     Ok(done)
 }
 
-/// `run_cpu1`, with a fault stopping core 1 for good: the chip's core 1 faults there and stops;
-/// cpu0 goes on alone (a firmware built for a core 1 that fails falls back to one core:
-/// felucca-bsp's cpu2_fallback).
 /// `run_cpu1` for `run_dual`: a fault on core 1 halts the machine, unless the core survives
-/// (`Soc::cpu1_survives`): then it stops alone and cpu0 goes on, and the hardware lock it
-/// held is released (cpu0 would spin on `lockset` for ever, nothing to hand the machine to).
+/// (`Soc::cpu1_survives`): then it stops alone, as the chip's core 1 faults there and stops, and
+/// cpu0 goes on (a firmware built for a core 1 that fails falls back to one core: felucca-bsp's
+/// cpu2_fallback), and the hardware lock it held is released (cpu0 would spin on `lockset` for
+/// ever, nothing to hand the machine to).
 fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     match run_cpu1(c1, soc, cycles, until) {
         Ok(k) => Ok(k),
@@ -2157,5 +2182,108 @@ mod tests {
             run_dual(&mut b1, &mut sb, 8192, 1 << 20, false, |s, k| run_blocks(&mut b, s, k, &mut tb)).unwrap();
             assert_eq!((a.pc, a.insn_count, sa.periph.cycles), (b.pc, b.insn_count, sb.periph.cycles), "call {i}");
         }
+    }
+
+    #[test]
+    fn a_chip_reset_clears_the_hw_units() {
+        // the FFT / vector unit, the EQ and the sample-rate converter with a job done and their
+        // registers set: after a reset they read as at power-on (JL_FFT's CON 0, not the 0x10100
+        // it reads between jobs), the EQ's RAM as the firmware left it, and their jobs still count
+        let code = [0x20u8, 0x00].repeat(32);
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap(); // (the boot state taken)
+        let d = RAM_BASE + 0x100;
+        soc.write32(d, (64 << 16) | 2); // a 64-point real FFT
+        soc.write32(d + 4, RAM_BASE + 0x1000);
+        soc.write32(d + 8, RAM_BASE + 0x2000);
+        soc.write32(0x1ee0404, d);
+        soc.write32(0x1ee0408, 0x1234);
+        soc.write32(0x1ee0400, (1 << 8) | (1 << 6) | 1);
+        soc.write32(crate::hweq::RAM + 4, 0x3f80_0000);
+        soc.write32(crate::hweq::BASE + 0x10, RAM_BASE + 0x3000);
+        soc.write32(crate::hweq::BASE + 0x14, RAM_BASE + 0x3800);
+        soc.write32(crate::hweq::BASE, 1);
+        soc.write32(crate::hwsrc::BASE + 4, 48_000 << 16 | 44_100);
+        soc.write32(crate::hwsrc::BASE + 0x20, RAM_BASE + 0x4000);
+        soc.write32(crate::hwsrc::BASE, 8);
+        soc.periph.cycles += 1_000_000;
+        assert_eq!(soc.read32(0x1ee0400), 0x1_0180, "JL_FFT: a job done");
+        assert_eq!(soc.read32(crate::hweq::BASE), 0x8000_0000, "JL_EQ: a run done");
+        assert_eq!(soc.read32(crate::hwsrc::BASE), 0x80, "JL_SRC: a run done");
+        soc.reset_req = Some(crate::p33::P33::RST_SOFT);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_eq!(soc.resets, 1);
+        assert_eq!((soc.read32(0x1ee0400), soc.read32(0x1ee0404), soc.read32(0x1ee0408)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hweq::BASE), soc.read32(crate::hweq::BASE + 0x10), soc.read32(crate::hweq::BASE + 0x14)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hwsrc::BASE), soc.read32(crate::hwsrc::BASE + 4), soc.read32(crate::hwsrc::BASE + 0x20)), (0, 0, 0));
+        assert_eq!(soc.read32(crate::hweq::RAM + 4), 0x3f80_0000, "the EQ's RAM stays, as RAM does");
+        assert_eq!((soc.hwdsp.jobs, soc.hweq.runs, soc.hwsrc.runs), (1, 1, 1));
+    }
+
+    #[test]
+    fn core_1s_time_past_a_runs_cap_is_counted() {
+        // core 1 busy (`r5 += 1; goto r6` back to it: never where it started): a run it is due more
+        // than 2^20 instructions of runs 2^20, and the rest is counted as dropped
+        let code = [&add1(5)[..], &goto_r(6)].concat();
+        let busy = |soc: &mut Soc, cycles: u64| {
+            let mut c1 = Cpu::new(XIP_BASE);
+            c1.core_id = 1;
+            c1.regs[6] = XIP_BASE;
+            let ran = run_cpu1(&mut c1, soc, cycles, None).unwrap();
+            assert_eq!(c1.regs[5] as u64, c1.insn_count.div_ceil(2), "it ran them");
+            ran
+        };
+        let (_, mut soc) = machine(&code, &[], false);
+        assert_eq!((busy(&mut soc, 1 << 20), soc.core1_dropped), (1 << 20, 0), "all of a run of 2^20");
+        assert_eq!((busy(&mut soc, (1 << 20) + 5000), soc.core1_dropped), (1 << 20, 5000));
+        assert_eq!((busy(&mut soc, 3 << 20), soc.core1_dropped), (1 << 20, 5000 + (2 << 20)), "it adds up");
+        // a core 1 on the spot (`goto -2`) ends its run where it started: it gave up the rest
+        // itself, nothing was cut
+        let (_, mut soc) = machine(&[0xf7, 0x9f], &[], false);
+        let mut c1 = Cpu::new(XIP_BASE);
+        c1.core_id = 1;
+        assert!(run_cpu1(&mut c1, &mut soc, 3 << 20, None).unwrap() < 1024);
+        assert_eq!(soc.core1_dropped, 0);
+    }
+
+    #[test]
+    fn a_probe_leaves_a_round_outside_the_pc_limits_to_the_block_loop() {
+        // a round that leaves the PC limits (XIP alone here) for code in RAM and comes back: the
+        // block loop sets the guard's cause where the block out there is entered. A probe steps,
+        // which checks no limits: it must not run such a round, let alone skip its repeats.
+        let code = [LOAD.as_slice(), &goto_r(6)].concat();
+        let both = |skip: bool| {
+            let (cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544), (6, RAM_BASE + 0x8000), (7, XIP_BASE)], skip);
+            soc.ram.load(0x8000, &[&NOP[..], &goto_r(7)].concat());
+            pc_limits(&mut soc, XIP_BASE, XIP_BASE + 0xfff);
+            (cpu, soc, false)
+        };
+        let (mut a, mut b) = (both(true), both(false));
+        for i in 0..8 {
+            let ran = [&mut a, &mut b].map(|(cpu, soc, t)| run_blocks(cpu, soc, 8192, t).unwrap());
+            assert_eq!(ran[0], ran[1], "call {i}");
+            assert_eq!((a.0.pc, a.0.insn_count, a.1.periph.cycles, a.1.dbg_cause), (b.0.pc, b.0.insn_count, b.1.periph.cycles, b.1.dbg_cause), "call {i}");
+        }
+        assert_eq!(b.1.dbg_cause, 1 << 12, "the round does leave the limits");
+        assert!(a.1.loop_skip.probes > 0 && a.1.loop_skip.hits == 0, "probed, and left alone");
+    }
+
+    #[test]
+    fn no_probe_on_the_strict_clock() {
+        // a loop a probe finds; with the flash cache, the cost model or strict alignment on
+        // (FM1_STRICT's parts) none is made, whether or not the runner switched the skip off
+        let code = [LOAD.as_slice(), &[0x60, 0xff, 0x00, 0x20, 0xfb, 0xff]].concat();
+        let probes = |set: fn(&mut Cpu, &mut Soc)| {
+            let (mut cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544)], true);
+            set(&mut cpu, &mut soc);
+            let mut t = false;
+            run_blocks(&mut cpu, &mut soc, 100_000, &mut t).unwrap();
+            (soc.loop_skip.probes, soc.loop_skip.hits)
+        };
+        assert!(probes(|_, _| {}).1 > 0, "found and skipped on the plain clock");
+        assert_eq!(probes(|_, s| s.xip_cache = Some(crate::XipCache::default())), (0, 0));
+        assert_eq!(probes(|c, _| c.cost_model = true), (0, 0));
+        assert_eq!(probes(|_, s| s.strict_align = true), (0, 0));
     }
 }

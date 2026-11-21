@@ -335,7 +335,7 @@ mod tests {
     fn led_peek_reads_the_fractions_without_taking_them() {
         let mut p = Panel::default();
         let (g, bit) = LEDS[0];
-        p.commons = u32::MAX & !(1 << (17 + g as u32)); // its group's common on
+        p.commons = !(1 << (17 + g as u32)); // its group's common on
         word(&mut p, !(1u32 << bit)); // lit (active low)
         word(&mut p, !0u32); // dark
         assert_eq!(p.led_peek()[0], 0.5);

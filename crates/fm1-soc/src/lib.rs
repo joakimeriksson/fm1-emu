@@ -6,7 +6,7 @@
 //!   0x5000_0-    GPIO ports A..H (0x40 stride: OUT+0, DIR+8, DIE+C, PU+10, PD+14)
 //!   0x5100_|     IOMAP
 //!   0x1000_-0x1002  clock
-//!   0x1080_0/0x1090_0  TIMER4/TIMER5 (CNT reads = synthetic progress)
+//!   0x1080_0/0x1090_0  TIMER4/TIMER5 (periph.rs: their counts follow the cycle clock)
 //!   0x11c0_0-    SPI0 = external NOR flash (model in spiflash.rs; CS = PD0)
 //!   0x11d0_0-    SPI1 = LCD (ST7789-class 240×240, model in lcd.rs)
 //!   0x1180_0-    USB
@@ -109,10 +109,6 @@ enum Region {
     Unknown,
 }
 
-// The peripheral window, by table: `Soc::region` was a chain of some 30 compares with P33 near
-// its end, and OberVave, ZP-12 and FM1-DOOM touch P33 tens of millions of times a second (a
-// watchdog kick per round of their main loop; a quarter of FM1-DOOM's time was the chain).
-const SFR_LO: u32 = 0x10000;
 /// The FM-1's flash cache as harbor's cache probe measured it on a real FM-1 (2026-10-24,
 /// probes/cache.c): 32 KB (a 32 KB footprint hits, 64 KB misses), 64-byte lines (the cost doubles
 /// with the stride up to 64), ~300 cycles a miss (1.29 us a load at a 64-byte stride). 4-way with LRU
@@ -163,6 +159,10 @@ impl XipCache {
 
 /// Below this nothing answers: an access is bus-invalid (the guards' "NULL page")
 const NULL_PAGE: u32 = 0x1000;
+// The peripheral window, by table: `Soc::region` was a chain of some 30 compares with P33 near
+// its end, and OberVave, ZP-12 and FM1-DOOM touch P33 tens of millions of times a second (a
+// watchdog kick per round of their main loop; a quarter of FM1-DOOM's time was the chain).
+const SFR_LO: u32 = 0x10000;
 const SFR_HI: u32 = 0x14000;
 
 /// The region of an address in the peripheral window (8-byte cells: every block there starts
@@ -196,7 +196,6 @@ static SFR_MAP: [Region; ((SFR_HI - SFR_LO) / 8) as usize] = {
     t
 };
 
-/// The SoC bus: XIP flash + data RAM + modeled peripherals + a logged stub.
 /// A cheap hasher for register addresses (the SoC's register map): `std`'s SipHash cost the
 /// SMK-37's stock firmware, which touches registers about a million times a second, a few
 /// percent of its time.
@@ -253,6 +252,7 @@ impl Board {
     }
 }
 
+/// The SoC bus: XIP flash + data RAM + modeled peripherals + a logged stub.
 pub struct Soc {
     pub board: Board,
     /// The FM-1's flash part (its JEDEC id; `set_flash_part`): the stock Puya unless asked.
@@ -264,7 +264,7 @@ pub struct Soc {
     pub lcd: Lcd,
     /// SPI0 + the external NOR flash (1 MiB; `--flash` image loaded at 0).
     pub flash: SpiFlash,
-    /// Console bytes written through DBG_MSG / UART-style debug boxes.
+    /// Console bytes written through DBG_MSG / UART-style debug boxes (the first `CONSOLE_MAX`).
     pub console: Vec<u8>,
     /// The guards' causes in DBG_MSG (bit 12 a PC outside its limits, 4 / 5 a read / write of
     /// unmapped space): set as a guard trips, cleared by DBG_MSG_CLR
@@ -301,13 +301,19 @@ pub struct Soc {
     pub core1_charging: bool,
     pub core1_ticks: u64,
     pub core1_debt: u64,
+    /// Core 1's time that was not run, in cycles: a run of it is 2^20 instructions at most
+    /// (`machine::run_cpu1`), and what it was due beyond them, after cpu0's clock moved further
+    /// in one go (an idle skip of more than 4.4 ms at 240 MHz), is dropped when the run used all
+    /// 2^20. A run statistic, as `Periph::skipped`: a chip reset keeps it.
+    pub core1_dropped: u64,
     /// FM1_TPROF: flash cache misses by (core << 32 | line address)
     pub miss_hist: Option<Box<std::collections::HashMap<u64, u64>>>,
     /// Overlay RAM (second bank, 0x04000000), written by the app CRT.
     pub ovl: Ram,
     /// SRAM banks at 0x01f00000 (cleared by the RAM early init).
     pub sram2: Ram,
-    /// monotonic "time" for peripheral counters
+    /// Reads so far of timer words the model does not know (`timer_read`): a read that counts,
+    /// so a polling loop that makes one is not skipped (`pure_read`).
     pub ticks: u64,
     /// Timers, audio DMA, ADC, interrupt controller and the front panel.
     pub periph: Periph,
@@ -411,14 +417,9 @@ struct Boot {
     info: Option<(u32, Vec<u8>)>,
 }
 
-fn dbg_line(addr: u32) -> &'static str {
-    match addr & !3 {
-        0x1eee240 => "wr_en",
-        0x1eee244 => "msg",
-        0x1eee248 => "msg_clr",
-        _ => "dbg",
-    }
-}
+/// The most `Soc::console` keeps: a mebibyte, of what a firmware writes to DBG_MSG for as long as
+/// it runs.
+pub const CONSOLE_MAX: usize = 1 << 20;
 
 impl Soc {
     /// After an erase or page program: the XIP window shows the flash chip, also where the
@@ -491,7 +492,8 @@ impl Soc {
     /// 0x73000, April OS 0x64000); a `--flash` file restored after this reads the same way.
     pub fn sfc_boot(&mut self, key: u16, app_end: usize) {
         self.sfc_key = Some(key);
-        self.write32(0x4030c, XIP_BASE + (app_end - XIP_FLASH_OFFSET) as u32);
+        // (an image that ends below the window's start: nothing decrypted, the window from its start)
+        self.write32(0x4030c, XIP_BASE.wrapping_add(app_end.saturating_sub(XIP_FLASH_OFFSET) as u32));
         self.write32(0x40308, 0x07ff_ffff);
         self.write32(0x40300, 3);
     }
@@ -535,6 +537,7 @@ impl Soc {
             core1_charging: false,
             core1_ticks: 0,
             core1_debt: 0,
+            core1_dropped: 0,
             miss_hist: None,
             ticks: 0,
             periph: Periph::default(),
@@ -610,9 +613,10 @@ impl Soc {
 
     /// The reset that is due: cpu0 back where the loader started it, the chip's registers as
     /// the loader left them, core 1 held (the runner drops it: `resets` counts up), the boot
-    /// parameters written again, the cause in P33's `RST_SRC`. What is not the chip's stays:
-    /// RAM (a word a firmware leaves itself there, Felucca's "usb_update_mode" mailbox), the
-    /// flash, the screen, and what `Periph::chip_reset` keeps.
+    /// parameters written again, the cause in P33's `RST_SRC`, the HW DSP, EQ and SRC units'
+    /// registers as at power-on. What is not the chip's stays:
+    /// RAM (a word a firmware leaves itself there, Felucca's "usb_update_mode" mailbox; the EQ's
+    /// own RAM too), the flash, the screen, and what `Periph::chip_reset` keeps.
     pub fn chip_reset(&mut self, cpu: &mut fm1_core::Cpu) {
         let Some(cause) = self.reset_req.take() else { return };
         let Some(boot) = self.boot.take() else {
@@ -636,6 +640,10 @@ impl Soc {
         (self.cpu1_running, self.waits) = (false, [None; 2]);
         self.flash.chip_reset();
         self.refill.chip_reset();
+        // (the FFT / vector unit, the EQ and the sample-rate converter: their registers, a job done)
+        self.hwdsp.chip_reset();
+        self.hweq.chip_reset();
+        self.hwsrc.chip_reset();
         cpu.set_plain_state(&boot.cpu);
         // the guards as at power-on: no causes, the PC limits as `new` sets them (the restored
         // SFRs; the runner gives the core `pc_windows` again before its next block)
@@ -768,7 +776,6 @@ impl Soc {
         self.set_board(self.board);
     }
 
-    /// All unknown accesses so far — the peripheral bring-up TODO list.
     /// Advance the peripheral clock by `n` CPU cycles, moving any finished
     /// audio half out of RAM (int32 L/R holding a 24-bit sample in the low
     /// bits — Felucca writes Q15 << 7, audio.c OUT_SHIFT — so >> 8 to i16).
@@ -844,6 +851,7 @@ impl Soc {
             .find_map(|(r, base)| a.checked_sub(base).filter(|&o| (o as usize) < r.len()).map(|o| r.read8(o)))
     }
 
+    /// All unknown accesses so far — the peripheral bring-up TODO list.
     pub fn unknown_accesses(&self) -> &[UnknownAccess] {
         &self.unknown_log
     }
@@ -1105,14 +1113,10 @@ impl Soc {
         }
     }
 
+    /// A timer word `Periph::read` does not answer: its stored bits, and the read counted
+    /// (`ticks`). The timers' counts are all answered there, from the cycle clock.
     fn timer_read(&mut self, addr: u32) -> u32 {
-        // "time" base ticks so timeout/wait loops make progress; count
-        // registers report a moving value, the rest stored bits.
         self.ticks = self.ticks.wrapping_add(1);
-        if addr & 0xff == 0x04 {
-            let t = (self.ticks * 7) as u32;
-            return t;
-        }
         self.sfr_get(addr)
     }
 }
@@ -1210,7 +1214,11 @@ impl Bus for Soc {
     }
 
     // RAM fast paths: same results as the region dispatch below (byte and
-    // halfword accesses select within the aligned word), without walking it
+    // halfword accesses select within the aligned word), without walking it.
+    // Whether an access lies in a memory is `offset + bytes <= length` with the sum made in 64
+    // bits: the offset is the address less the memory's base, any 32 bits, and where an address
+    // is 32 bits wide (the browser) a sum made there wraps for the last bytes below the base and
+    // takes them for the memory's first.
 
     #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
@@ -1235,16 +1243,16 @@ impl Bus for Soc {
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+        if addr & 3 != 0 && self.strict_align && (o & !3) as u64 + 4 <= self.ram.len() as u64 {
             // the aligned-down word, as an FM-1 loads it (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1; RAM's last word too)
             self.misaligned(addr, 4);
             return self.ram.read32((o & !3) as u32);
         }
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.read32(o as u32);
         }
         let x = addr.wrapping_sub(XIP_BASE) as usize;
-        if x + 4 <= self.xip.len() {
+        if x as u64 + 4 <= self.xip.len() as u64 {
             if let Some(c) = self.xip_cache.as_mut() {
                 if c.access(addr) {
                     self.xip_charge(XipCache::MISS_TICKS);
@@ -1273,7 +1281,7 @@ impl Bus for Soc {
     #[inline(always)]
     fn fetch32(&mut self, addr: u32) -> u32 {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.read32(o as u32);
         }
         self.read32(addr)
@@ -1295,7 +1303,7 @@ impl Bus for Soc {
         }
         // merged at (addr & 2) within the aligned word, as the slow path does
         let o = (addr & !1).wrapping_sub(RAM_BASE) as usize;
-        if o + 2 <= self.ram.len() && addr & 1 == 0 {
+        if o as u64 + 2 <= self.ram.len() as u64 && addr & 1 == 0 {
             return self.ram.write16(o as u32, value);
         }
         self.write16_slow(addr, value)
@@ -1304,13 +1312,13 @@ impl Bus for Soc {
     #[inline(always)]
     fn write32(&mut self, addr: u32, value: u32) {
         let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if addr & 3 != 0 && self.strict_align && (o & !3) + 4 <= self.ram.len() {
+        if addr & 3 != 0 && self.strict_align && (o & !3) as u64 + 4 <= self.ram.len() as u64 {
             // the whole word at the aligned-down address, as an FM-1 stores it (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1;
             // RAM's last word too)
             self.misaligned(addr, 4);
             return self.ram.write32((o & !3) as u32, value);
         }
-        if o + 4 <= self.ram.len() {
+        if o as u64 + 4 <= self.ram.len() as u64 {
             return self.ram.write32(o as u32, value);
         }
         self.write32_slow(addr, value)
@@ -1326,15 +1334,16 @@ impl Soc {
                 let g = |i: usize| self.xip.get(i).copied().unwrap_or(0);
                 u32::from_le_bytes([g(o), g(o + 1), g(o + 2), g(o + 3)])
             }
-            Region::Ram => self.ram.read32(addr - RAM_BASE),
+            // (here only a word that ends past the RAM: the rest took `read32`'s fast path)
+            Region::Ram => self.ram.read32_end(addr - RAM_BASE),
             Region::Sfcenc => self.sfr_get(addr),
             Region::XipFlash => {
                 let o = (addr - XIP_BASE) as usize + XIP_FLASH_OFFSET;
                 let g = |i: usize| self.flash.mem.get(i).copied().unwrap_or(0xff);
                 u32::from_le_bytes([g(o), g(o + 1), g(o + 2), g(o + 3)])
             }
-            Region::Ovl => self.ovl.read32(addr - OVL_BASE),
-            Region::Sram2 => self.sram2.read32(addr - SRAM2_BASE),
+            Region::Ovl => self.ovl.read32_end(addr - OVL_BASE),
+            Region::Sram2 => self.sram2.read32_end(addr - SRAM2_BASE),
             Region::Irqc => {
                 // 0x1eee008 bit 14: controller ready (the early init spins on it);
                 // 0x1eee000 / 0x1eee004 (C0_CON / C1_CON): see `core_paused`
@@ -1394,8 +1403,6 @@ impl Soc {
                     // always, so polls finish)
                     let busy = (self.board == Board::Smk37 || self.lcd_timed) && self.periph.cycles < self.periph.spi1_done_at;
                     self.sfr_get(addr) | if busy { 0 } else { 0x8000 }
-                } else if addr == 0x11d10 {
-                    self.sfr_get(addr)
                 } else {
                     self.sfr_get(addr)
                 }
@@ -1453,9 +1460,9 @@ impl Soc {
     fn write32_slow(&mut self, addr: u32, value: u32) {
         match self.region(addr) {
             Region::Xip | Region::XipFlash => self.log_unknown(addr, 4, true, value), // flash writes go via the ROM
-            Region::Ram => self.ram.write32(addr - RAM_BASE, value),
-            Region::Ovl => self.ovl.write32(addr - OVL_BASE, value),
-            Region::Sram2 => self.sram2.write32(addr - SRAM2_BASE, value),
+            Region::Ram => self.ram.write32_end(addr - RAM_BASE, value),
+            Region::Ovl => self.ovl.write32_end(addr - OVL_BASE, value),
+            Region::Sram2 => self.sram2.write32_end(addr - SRAM2_BASE, value),
             Region::Irqc => {
                 if addr == 0x1eee000 || addr == 0x1eee004 {
                     // C0_CON / C1_CON: writing bit 2 pauses that core (bit 4 reads "paused");
@@ -1508,8 +1515,7 @@ impl Soc {
                 self.flash.write(addr, value);
                 self.sync_xip();
             }
-            Region::Iomap => self.sfr_set(addr, value),
-            Region::Ana => self.sfr_set(addr, value),
+            Region::Iomap | Region::Ana => self.sfr_set(addr, value),
             Region::P33 => {
                 self.p33.write(addr, value);
                 self.p33_event();
@@ -1539,17 +1545,7 @@ impl Soc {
                 }
                 self.sfr_set(addr, value)
             }
-            Region::Uart1 => {
-                if !self.periph.write(addr, value) {
-                    self.sfr_set(addr, value);
-                }
-            }
-            Region::Adc => {
-                if !self.periph.write(addr, value) {
-                    self.sfr_set(addr, value);
-                }
-            }
-            Region::Timer => {
+            Region::Uart1 | Region::Adc | Region::Timer => {
                 if !self.periph.write(addr, value) {
                     self.sfr_set(addr, value);
                 }
@@ -1572,11 +1568,15 @@ impl Soc {
                 _ => {}
             },
             Region::Dbg => {
-                match dbg_line(addr) {
-                    "msg" => {
-                        self.console.extend_from_slice(&value.to_le_bytes());
+                // (0x1EEE240 is the box's write enable: stored)
+                match addr & !3 {
+                    0x1eee244 => {
+                        // (its first `CONSOLE_MAX` bytes: only fm1-emu reads it, the start of it)
+                        if self.console.len() < CONSOLE_MAX {
+                            self.console.extend_from_slice(&value.to_le_bytes());
+                        }
                     }
-                    "msg_clr" => self.dbg_cause &= !value,
+                    0x1eee248 => self.dbg_cause &= !value,
                     _ => {}
                 }
                 self.sfr_set(addr, value);
@@ -1681,7 +1681,7 @@ pub fn stock_from_package(pkg: &[u8], syx: Option<&[u8]>) -> Result<Stock, Strin
         }
     }
     let app = u.entry("app.bin").map(|h| h.offset).unwrap_or(0x120);
-    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE + app as u32, board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
+    Ok(Stock { xip: u.xip, flash, entry: XIP_BASE.wrapping_add(app as u32), board, identity: u.identity, key: u.key, app_end: u.end, usr, usr_layout })
 }
 
 /// Ready a Soc for a package's firmware: its board, its flash chip, and the SPL's boot
@@ -1710,11 +1710,7 @@ const BOOT_TRIM: u32 = 0xf80a;
 pub fn write_boot_info(soc: &mut Soc, at: u32, flash: &[u8]) -> u32 {
     let mut head = [0u8; 32];
     head.copy_from_slice(&flash[..32]);
-    let mut key: u16 = 0xffff;
-    for b in head.iter_mut() {
-        *b ^= key as u8;
-        key = (key << 1) ^ if key & 0x8000 != 0 { 0x1021 } else { 0 };
-    }
+    fwsc::unmask(&mut head, 0xffff);
     let chip = fwsc::flash_key(flash).unwrap_or(0) as u32;
     let words = [at + 24, 0x4000, XIP_BASE, chip | BOOT_TRIM << 16, u32::MAX, u32::MAX];
     for (i, w) in words.iter().enumerate() {
@@ -2046,6 +2042,61 @@ mod tests {
         soc.write32(0x11d0c, RAM_BASE);
         soc.write32(0x11d10, 0x800);
         assert_eq!(soc.read32(0x11d00) & 0x8000, 0, "the DMA is still on the wire");
+    }
+
+    #[test]
+    fn a_word_over_the_end_of_a_ram_moves_the_bytes_that_are_there() {
+        // an unaligned load or store over the last 1-3 bytes of the RAM, the overlay and the SRAM
+        // banks: the bytes inside, 0 read for the rest (as bytes past them read), nothing stored
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for (base, len) in [(RAM_BASE, 1u32 << 16), (OVL_BASE, 512 * 1024), (SRAM2_BASE, 256 * 1024)] {
+            let end = base + len;
+            soc.write32(end - 4, 0x4433_2211);
+            for k in 1..4 {
+                assert_eq!(soc.read32(end - 4 + k), 0x4433_2211 >> (8 * k), "{base:#x}: {k} past the last word");
+            }
+            soc.write32(end - 2, 0xddcc_bbaa);
+            assert_eq!(soc.read32(end - 4), 0xbbaa_2211, "{base:#x}: the two bytes inside stored");
+            soc.write32(end - 1, 0x77);
+            assert_eq!(soc.read32(end - 4), 0x77aa_2211);
+            assert_eq!(soc.read32(end), 0, "{base:#x}: nothing past it");
+        }
+    }
+
+    #[test]
+    fn the_bytes_below_a_memory_are_not_its_first() {
+        // the 4 bytes below RAM and below XIP, at every width and aligned or not: nothing answers
+        // (0 read, a store changes nothing), where their offsets from the base, 0xFFFFFFFC.., plus
+        // the access's bytes come to 0..3 in 32 bits
+        let mut soc = Soc::new(1 << 16, vec![0x5a; 0x1000]);
+        soc.write32(RAM_BASE, 0x1122_3344);
+        for strict in [false, true] {
+            soc.strict_align = strict;
+            for base in [RAM_BASE, XIP_BASE] {
+                for a in base - 4..base {
+                    assert_eq!((soc.read32(a), soc.read16(a), soc.read8(a), soc.fetch32(a)), (0, 0, 0, 0), "{a:#x}");
+                    soc.write32(a, !0);
+                    soc.write16(a, !0);
+                    soc.write8(a, !0);
+                }
+            }
+            assert_eq!((soc.read32(RAM_BASE), soc.read32(XIP_BASE)), (0x1122_3344, 0x5a5a_5a5a));
+            assert_eq!(soc.emu_cause, 0, "none of them a misaligned RAM access");
+        }
+        // (the first and last words of each still are theirs)
+        soc.write32(RAM_BASE + (1 << 16) - 4, 0x5566_7788);
+        assert_eq!((soc.read32(RAM_BASE + (1 << 16) - 4), soc.fetch32(RAM_BASE)), (0x5566_7788, 0x1122_3344));
+        assert_eq!((soc.read32(XIP_BASE + 0xffc), soc.read16(XIP_BASE + 0xffe)), (0x5a5a_5a5a, 0x5a5a));
+    }
+
+    #[test]
+    fn the_console_keeps_its_first_mebibyte() {
+        let mut soc = Soc::new(1 << 16, vec![0; 0x1000]);
+        for i in 0..(CONSOLE_MAX as u32 / 4 + 1000) {
+            soc.write32(0x1eee244, i);
+        }
+        assert_eq!(soc.console.len(), CONSOLE_MAX);
+        assert_eq!((&soc.console[..8], &soc.console[CONSOLE_MAX - 4..]), (&[0u8, 0, 0, 0, 1, 0, 0, 0][..], &(CONSOLE_MAX as u32 / 4 - 1).to_le_bytes()[..]));
     }
 }
 
