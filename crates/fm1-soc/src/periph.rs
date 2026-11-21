@@ -1348,8 +1348,10 @@ impl Periph {
 
     /// An SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1): ~12 MHz at 4
     /// for the LCD, 6.67 MHz at 8 for the SMK-37's pad LEDs); with `irq` IRQ 16 at its end.
+    /// BAUD is the firmware's word, kept whole: a divider past 60 M clocks at 1 Hz, the slowest
+    /// (a clock of 0 would divide by it).
     pub fn spi1_start(&mut self, bytes: u32, baud: u32, irq: bool) {
-        let clk = 60_000_000 / (baud as u64 + 1);
+        let clk = (60_000_000 / (baud as u64 + 1)).max(1);
         let dur = (bytes.max(1) as u64 * 8 * self.hz / clk).max(1);
         self.spi1_done_at = self.cycles + dur;
         self.spi1_wire += dur;
@@ -1790,5 +1792,19 @@ mod tests {
         assert!(f[lit].1 > 0.08, "fully tinted in its first frame: {}", f[lit].1);
         let dark = lit + f[lit..].iter().position(|x| x.0 == 0.0).unwrap();
         assert_eq!(f[dark].1, 0.0, "dark in its first frame");
+    }
+
+    #[test]
+    fn spi1_takes_its_bytes_time_at_any_baud() {
+        // 2 bytes at BAUD 4 (12 MHz): 16 bits, 320 cycles of the 240 MHz clock
+        let mut p = Periph::default();
+        p.spi1_start(2, 4, true);
+        assert_eq!((p.spi1_done_at, p.spi1_irq_at), (320, 320));
+        // the slowest clock for every divider from 60 M on, as for the last one below it
+        for baud in [59_999_999, 60_000_000, 0x7fff_ffff, u32::MAX] {
+            let mut p = Periph::default();
+            p.spi1_start(1, baud, false);
+            assert_eq!(p.spi1_done_at, 8 * CPU_HZ, "BAUD {baud:#x}");
+        }
     }
 }
