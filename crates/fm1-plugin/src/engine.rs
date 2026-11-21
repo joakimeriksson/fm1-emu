@@ -32,10 +32,13 @@ pub struct Midi {
 
 /// What the editor and the plugin ask of the machine.
 pub enum Cmd {
-    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it: the
-    /// project's state, each time the host initializes the plugin. A machine that runs this package
-    /// with these sectors runs on.
+    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it. A
+    /// machine that runs this package with these sectors runs on.
     Boot { pkg: Arc<Vec<u8>>, sectors: Vec<(u32, Vec<u8>)> },
+    /// The host initialized the plugin: `Boot` of the project's state (`Fm1Params::firmware` and
+    /// `flash`) as it is when the machine's thread gets here, with every command before this one
+    /// done. What the host's thread read would be the state from before a `Load` still in the queue.
+    Init,
     /// Validate and replace a shared setup, including a different save of the same package.
     Load { firmware: crate::Firmware, sectors: Vec<crate::Sector>, reply: mpsc::Sender<Result<(), String>> },
     /// Capture live flash, rather than the host-state copy refreshed every two seconds.
@@ -441,11 +444,19 @@ pub fn run(
                         Err(error) => { let _ = reply.send(Err(error)); continue; }
                     }
                 }
+                Cmd::Init => {
+                    let pkg = params.firmware.lock().unwrap().pkg.clone();
+                    if pkg.is_empty() {
+                        continue;
+                    }
+                    let sectors = params.flash.lock().unwrap().iter().map(|s| (s.at, s.data.to_vec())).collect();
+                    (Cmd::Boot { pkg, sectors }, None, None)
+                }
                 other => (other, None, None),
             };
             match c {
                 Cmd::Boot { pkg, sectors } => {
-                    // the host initializing again (a new sample rate) sends the package that runs with
+                    // the host initializing again (a new sample rate) finds the package that runs with
                     // the sectors the project has from this machine, as last saved or as its flash is
                     // now: nothing to do. Other sectors are a state the host loaded (a preset, an
                     // undo), booted as another package is, so the project's flash and the machine's
@@ -485,6 +496,7 @@ pub fn run(
                     }
                     // (the frame count goes on: the host's stamps are against it)
                 }
+                Cmd::Init => unreachable!(), // (a Boot of what the project holds, above)
                 Cmd::Snapshot { pkg, reply } => {
                     if active_pkg.as_ref().is_some_and(|active| **active == *pkg) {
                         if let Some(machine) = &m {

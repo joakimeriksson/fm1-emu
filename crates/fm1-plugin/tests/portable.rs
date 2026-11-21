@@ -100,10 +100,8 @@ fn a_firmware_change_cancels_a_pending_export() {
 
 /// The plugin's `initialize`, which the host calls at the start, again for a new sample rate, and
 /// after it has loaded a state into the parameters: the project's firmware and sectors, to boot.
-fn host_initializes(engine: &Engine, link: &Link) {
-    let fw = engine.params.firmware.lock().unwrap().clone();
-    let sectors = engine.params.flash.lock().unwrap().clone();
-    link.boot(&fw, &sectors);
+fn host_initializes(link: &Link) {
+    link.boot();
 }
 
 #[test]
@@ -114,14 +112,14 @@ fn a_state_the_host_loads_is_booted_and_initializing_again_is_not() {
     let host_loads = |data: &SaveData| {
         *engine.params.firmware.lock().unwrap() = data.firmware.clone();
         *engine.params.flash.lock().unwrap() = data.sectors.clone();
-        host_initializes(&engine, &link);
+        host_initializes(&link);
     };
     let wait = Duration::from_secs(10);
     // the project opens. Then the host initializes again with the state as it is: the machine
     // runs on, an export under way with it (a boot would end it)
     host_loads(&data);
     let export = engine.snapshot(&data.firmware);
-    host_initializes(&engine, &link);
+    host_initializes(&link);
     assert_eq!(byte(&export.recv_timeout(wait).unwrap().expect("initializing again booted the machine again")), 0x56);
 
     // the host loads another state of the same firmware (a preset, an undo): booted, with its sectors
@@ -133,6 +131,24 @@ fn a_state_the_host_loads_is_booted_and_initializing_again_is_not() {
     // and they stay the project's: the look at the flash every 2 s has nothing of the old machine's to put there
     std::thread::sleep(Duration::from_millis(2500));
     assert_eq!(byte(&engine.params.flash.lock().unwrap()), 0x73);
-    host_initializes(&engine, &link);
+    host_initializes(&link);
     assert_eq!(byte(&engine.snapshot(&data.firmware).recv_timeout(wait).unwrap().unwrap()), 0x73);
+}
+
+#[test]
+fn the_host_initializing_while_a_save_loads_does_not_boot_what_was_there() {
+    let Some(mut data) = sample() else { return };
+    let engine = Engine::new();
+    let link = Link { shared: engine.shared.clone(), cmds: engine.tx.clone() };
+    engine.load(&data).unwrap();
+    // "Load firmware / save" of other sectors, and the host initializes before the machine's thread
+    // has booted them (a boot takes it tens of ms): the project still holds the sectors that run
+    data.sectors[0].data = Arc::new(vec![0x73; 4096]);
+    let (tx, loaded) = mpsc::channel();
+    engine.tx.send(Cmd::Load { firmware: data.firmware.clone(), sectors: data.sectors.clone(), reply: tx }).unwrap();
+    host_initializes(&link);
+    loaded.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    // the machine runs what was loaded, and that is what the project holds
+    assert_eq!(byte(&engine.snapshot(&data.firmware).recv_timeout(Duration::from_secs(10)).unwrap().unwrap()), 0x73);
+    assert_eq!(byte(&engine.params.flash.lock().unwrap()), 0x73);
 }

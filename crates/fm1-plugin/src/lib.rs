@@ -198,16 +198,12 @@ pub struct Link {
 }
 
 impl Link {
-    /// The project's state to the machine: `fw` with `sectors`, its saved flash. The machine's
-    /// thread boots it unless that is what it runs (`Cmd::Boot`): the host initializes again for a
-    /// new sample rate, and also after loading a state, which may be the same firmware with
-    /// other sectors (a preset, an undo).
-    pub fn boot(&self, fw: &Firmware, sectors: &[Sector]) {
-        if fw.pkg.is_empty() {
-            return;
-        }
-        let sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
-        let _ = self.cmds.send(Cmd::Boot { pkg: fw.pkg.clone(), sectors });
+    /// The project's state to the machine: the firmware and its saved flash in the parameters, which
+    /// the machine's thread reads when it gets to this (`Cmd::Init`) and boots unless that is what it
+    /// runs: the host initializes again for a new sample rate, and also after loading a state, which
+    /// may be the same firmware with other sectors (a preset, an undo).
+    pub fn boot(&self) {
+        let _ = self.cmds.send(Cmd::Init);
     }
 }
 
@@ -352,9 +348,7 @@ impl Plugin for Fm1 {
         self.lead = self.block + self.lead_of.frames();
         let _ = link.cmds.send(Cmd::Block(self.block));
         ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
-        let fw = self.params.firmware.lock().unwrap().clone();
-        let sectors = self.params.flash.lock().unwrap().clone();
-        link.boot(&fw, &sectors);
+        link.boot();
         // the project's controller. One never chosen is a new project (a saved one always has
         // its "controller", see filter_state): it takes the last choice and keeps it.
         let profile = {
