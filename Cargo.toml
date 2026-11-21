@@ -4,7 +4,6 @@ members = [
     "crates/fm1-isa",
     "crates/fm1-core",
     "crates/fm1-soc",
-    "crates/fm1-gdbstub",
     "crates/fm1-emu",
     "crates/fm1-live",
     "crates/fm1-map",

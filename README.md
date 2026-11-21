@@ -265,7 +265,9 @@ its first users, the rounds that made it work there, and what fm1-dock's probes 
 
 - `crates/`: `fm1-isa` (decoder tables), `fm1-core` (CPU and JITs), `fm1-soc` (the chip and
   the board), `fm1-live` (the native synth), `fm1-emu` (batch runner), `fm1-web` (the wasm
-  build), `fm1-gdbstub`
+  build), `fm1-map` (a MIDI controller as the panel: its profiles and MIDI learn, for fm1-live
+  and the plugin), `fm1-plugin` (the CLAP plugin, and the AU and VST3 made of it; outside the
+  workspace, with its own `Cargo.lock`)
 - `web/`: the page; `web/fwsc.js` unpacks the update packages
 - `docs/`: the hardware notes (`recon.md`), the instruction set (`isa-notes.md`), M-VAVE's
   firmware (`stock-firmware.md`); `PLAN.md` is the work log
