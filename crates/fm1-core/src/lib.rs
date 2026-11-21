@@ -2788,15 +2788,19 @@ impl Cpu {
     /// parts and a `rep` header includes its block (how the block-size
     /// nibbles of `if (...) {` count, verified on 2057 corpus blocks).
     fn block_end<B: Bus>(&self, bus: &mut B, pc: u32, units: u32) -> u32 {
-        self.block_end_in(bus, pc, units, 0)
+        self.block_end_in(bus, pc, units, 0, &mut false)
     }
 
-    /// `block_end` inside `depth` if blocks. One nested deeper than `IF_DEPTH` is not counted, as
-    /// a word that does not decode is not: compiled code nests them a few deep, but data taken
-    /// for code may be header after header, each a call deeper here.
-    fn block_end_in<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32, depth: u32) -> u32 {
+    /// `block_end` inside `depth` if blocks. A header nested deeper than `IF_DEPTH` ends the whole
+    /// count at its address (`cut`: the levels above stop too), as a word that does not decode
+    /// does: compiled code nests them a few deep, but data taken for code may be header after
+    /// header, each a call deeper here.
+    fn block_end_in<B: Bus>(&self, bus: &mut B, mut pc: u32, units: u32, depth: u32, cut: &mut bool) -> u32 {
         const IF_DEPTH: u32 = 32;
         for _ in 0..units {
+            if *cut {
+                break;
+            }
             let lo = bus.fetch32(pc) as u64;
             let hi = bus.fetch32(pc + 4) as u64;
             let Ok(insn) = decode_any((hi << 32) | lo, pc) else { return pc };
@@ -2815,10 +2819,11 @@ impl Cpu {
             if insn.entry.len == 4 && name.starts_with("if") && !has(name, "goto") {
                 if let Some(b) = decode_if_block(insn.raw) {
                     if depth == IF_DEPTH {
+                        *cut = true;
                         return pc - 4;
                     }
-                    pc = self.block_end_in(bus, pc, b.then_units, depth + 1);
-                    pc = self.block_end_in(bus, pc, b.else_units, depth + 1);
+                    pc = self.block_end_in(bus, pc, b.then_units, depth + 1, cut);
+                    pc = self.block_end_in(bus, pc, b.else_units, depth + 1, cut);
                 }
             } else if name == "rep_i_r" || name == "rep_i_i" {
                 pc += 2 * (((insn.raw >> 4) & 0xf) as u32 + 1);
@@ -5194,8 +5199,13 @@ mod tests {
         let mut ram = FlatRam::new(header.repeat(run));
         let mut cpu = Cpu::new(0);
         let then_end = cpu.block_end(&mut ram, 4, 1);
-        // (past the run every word is a nop: at most a unit or two for each level still open)
-        assert!(then_end > 4 && then_end <= 4 * run as u32 + 0x200, "{then_end:#x}");
+        // (the header 33 deep, at 4 + 4 * 32, ends the count for every level above it)
+        assert_eq!(then_end, 0x84);
+        // 32 deep is counted whole, to the end of the outermost block; one more ends it at the 33rd header
+        for (n, end) in [(32usize, 0xc2), (33, 0x80)] {
+            let mut ram = FlatRam::new([header.repeat(n), vec![0; 0x400]].concat());
+            assert_eq!(Cpu::new(0).block_end(&mut ram, 0, 1), end, "{n} headers");
+        }
         cpu.step(&mut ram).unwrap();
         assert_eq!(cpu.pc, then_end, "r0 == 0: to the else part");
     }
