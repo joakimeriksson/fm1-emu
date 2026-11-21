@@ -45,7 +45,8 @@ env:   FM1_BREAK_MAX=N (8)        stop reporting --break-pc after N hits
        FM1_NO_RAM_BLOCKS          RAM code a step at a time (the reference)
        FM1_LCD_TIMED              the LCD's transfers take their time at the SPI clock, as on an FM-1
                                   (also with FM1_STRICT; FM1_LCD_INSTANT turns it off; default: at once)
-a bare-metal program ends its run by jumping outside every code region (else it runs to --steps)";
+a bare-metal program ends its run by jumping outside every code region: a halt, exit status 1
+(else it runs to --steps: 0)";
 const DEFAULT_STEPS: u64 = 5_000_000;
 
 /// Flash offset of `app.bin` inside the JLFS app area. The XIP window maps flash 0x4000 at
@@ -321,6 +322,8 @@ fn main() -> ExitCode {
 
     let mut flash_image: Option<Vec<u8>> = None;
     let mut stock: Option<fm1_soc::Stock> = None;
+    // a file the run was asked for could not be written: said on stderr, and the exit status is 1
+    let mut failed = false;
     if let Some(path) = &args.fwsc {
         let syx = match args.syx.as_ref().map(std::fs::read).transpose() {
             Ok(s) => s,
@@ -333,8 +336,13 @@ fn main() -> ExitCode {
             Ok(st) => {
                 // FM1_FWSC_XIP=file: save the XIP window (the app area unscrambled) for a disassembler
                 if let Ok(out) = std::env::var("FM1_FWSC_XIP") {
-                    let _ = std::fs::write(&out, &st.xip);
-                    println!("XIP window ({} bytes from 0x02000000, {}) -> {out}", st.xip.len(), st.identity);
+                    match std::fs::write(&out, &st.xip) {
+                        Ok(()) => println!("XIP window ({} bytes from 0x02000000, {}) -> {out}", st.xip.len(), st.identity),
+                        Err(e) => {
+                            eprintln!("error: cannot write {out}: {e}");
+                            failed = true;
+                        }
+                    }
                 }
                 if std::env::var_os("FM1_FWSC_DIR").is_some() {
                     if let Ok(u) = std::fs::read(path).map_err(|e| e.to_string()).and_then(|p| fm1_soc::fwsc::unpack(&p)) {
@@ -613,7 +621,11 @@ fn main() -> ExitCode {
                 if let Some(&at) = snaps.first() {
                     if soc.periph.ms() >= at {
                         snaps.remove(0);
-                        let _ = fm1_soc::write_bmp(&format!("work/lcd_{at}.bmp"), &soc.lcd.fb, soc.lcd.inverted);
+                        let path = format!("work/lcd_{at}.bmp");
+                        if let Err(e) = fm1_soc::write_bmp(&path, &soc.lcd.fb, soc.lcd.inverted) {
+                            eprintln!("error: cannot write {path}: {e}");
+                            failed = true;
+                        }
                     }
                 }
             }
@@ -695,6 +707,13 @@ fn main() -> ExitCode {
         }
     }
     let cpu = &cpus[report_core];
+    // the files of the run are written with --quiet too: it silences the report, not what was asked for
+    let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
+    let wav = args.wav.as_ref().map(|w| (w, write_wav(w, &soc.periph.audio)));
+    if let Some((w, Err(e))) = &wav {
+        eprintln!("error: cannot write {w}: {e}");
+        failed = true;
+    }
 
     if !args.quiet {
         let stopped = halt.is_some() || true;
@@ -728,7 +747,6 @@ fn main() -> ExitCode {
             println!("  {pc:#010x}  {n}");
         }
         {
-            let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
             let tot = (busy[0] + busy[1] + busy[2]).max(1) as f64;
             println!(
                 "cpu0: {:.1}% in an ISR, {:.1}% nested ({:.1} M ISR instructions per emulated s)",
@@ -750,11 +768,8 @@ fn main() -> ExitCode {
             if let Some(f) = &soc.flaky_core1 {
                 println!("flaky core 1 (seed {}): {} misreads in {} RAM loads", args.seed.unwrap_or(1), f.misreads, f.loads);
             }
-            if let Some(w) = &args.wav {
-                match write_wav(w, &soc.periph.audio) {
-                    Ok(()) => println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0),
-                    Err(e) => println!("wav: cannot write {w}: {e}"),
-                }
+            if let Some((w, Ok(()))) = &wav {
+                println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0);
             }
             let con = soc.console_string();
             if !con.is_empty() {
@@ -811,13 +826,7 @@ fn main() -> ExitCode {
             for (pc, name, sp) in &tails[report_core.min(1)] {
                 println!("  {pc:#010x} sp={sp:#010x} {name}");
             }
-            println!("halt reason: {e:?}");
-            println!("{}", buildinfo::halt_note("fm1-emu"));
-            println!("  pc={:#010x} sp={:#010x} rets={:#010x}", cpu.pc, cpu.sp, cpu.rets);
-            for (i, r) in cpu.regs.iter().enumerate() {
-                print!("r{i}={r:#010x} ");
-            }
-            println!();
+            println!("{}", halt_reason(e, cpu));
         }
         let mmio = soc.unknown_accesses();
         if !mmio.is_empty() {
@@ -840,6 +849,9 @@ fn main() -> ExitCode {
             }
         }
         let _ = stopped;
+    } else if let Some(e) = &halt {
+        // (on stderr: with --quiet stdout is the --dump's)
+        eprintln!("{}", halt_reason(e, cpu));
     }
     if let Some((addr, n)) = args.dump {
         println!("dump {addr:#010x} ({n} words):");
@@ -848,7 +860,18 @@ fn main() -> ExitCode {
             println!("  {:#010x}: {}", addr + 4 * row, words.join(" "));
         }
     }
-    ExitCode::SUCCESS
+    if halt.is_some() || failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Why the run halted, which binary halted, and the halting core's registers: the end of the
+/// report, and with --quiet all that is said of a halt.
+fn halt_reason(e: &CoreError, cpu: &Cpu) -> String {
+    let regs: String = cpu.regs.iter().enumerate().map(|(i, r)| format!("r{i}={r:#010x} ")).collect();
+    format!("halt reason: {e:?}\n{}\n  pc={:#010x} sp={:#010x} rets={:#010x}\n{regs}", buildinfo::halt_note("fm1-emu"), cpu.pc, cpu.sp, cpu.rets)
 }
 
 /// The SoC doesn't track names; recover the executed class name by decoding
