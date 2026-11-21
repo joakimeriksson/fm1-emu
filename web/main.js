@@ -323,9 +323,6 @@ const heroPlay = document.getElementById("hero-play");
 // Cached packages are pinned to their exact bytes. Checking for updates is explicit.
 const packages = new Map();
 let localFw = null;
-// M-VAVE's entry, picked without its file while another firmware ran (the page went back to that one): the next file
-// opened is its copy, whatever its name
-let awaited = null;
 class NeedFile extends Error {}
 async function keptEntry(id) {
   try { return await saveStore.entry(DEV.key + id); }
@@ -447,7 +444,6 @@ showFirmware();
 
 fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
-  awaited = null;
   endTryOut();
   loadedUrl = null;
   if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
@@ -468,9 +464,7 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  const forMv = mv && (fw.byo || awaited === mv || DEV.stockFile.test(file.name));
-  awaited = null;
-  if (forMv) {
+  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -1196,8 +1190,10 @@ function boot(options = {}) {
           ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
         if (running) {
           bootFailed = status.textContent;
-          awaited = error instanceof NeedFile ? f : null;
-          backTo(running);
+          // M-VAVE's entry without its file stays picked: what it says of where its file is found stays shown, and
+          // the file opened next is its copy. The machine that plays is shown meanwhile, named in the status line.
+          if (error instanceof NeedFile) show(running);
+          else backTo(running);
         }
       }
       if (trying) tell("error", error.message);
@@ -1210,7 +1206,8 @@ function boot(options = {}) {
 
 // A boot that failed left the machine before it running (the worklet keeps it until the next one has booted): the page
 // is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays, and
-// what the next visit opens is what it would have opened before the pick.
+// what the next visit opens is what it would have opened before the pick. (Not for M-VAVE's entry waiting for its
+// file, which stays picked: boot.)
 function backTo(session) {
   fw = session.fw;
   mhz = session.mhz;
@@ -1276,7 +1273,7 @@ function onWorklet(e) {
     }
     const waiter = bootWaiters.get(m.seq);
     if (waiter) { clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.reject(new Error(m.message)); }
-    if (m.seq === showing) status.textContent = `${fw.name}: ${m.message}`;
+    if (m.seq === showing) status.textContent = `${(sessions.get(m.seq)?.fw || fw).name}: ${m.message}`;
     return;
   }
   if (m.type === "flash-changed") {
@@ -1325,10 +1322,14 @@ function onWorklet(e) {
   perf.add(m);
   const now = performance.now();
   if (!last || now - last.t > 1000) {
-    perf.second(m);
+    // the machine these frames are of: the firmware and the clock picked, but for M-VAVE's entry picked without its
+    // file (boot). Then nothing is judged: a warning and the clock it offers would be of the pick (second() judges
+    // no halted machine).
+    const on = running?.seq === m.seq ? running : { fw, mhz };
+    perf.second(on.fw === fw && on.mhz === mhz ? m : { halted: true });
     status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (bootFailed ? `${bootFailed} · ` : "") +
-      (m.halted ? `${fw.name}: the emulated CPU halted` :
-      `${fw.name} · ${mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
+      (m.halted ? `${on.fw.name}: the emulated CPU halted` :
+      `${on.fw.name} · ${on.mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
       `${(m.ms / 1000).toFixed(1)} s`);
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
     status.title = [`speed: how much faster than real time the emulator runs this firmware on this device ` +

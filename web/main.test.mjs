@@ -248,6 +248,57 @@ test('a boot that fails leaves the page with the firmware that still runs: its f
   assert.match(status.textContent, /^a · 100 MHz · /);
 });
 
+test("M-VAVE's entry picked without its file stays picked while the machine before it plays on, named in the status line", async () => {
+  const entry = id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' });
+  const cat = { default: 'a', firmwares: [entry('a'), entry('b'),
+    { id: 'mv', name: 'M-VAVE', version: '', byo: true, download: 'https://m.example/', repo: 'https://r.example/', author: 'M-VAVE', license: '', about: '' }] };
+  const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
+  const kept = new Map([['fm1.fw', 'a'], ['fm1.mhz', '100']]);
+  const localStorage = { getItem: k => kept.get(k), setItem: (k, v) => kept.set(k, String(v)), removeItem: k => kept.delete(k) };
+  let t = 0;
+  const p = await page(storage(), '', '', false, { fetch, localStorage, performance: { now: () => t } });
+  await p.api.startAudio(); await p.api.boot(); await settle();
+  const first = p.api.running, status = p.elements.get('status'), warning = p.elements.get('perfwarn');
+  // a second of frames in which the firmware ran out of time (some of those in a row bring up the warning)
+  const second = () => { t += 1001; p.audio.port.onmessage({ data: { type: 'frame', seq: p.api.running.seq, lcd: null, leds: new Float32Array(41), ms: t,
+    short: 0, halted: false, jit: null, playing: true, busy: 400, worst: 1, emulated: 1000, idle: 0, starved: 5, quanta: 345, frames: 128 } }); };
+  const pick = async (id, value) => { p.elements.get(id).value = value; p.elements.get(id).listeners.change(); for (let i = 0; i < 20; i++) await settle(); };
+  let about = [];
+  p.elements.get('about').replaceChildren = (...parts) => { about = parts.map(e => e.textContent ?? e); };
+  await pick('fw', 'mv');
+  assert.equal(status.textContent, 'M-VAVE: open your FM-1.fwsc to boot it');
+  assert.deepEqual([p.api.running, p.api.fw.id, p.elements.get('fw').value], [first, 'mv', 'mv']);
+  assert.ok(about.includes('download FM-1.fwsc from M-VAVE'), 'where its file is found stays shown');
+  assert.match(p.location.search, /fw=mv\b/);
+  assert.equal(kept.get('fm1.fw'), 'mv');            // (the pick, as before a Start: the next visit asks for the file)
+  // the machine that plays is shown and named; no warning is made of it under the picked entry's name
+  for (let i = 0; i < 8; i++) second();
+  assert.match(status.textContent, /^M-VAVE: open your FM-1\.fwsc to boot it · a · 100 MHz · 2\.5x real time/);
+  assert.equal(warning.hidden, true);
+  // another clock is the picked entry's too, for when its file comes; Reset is of the picked entry, which does not run
+  await pick('mhz', 160);
+  assert.deepEqual([p.api.running, p.api.fw.id, p.elements.get('mhz').value, kept.get('fm1.mhz')], [first, 'mv', 160, '160']);
+  second();
+  assert.match(status.textContent, /^M-VAVE: open your FM-1\.fwsc to boot it · a · 100 MHz · /);
+  await p.elements.get('reset-save').listeners.click();
+  assert.match(p.elements.get('save-status').textContent, /start the selected firmware first/);
+  assert.equal(p.api.running, first);
+  // the file opened next, whatever its name, is the picked entry's copy
+  const open = p.elements.get('open');
+  open.files = [{ name: 'my copy.fwsc', arrayBuffer: async () => new Uint8Array(960).fill(7).buffer }];
+  open.listeners.change();
+  for (let i = 0; i < 20; i++) await settle();
+  assert.deepEqual([p.api.running.fw.id, p.api.running.mhz, p.api.running.record.byo, p.api.running.record.package[0]], ['mv', 160, true, 7]);
+  for (let i = 0; i < 8; i++) second();
+  assert.match(status.textContent, /^M-VAVE · 160 MHz · /);
+  assert.equal(warning.hidden, false);               // (the same seconds, of the machine that is picked)
+  assert.match(p.elements.get('perfwarn-text').textContent, /^M-VAVE runs out of time at 160 MHz/);
+  // a pick that does not boot for another reason (the worklet refuses it) still goes back to the machine that plays
+  p.audio.failBoot = true;
+  await pick('fw', 'b');
+  assert.deepEqual([p.api.fw.id, p.elements.get('fw').value, kept.get('fm1.fw')], ['mv', 'mv', 'mv']);
+});
+
 test('a machine that booted while a later pick waited is gone back to with its own stored pick, board and MASTER', async () => {
   const cat = { default: 'a', firmwares: ['a', 'b', 'c'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) };
   const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
