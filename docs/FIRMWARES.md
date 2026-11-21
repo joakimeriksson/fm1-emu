@@ -1,6 +1,6 @@
 # Firmwares that run in the emulator
 
-200 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
+201 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here, a few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/), FM-1 SID, and
 M-VAVE's stock firmware. Each name opens [the page](https://joakimeriksson.github.io/fm1-emu/) with
 that firmware picked (press Start); each author links to the firmware's source.
