@@ -506,6 +506,9 @@ pub struct Mapper {
     key_count: [u8; NKEYS as usize],
     /// The fraction of a click each binding has not turned yet.
     frac: Vec<f32>,
+    /// Each binding's CC is at 64 or more: it has its button down (a CC is a level, and only its
+    /// crossing of 64 presses or releases).
+    cc_down: Vec<bool>,
     /// Latched buttons, held buttons.
     latched: [bool; 14],
     held_btn: [u8; 14],
@@ -518,6 +521,7 @@ impl Mapper {
         let mut m = Mapper {
             keys_mode: profile.keys_mode,
             frac: vec![0.0; profile.bindings.len()],
+            cc_down: vec![false; profile.bindings.len()],
             profile,
             last_cc: Box::new([[NONE; 128]; 16]),
             held_note: Box::new([[NONE; 128]; 16]),
@@ -541,6 +545,7 @@ impl Mapper {
         self.release_all(out);
         self.keys_mode = p.keys_mode;
         self.frac = vec![0.0; p.bindings.len()];
+        self.cc_down = vec![false; p.bindings.len()];
         self.profile = p;
         self.last_cc.iter_mut().for_each(|r| *r = [NONE; 128]);
     }
@@ -560,6 +565,8 @@ impl Mapper {
         self.profile.bindings.retain(|_| { i += 1; keep[i - 1] });
         let mut i = 0;
         self.frac.retain(|_| { i += 1; keep[i - 1] });
+        let mut i = 0;
+        self.cc_down.retain(|_| { i += 1; keep[i - 1] });
     }
     /// A built-in profile changed by learning or unbinding becomes "<name> (mine)", so the file
     /// saved for it sits next to the built-in instead of hiding it for good.
@@ -580,6 +587,7 @@ impl Mapper {
     /// Let go of every key and button the controller holds.
     pub fn release_all(&mut self, out: &mut dyn FnMut(Out)) {
         self.release_keys(out);
+        self.cc_down.fill(false);
         for i in 0..14 {
             if self.held_btn[i] > 0 || self.latched[i] {
                 self.held_btn[i] = 0;
@@ -617,9 +625,7 @@ impl Mapper {
 
     /// A CC on `ch` that a binding has holding a button down now.
     fn holds_button(&self, ch: u8, cc: u8) -> bool {
-        self.profile.bindings.iter().any(|b| {
-            b.src.cc == Some(cc) && b.src.ch_ok(ch) && matches!(b.to, Target::Button(id) if self.held_btn[id.min(13) as usize] > 0)
-        })
+        self.profile.bindings.iter().zip(&self.cc_down).any(|(b, &down)| b.src.cc == Some(cc) && b.src.ch_ok(ch) && down)
     }
 
     fn function_held(&self) -> bool {
@@ -752,6 +758,14 @@ impl Mapper {
                 Target::Button(id) => {
                     let id = id.min(13);
                     let down = v >= 64;
+                    // a CC is a level: a pedal, a fader or a pad's pressure sends many values on either
+                    // side of 64, and only the crossing presses or releases (a note's on and off are a pair)
+                    if kind == 0xb0 {
+                        if self.cc_down[i] == down {
+                            return;
+                        }
+                        self.cc_down[i] = down;
+                    }
                     if mode == Mode::Toggle {
                         if down {
                             self.latched[id as usize] = !self.latched[id as usize];
@@ -761,7 +775,7 @@ impl Mapper {
                         let h = &mut self.held_btn[id as usize];
                         // (two sources may hold one button)
                         if down {
-                            *h += 1;
+                            *h = h.saturating_add(1);
                             if *h == 1 { out(Out::Key { id, down: true, vel: 0 }); }
                         } else if *h > 0 {
                             *h -= 1;
@@ -863,6 +877,10 @@ impl Mapper {
         let keep: Vec<bool> = self.profile.bindings.iter().map(|b| !(b.src == src || (single && b.to == t))).collect();
         let mut j = 0;
         self.profile.bindings.retain(|_| { j += 1; keep[j - 1] });
+        // (a CC that holds a button now stays its binding's, so its release still lets go)
+        let mut j = 0;
+        self.cc_down.retain(|_| { j += 1; keep[j - 1] });
+        self.cc_down.insert(0, false);
         let mut b = Binding::new(src, t);
         b.mode = mode;
         if t == Target::Keys {
