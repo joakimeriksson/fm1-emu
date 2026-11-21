@@ -298,8 +298,13 @@ impl Machine {
     }
 
     /// fm1-live's loop: cpu0's blocks, cpu1 beside once the firmware releases it.
-    /// An error is why it halted, for good: an instruction the emulator cannot run, or the emulator's
-    /// own code failing on what the firmware did (a panic, which would otherwise end the thread).
+    /// An error is why it halted, for good: an instruction the emulator cannot run, or a panic in the
+    /// emulator's own code on what the firmware did, where it unwinds to here: in the interpreter and
+    /// what it calls (a step, code not compiled yet, the peripherals' clock between blocks, the loop
+    /// probe, core 1 outside compiled code), which would otherwise end the thread. Not under compiled
+    /// code: that calls the bus and the interpreter's executor through `extern "C"` helpers (fm1-core's
+    /// jit.rs), which a panic cannot leave, so a peripheral's model failing on an access made from a
+    /// compiled block still aborts the process, the host with it.
     fn run(&mut self, n: u32) -> Result<(), String> {
         let jit = self.cpu.jit_on;
         let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
@@ -378,7 +383,8 @@ fn snapshots(pending: &mut Vec<Snapshot>, machine: Option<&Machine>, params: &cr
 }
 
 /// `f`, a panic in it as its error: the emulator's own code failing on a firmware or a package must
-/// not end the machine's thread, which every later firmware needs.
+/// not end the machine's thread, which every later firmware needs. (A panic that unwinds to here:
+/// one under compiled code does not, see `Machine::run`.)
 fn caught<T>(f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe) -> Result<T, String> {
     std::panic::catch_unwind(f).unwrap_or_else(|p| {
         let said = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
@@ -771,5 +777,20 @@ mod portable_tests {
         assert_eq!(said.unwrap_err(), "the emulator failed (sector 7 of 3)");
         assert_eq!(other.unwrap_err(), "the emulator failed (a panic)");
         assert_eq!(caught(|| Ok::<_, String>(3)), Ok(3));
+    }
+    /// Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs).
+    #[test]
+    fn a_panic_under_the_interpreter_is_the_runs_halt() {
+        let pkg = match std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc")) {
+            Ok(p) => p,
+            Err(_) => return eprintln!("no reference/firmwares/felucca.fwsc: skipped"),
+        };
+        let mut m = boot(&pkg, &[], 240, false).unwrap();
+        // the interpreter alone (a panic under compiled code cannot be caught), and a flash chip cut
+        // short: its model indexes past the end at the firmware's first read up there
+        m.cpu.jit_on = false;
+        m.soc.flash.mem.truncate(0x8000);
+        let why = (0..100).find_map(|_| m.run(100_000).err()).expect("it ran on");
+        assert!(m.halted && why.starts_with("the emulator failed (index out of bounds"), "{why}");
     }
 }
