@@ -1217,6 +1217,10 @@ function backTo(session) {
     localFw = fw;
     const opt = [...fwSel.options].find((o) => o.value === "local");
     if (opt) opt.text = `${fw.name} (your file)`;
+  } else {
+    // its entry's package is the one it runs: not one opened or fetched in its place for the boot that failed (a file
+    // the emulator refused as M-VAVE's copy), which the entry's next boot would be given
+    packages.set(fw.id, { bytes: session.record.package, url: session.record.url });
   }
   fwSel.value = fw.id;
   mhzSel.value = mhz;

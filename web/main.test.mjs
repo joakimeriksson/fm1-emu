@@ -318,6 +318,31 @@ test("going back to a machine from a ?package= link puts the link back in the ad
   assert.equal(p.elements.get('fullpage').href, './?fw=link&package=https%3A%2F%2Fx.example%2Fl-2.fwsc&name=L');
 });
 
+test("a file the emulator refuses in place of M-VAVE's copy is not the entry's package at the next boot", async () => {
+  const cat = { default: 'mv', firmwares: [{ id: 'mv', name: 'M-VAVE', version: '', byo: true, download: 'https://m.example/', repo: 'https://r.example/', author: 'M-VAVE', license: '', about: '' }] };
+  const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
+  const p = await page(storage(), '', '', false, { fetch });
+  await p.api.startAudio();
+  const open = async (name, fill) => {
+    p.elements.get('open').files = [{ name, arrayBuffer: async () => new Uint8Array(960).fill(fill).buffer }];
+    p.elements.get('open').listeners.change();
+    for (let i = 0; i < 20; i++) await settle();
+  };
+  const booted = () => new Uint8Array(p.audio.messages.filter(m => m.type === 'boot').at(-1).package)[0];
+  await open('FM-1.fwsc', 5);
+  const first = p.api.running;
+  assert.deepEqual([first.fw.id, booted()], ['mv', 5]);
+  p.audio.failBoot = true;
+  await open('FM-1 (1).fwsc', 6);
+  assert.equal(p.elements.get('status').textContent, 'M-VAVE: boot: not a package');
+  assert.deepEqual([p.api.running, booted()], [first, 6]);
+  // another clock boots the copy that plays, not the file refused
+  p.audio.failBoot = false;
+  p.elements.get('mhz').value = 160; p.elements.get('mhz').listeners.change();
+  for (let i = 0; i < 20; i++) await settle();
+  assert.deepEqual([p.api.running.mhz, booted(), p.api.running.record.package[0]], [160, 5, 5]);
+});
+
 test('a machine that booted while a later pick waited is gone back to with its own stored pick, board and MASTER', async () => {
   const cat = { default: 'a', firmwares: ['a', 'b', 'c'].map(id => ({ id, name: id, version: '1', package: `https://example.test/${id}.fwsc`, author: 't', license: 'MIT', about: '' })) };
   const fetch = async url => ({ ok: true, json: async () => (url === 'smk37/firmwares.json' ? { firmwares: [] } : cat), arrayBuffer: async () => new ArrayBuffer(0) });
