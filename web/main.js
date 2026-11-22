@@ -94,7 +94,7 @@ const clockOf = (v) => { const c = Number(v); return Number.isInteger(c) && c >=
 // A firmware runs at its package's catalog minimum when that is above the picked clock;
 // the pick stays apart so the next firmware runs at it again.
 let pickedMhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
-let mhz = pickedMhz;
+let mhz = pickedMhz, floorMhz = 0;
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
 // (an AudioContext refuses any other word)
@@ -433,6 +433,9 @@ function showFirmware() {
     parts.push(" Running ", p, ".");
   }
   about.replaceChildren(...parts);
+  for (const o of mhzSel.options) o.disabled = Number(o.value) < floorMhz;
+  mhzSel.title = !floorMhz ? "" : `This firmware needs at least ${floorMhz} MHz` +
+    (mhz > pickedMhz ? `; ${pickedMhz} MHz stays picked for the others` : "");
   const q = new URLSearchParams(location.search);
   q.set("fw", fw.id);
   q.set("mhz", pickedMhz);
@@ -1146,7 +1149,7 @@ function boot(options = {}) {
         }
       }
       const hash = await packageHash(got.bytes);
-      const clock = Math.max(picked, minMhzOf(f, hash));
+      const floor = minMhzOf(f, hash), clock = Math.max(picked, floor);
       let record = trying ? null : memoryRecords.get(hash);
       if (!record && !trying) {
         try { record = await saveStore.load(hash); } catch (error) { saveFailure(error); }
@@ -1159,13 +1162,14 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, fw: f, mhz: clock, picked, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, picked, floor, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
       sessions.set(seq, session);
       loadedUrl = got.url;
       mhz = clock;
+      floorMhz = floor;
       mhzSel.value = clock;
       showFirmware();
       down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0);
@@ -1223,6 +1227,7 @@ function backTo(session) {
   fw = session.fw;
   mhz = session.mhz;
   pickedMhz = session.picked;
+  floorMhz = session.floor;
   show(session);
   for (const [k, v] of session.kept) store(k, v);
   if (fw.id === "local") {
