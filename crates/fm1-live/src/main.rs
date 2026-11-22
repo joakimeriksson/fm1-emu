@@ -36,8 +36,8 @@
 //! (fm1_soc::flaky), for trying a firmware's fallback to one core.
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use fm1_core::{Bus, Cpu};
-use fm1_soc::{machine, Action, Soc};
+use fm1_core::Bus;
+use fm1_soc::{machine, machine::RAM_SIZE, Action, Soc, RAM_BASE};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
 use panel::{Ctl, ENCS, H, W};
 
@@ -73,8 +73,6 @@ fn say(args: std::fmt::Arguments) {
     };
 }
 
-const RAM_BASE: u32 = 0x01c0_0000;
-const RAM_SIZE: usize = 1 << 20;
 /// How far emulated time runs ahead of the wall clock before audio starts.
 const LEAD_MS: f64 = 60.0;
 /// Once the firmware streams audio, the emulator runs whenever less than the target of sound
@@ -306,18 +304,14 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
     Some(o)
 }
 
-/// The machine: cpu0 + SoC, stepped with interrupts and the peripheral clock; cpu1 once
-/// the firmware releases it.
+/// The machine: fm1_soc::machine's (its `cpu`, `cpu1` and `soc` are reached through `Deref`), with
+/// this program's debugging hooks.
 struct Machine {
-    cpu: Cpu,
-    /// The second core, from when cpu0 releases it (fm1_soc::machine).
-    cpu1: Option<Cpu>,
-    soc: Soc,
+    m: machine::Machine,
     /// FM1_SKIP_LOG: where idle skips happen (pc -> count).
     skip_log: Option<std::collections::HashMap<u32, u64>>,
     /// Run micro-ops in blocks (FM1_NO_BLOCKS=1: the reference per-step loop).
     blocks: bool,
-    pending_tick: bool,
     /// FM1_WATCH_LEDPUT=after_ms: report led_put(…, 25, on) calls (debug)
     watch_call: Option<(u32, u64)>,
     watch_hits: u32,
@@ -335,46 +329,31 @@ impl Machine {
             }
             None => None,
         };
-        let image = match &stock {
-            Some(st) => st.xip.clone(),
-            None => std::fs::read(&o.bin)?,
+        let opts = machine::Options {
+            mhz: o.mhz,
+            jit: std::env::var("FM1_NO_JIT").is_err(),
+            // the SPL hands cpu0 over in user mode (see fm1-emu)
+            user: std::env::var_os("FM1_SUPERVISOR_START").is_none(),
+            // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
+            // time) and as it is timed (`Options::strict`)
+            strict: std::env::var_os("FM1_STRICT").is_some(),
+            // (FM1_STRICT or FM1_LCD_TIMED; FM1_LCD_INSTANT turns it off again)
+            lcd_timed: fm1_soc::lcd_timed_from_env(),
+            flash_part: o.flash_part,
+            cpu1_survives: o.cpu1_survives,
+            flaky_core1: o.flaky_core1.map(|rate| (rate, o.seed.unwrap_or(1))),
+            // (the SFC with the chip key, as the loader leaves it: a `--flash` file reads through it)
+            sfc: true,
+            ..Default::default()
         };
-        let mut soc = Soc::new(RAM_SIZE, image);
-        // (before the boot: the board sets the flash chip's id from it)
-        soc.set_flash_part(o.flash_part);
-        let strict = std::env::var_os("FM1_STRICT").is_some();
-        // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
-        // time) and as it is timed: each instruction its measured cost (fm1_core's op_cost8) on a
-        // clock in eighths of a cycle (the HW units' jobs too); the interpreter only, and no loop
-        // skip (it counts instructions)
-        soc.periph.cycle_ticks = if strict { 8 } else { 1 };
-        soc.periph.hz = o.mhz * 1_000_000 * soc.periph.cycle_ticks;
-        soc.strict_align = strict;
-        // (FM1_STRICT or FM1_LCD_TIMED; FM1_LCD_INSTANT turns it off again)
-        soc.lcd_timed = fm1_soc::lcd_timed_from_env();
-        if strict {
-            soc.loop_skip.enabled = false;
-            soc.xip_cache = Some(fm1_soc::XipCache::default());
-        }
-        soc.periph.skip_idle = true;
-        soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
-        soc.cpu1_survives = o.cpu1_survives;
-        let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
-        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err() && !strict;
-        cpu.cost_model = strict;
+        let mut m = match stock {
+            Some(st) => machine::Machine::from_stock(st, &opts),
+            None => machine::Machine::from_image(std::fs::read(&o.bin)?, o.entry, &opts),
+        };
         if std::env::var_os("FM1_ISA_HIST").is_some() {
-            cpu.isa_hist = Some(Default::default());
+            m.cpu.isa_hist = Some(Default::default());
         }
-        // the SPL hands cpu0 over in user mode (see fm1-emu)
-        cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
-        // the SPL's boot-parameter struct (see fm1-emu): an all-zero pair
-        let params = RAM_BASE + 0x7fc00;
-        soc.write32(params, params + 0x40);
-        cpu.regs[0] = params;
-        if let Some(st) = &stock {
-            cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
-            soc.sfc_boot(st.key, st.app_end);
-        }
+        let soc = &mut m.soc;
         if let Some(path) = o.flash.as_ref().filter(|p| std::path::Path::new(p).exists()) {
             let f = std::fs::read(path)?;
             if f.len() != fm1_soc::FLASH_SIZE {
@@ -390,7 +369,7 @@ impl Machine {
         let blocks = std::env::var("FM1_NO_BLOCKS").is_err();
         let watch_call = std::env::var("FM1_WATCH_LEDPUT").ok().and_then(|v| v.parse().ok()).map(|ms| (0x0201_ad60u32, ms));
         let blocks = blocks && watch_call.is_none();
-        Ok(Self { cpu, cpu1: None, soc, skip_log, blocks, pending_tick: false, watch_call, watch_hits: 0 })
+        Ok(Self { m, skip_log, blocks, watch_call, watch_hits: 0 })
     }
 
     /// Run n instructions of cpu0, and of cpu1 alongside once it is running
@@ -399,24 +378,22 @@ impl Machine {
         if !self.blocks {
             return self.run_steps(n);
         }
-        let jit = self.cpu.jit_on;
-        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick))
+        self.m.run(n)
     }
 
     /// The reference loop: one instruction per iteration.
     fn run_steps(&mut self, n: u32) -> Result<(), String> {
-        self.soc.take_boot(&self.cpu);
+        self.m.soc.take_boot(&self.m.cpu);
         for _ in 0..n {
             if self.soc.periph.tick() {
                 self.soc.advance(0);
             }
             if self.soc.reset_due() {
-                self.soc.chip_reset(&mut self.cpu); // (as run_blocks: cpu0 from its start)
+                self.m.soc.chip_reset(&mut self.m.cpu); // (as run_blocks: cpu0 from its start)
                 self.cpu1 = None;
             }
             // (as run_blocks: the PC limits, the interrupt due, the exception taken once)
-            machine::cpu0_between(&mut self.cpu, &mut self.soc);
+            machine::cpu0_between(&mut self.m.cpu, &mut self.m.soc);
             if let Some((bpc, after)) = self.watch_call {
                 if self.cpu.pc == bpc && self.cpu.regs[2] != 0 && self.soc.periph.ms() >= after && self.watch_hits < 60 {
                     self.watch_hits += 1;
@@ -424,12 +401,25 @@ impl Machine {
                 }
             }
             let (pc, sk) = (self.cpu.pc, self.soc.periph.skipped);
-            machine::cpu0_step(&mut self.cpu, &mut self.soc)?;
+            machine::cpu0_step(&mut self.m.cpu, &mut self.m.soc)?;
             if self.skip_log.is_some() && self.soc.periph.skipped != sk {
                 *self.skip_log.as_mut().unwrap().entry(pc).or_insert(0) += 1;
             }
         }
         Ok(())
+    }
+}
+
+impl std::ops::Deref for Machine {
+    type Target = machine::Machine;
+    fn deref(&self) -> &machine::Machine {
+        &self.m
+    }
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut machine::Machine {
+        &mut self.m
     }
 }
 
@@ -513,9 +503,10 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         m.soc.periph.script.clear();
     } else if script_keys(&mut m) {
     } else {
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(800), Action::Key { id: 21, down: true }));
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(900), Action::Key { id: 25, down: true }));
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(1000), Action::Key { id: 28, down: true }));
+        for (at, id) in [(800, 21), (900, 25), (1000, 28)] {
+            let at = m.soc.periph.cycle_of_ms(at);
+            m.soc.periph.script.push_back((at, Action::Key { id, down: true }));
+        }
     }
     m.cpu.profile = std::env::var("FM1_BENCH_ROUTES").is_ok();
     let warmup = std::env::var("FM1_WARMUP_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000).min(ms.saturating_sub(1));
@@ -582,9 +573,6 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
             std::process::exit(1);
         }
         insns += 100_000;
-        if let Some(c1) = m.cpu1.as_mut() {
-            c1.profile = m.cpu.profile;
-        }
         if std::env::var_os("FM1_BENCH_TRACE").is_some() {
             // a checkpoint to diff between runs (JIT against the interpreter)
             eprintln!("cp {insns} cyc {} pc {:#010x} sp {:#x} r {:x?}", m.soc.periph.cycles, m.cpu.pc, m.cpu.sp, &m.cpu.regs[..8]);
