@@ -32,6 +32,9 @@ struct Machine {
     pace: Pace,
 }
 
+// (its `cpu`, `cpu1` and `soc` are read through this. Saved sectors and a bank go through `restore`
+// and `load_syx` below, which take them only before the first render: the shared machine's
+// `restore_sectors` and `load_syx`, reached past them, have no such gate.)
 impl std::ops::Deref for Machine {
     type Target = machine::Machine;
     fn deref(&self) -> &machine::Machine {

@@ -325,6 +325,8 @@ impl Machine {
     }
 }
 
+// (its `cpu`, `cpu1` and `soc` are read through this. It is run through `run` above, which turns a
+// panic into a halt: the shared machine's own `run`, reached past it as `self.m.run`, does not.)
 impl std::ops::Deref for Machine {
     type Target = machine::Machine;
     fn deref(&self) -> &machine::Machine {
