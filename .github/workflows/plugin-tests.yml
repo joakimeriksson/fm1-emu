@@ -16,6 +16,7 @@ on:
       - 'tools/build_plugin.sh'
       - 'tools/build_plugin.ps1'
       - 'tools/fetch_firmwares.mjs'
+      - 'tools/felucca_is_hashed.mjs'
       - 'web/fwsc.js'
       - '.github/workflows/plugin-tests.yml'
   workflow_dispatch:
@@ -38,6 +39,7 @@ jobs:
         run: |
           node tools/fetch_firmwares.mjs felucca
           test -f reference/firmwares/felucca.fwsc
+          node tools/felucca_is_hashed.mjs
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       # (the plugin is a workspace of its own: pages.yml's clippy step does not see it)
@@ -62,6 +64,7 @@ jobs:
         run: |
           node tools/fetch_firmwares.mjs felucca
           test -f reference/firmwares/felucca.fwsc
+          node tools/felucca_is_hashed.mjs
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP and VST3 without installation
