@@ -18,7 +18,9 @@
 //! this, most of its slow-path instructions were `lockset` retries). cpu0's interrupts wait up
 //! to a slice meanwhile.
 
-use crate::{p33, Soc, Wait, RAM_BASE, VEC_BASE};
+use crate::flaky::FlakyCore1;
+use crate::fwsc::{self, UsrLayout};
+use crate::{p33, stock_boot, stock_from_package, FlashPart, Soc, Stock, Wait, XipCache, FLASH_SIZE, RAM_BASE, VEC_BASE};
 use fm1_core::{Bus, Cpu, PlainState};
 
 /// cpu0 runs in slices of this many instructions once cpu1 is running, cpu1 after each.
@@ -968,6 +970,236 @@ fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) ->
             Ok(0)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The FM-1's RAM: 1 MiB from `RAM_BASE`.
+pub const RAM_SIZE: usize = 1 << 20;
+/// A flash sector: what a save holds of the chip, and what `Machine::changed_sectors` compares.
+pub const SECTOR: usize = 4096;
+/// Where the boot parameters go (r0 at cpu0's entry): near the top of the FM-1's RAM, so what the
+/// CRT reads through them stays inside memory.
+pub const BOOT_PARAMS: u32 = RAM_BASE + 0x7fc00;
+
+/// How a machine is set up: what a front end chooses, from its command line, its page or its host.
+/// None of it is read from the environment here: a front end that has a variable for one of these
+/// reads it itself.
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// The CPU clock in MHz (the chip's nominal 240): the timers count its cycles.
+    pub mhz: u64,
+    /// RAM in bytes (`RAM_SIZE` on an FM-1).
+    pub ram_size: usize,
+    /// Hot code runs compiled, on cpu0 and on cpu1 once it is released (`run_dual`).
+    pub jit: bool,
+    /// A firmware waiting on a timer costs nothing to emulate (`Periph::skip_idle`).
+    pub skip_idle: bool,
+    /// cpu0 starts in user mode, as the SPL hands it over (fm1-core's `Cpu::user`); off: in supervisor
+    /// mode, the old single stack.
+    pub user: bool,
+    /// As an FM-1 is timed (fm1-live's FM1_STRICT): each instruction its measured cost (fm1_core's
+    /// op_cost8) on a clock in eighths of a cycle (the HW units' jobs too), the flash cache, misaligned
+    /// RAM accesses fault; the interpreter only, and no loop skip (it counts instructions).
+    pub strict: bool,
+    /// The LCD's transfers take their time at the SPI clock, as on an FM-1 (`Soc::lcd_timed`).
+    pub lcd_timed: bool,
+    /// Which part the FM-1's flash is.
+    pub flash_part: FlashPart,
+    /// A fault on core 1 stops that core alone and cpu0 goes on (`Soc::cpu1_survives`).
+    pub cpu1_survives: bool,
+    /// A flaky core 1 (flaky.rs): the chance that one of its RAM loads misreads, and its generator's seed.
+    pub flaky_core1: Option<(f64, u64)>,
+    /// A package boot gives the SFC the chip key, and SFCENC as the loader leaves it (`Soc::sfc_boot`):
+    /// what the chip holds below the plain window then shows decrypted through XIP. fm1-live boots
+    /// so; the page, the plugin and fm1-emu boot without, and their window shows the chip as stored.
+    /// That is how each front end has it today, not a design: the switch keeps each as it is.
+    pub sfc: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            mhz: 240,
+            ram_size: RAM_SIZE,
+            jit: false,
+            skip_idle: true,
+            user: true,
+            strict: false,
+            lcd_timed: false,
+            flash_part: FlashPart::P25q80,
+            cpu1_survives: false,
+            flaky_core1: None,
+            sfc: false,
+        }
+    }
+}
+
+/// An FM-1 as a front end runs it: the cores and the SoC, and what booting, running, halting and
+/// saving the flash keep between calls. fm1-live, the page, the plugin and fm1-emu each had these
+/// written out; here they are once, and a front end keeps around it only what is its own.
+pub struct Machine {
+    pub cpu: Cpu,
+    /// The second core, from when cpu0 releases it (`run_dual`).
+    pub cpu1: Option<Cpu>,
+    pub soc: Soc,
+    /// The package's USR area (the firmware's patch bank), if it has one, and how its board's stock
+    /// firmware lays the bank out in it (`load_syx`).
+    pub usr: Option<usize>,
+    pub usr_layout: UsrLayout,
+    /// a tick already spent on cpu0's next instruction (`run_blocks`)
+    pending_tick: bool,
+    /// why it halted, once it has
+    halt: Option<String>,
+    /// the flash chip as booted: what `changed_sectors` compares it with
+    flash0: Vec<u8>,
+}
+
+impl Machine {
+    /// The chip and cpu0 as every boot starts them: the image in the XIP window, cpu0 at `entry`
+    /// with r0 at an empty boot-parameter pair.
+    fn start(xip: Vec<u8>, entry: u32, o: &Options) -> (Cpu, Soc) {
+        let mut soc = Soc::new(o.ram_size, xip);
+        // (before the boot: the board sets the flash chip's id from it)
+        soc.set_flash_part(o.flash_part);
+        soc.periph.cycle_ticks = if o.strict { 8 } else { 1 };
+        soc.periph.hz = o.mhz * 1_000_000 * soc.periph.cycle_ticks;
+        soc.strict_align = o.strict;
+        soc.lcd_timed = o.lcd_timed;
+        if o.strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(XipCache::default());
+        }
+        soc.periph.skip_idle = o.skip_idle;
+        soc.flaky_core1 = o.flaky_core1.map(|(rate, seed)| FlakyCore1::new(rate, seed));
+        soc.cpu1_survives = o.cpu1_survives;
+        let mut cpu = Cpu::new(entry);
+        // (cpu1 follows cpu0's setting: run_dual)
+        cpu.jit_on = o.jit && !o.strict;
+        cpu.cost_model = o.strict;
+        cpu.user = o.user;
+        // The SPL enters the app with r0 -> its boot-parameter struct, whose first word points at a
+        // chip-info block (the stock app's boot_hwinfo_save copies both): an all-zero pair, until a
+        // package's boot writes the real ones there (`stock_boot`).
+        soc.write32(BOOT_PARAMS, BOOT_PARAMS + 0x40);
+        cpu.regs[0] = BOOT_PARAMS;
+        (cpu, soc)
+    }
+
+    fn booted(cpu: Cpu, soc: Soc, usr: Option<usize>, usr_layout: UsrLayout) -> Machine {
+        let flash0 = soc.flash.mem.clone();
+        Machine { cpu, cpu1: None, soc, usr, usr_layout, pending_tick: false, halt: None, flash0 }
+    }
+
+    /// A bare image mapped at the XIP base and entered at `entry`: a blank flash chip, no board
+    /// but the FM-1's, r0 at the empty boot parameters.
+    pub fn from_image(xip: Vec<u8>, entry: u32, o: &Options) -> Machine {
+        let (cpu, soc) = Self::start(xip, entry, o);
+        Self::booted(cpu, soc, None, UsrLayout::FM1)
+    }
+
+    /// A firmware from its update package (`stock_from_package`: its XIP window, its flash chip, its
+    /// board), with a DX7 bank for its patch area if one is given. Err: not a package, or not a bank.
+    pub fn from_package(pkg: &[u8], syx: Option<&[u8]>, o: &Options) -> Result<Machine, String> {
+        Ok(Self::from_stock(stock_from_package(pkg, syx)?, o))
+    }
+
+    /// The same from a package already unpacked: its board and flash chip, the SPL's boot parameters
+    /// (`stock_boot`) and, with `Options::sfc`, the SFC as the loader leaves it.
+    pub fn from_stock(st: Stock, o: &Options) -> Machine {
+        let (mut cpu, mut soc) = Self::start(st.xip, st.entry, o);
+        cpu.regs[0] = stock_boot(&mut soc, &st.flash, BOOT_PARAMS, st.board);
+        if o.sfc {
+            soc.sfc_boot(st.key, st.app_end);
+        }
+        Self::booted(cpu, soc, st.usr, st.usr_layout)
+    }
+
+    /// Run n instructions of cpu0 in blocks (`run_blocks`), and cpu1 alongside once the firmware
+    /// releases it (`run_dual`). An error is why the machine halted, for good: an instruction the
+    /// emulator cannot run, and where. It is kept (`halted`), and a halted machine runs no more:
+    /// it gives the same error again.
+    #[inline]
+    pub fn run(&mut self, n: u32) -> Result<(), String> {
+        if let Some(why) = &self.halt {
+            return Err(why.clone());
+        }
+        let jit = self.cpu.jit_on;
+        // (cpu1's compiled code counts its helper calls when cpu0's does: `Cpu::profile`)
+        if let Some(c1) = self.cpu1.as_mut() {
+            c1.profile = self.cpu.profile;
+        }
+        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
+        let ram_size = soc.ram.len();
+        let ran = run_dual(cpu1, soc, n, ram_size, jit, |soc, k| run_blocks(cpu, soc, k, pending_tick));
+        if let Err(why) = &ran {
+            self.halt = Some(why.clone());
+        }
+        ran
+    }
+
+    /// Why the machine halted, if it has.
+    pub fn halted(&self) -> Option<&str> {
+        self.halt.as_deref()
+    }
+
+    /// Halt the machine from outside, with why: a front end that caught a failure of its own around
+    /// `run` (the plugin, a panic). The first reason stays.
+    pub fn halt(&mut self, why: String) {
+        self.halt.get_or_insert(why);
+    }
+
+    /// The flash chip as booted (the package's, with what the boot laid on it).
+    pub fn flash_base(&self) -> &[u8] {
+        &self.flash0
+    }
+
+    /// The sectors of the flash chip that differ from the booted one, each with its flash offset: what
+    /// the firmware wrote (its patches, its settings) and what was put over the boot (`restore_sectors`,
+    /// `load_syx`). What a save keeps.
+    pub fn changed_sectors(&self) -> Vec<(u32, Vec<u8>)> {
+        let (now, then) = (&self.soc.flash.mem, &self.flash0);
+        (0..now.len().min(then.len()) / SECTOR)
+            .filter(|s| now[s * SECTOR..(s + 1) * SECTOR] != then[s * SECTOR..(s + 1) * SECTOR])
+            .map(|s| ((s * SECTOR) as u32, now[s * SECTOR..(s + 1) * SECTOR].to_vec()))
+            .collect()
+    }
+
+    /// Saved sectors (a run's `changed_sectors`) over the flash: each replaces its whole sector on
+    /// the chip and, as the firmware's own erases and programs do, in the XIP window
+    /// (`Soc::restore_sector`). The base stays the booted chip. All or nothing: with an offset that
+    /// is no sector's, a length that is not a sector's or a sector given twice, nothing is written.
+    pub fn restore_sectors(&mut self, sectors: &[(u32, &[u8])]) -> Result<(), String> {
+        let mut seen = [false; FLASH_SIZE / SECTOR];
+        for &(at, data) in sectors {
+            let at = at as usize;
+            if at >= FLASH_SIZE || at & (SECTOR - 1) != 0 || data.len() != SECTOR {
+                return Err("invalid flash sector offset or length".into());
+            }
+            if std::mem::replace(&mut seen[at / SECTOR], true) {
+                return Err("duplicate flash sector".into());
+            }
+        }
+        for &(at, data) in sectors {
+            self.soc.restore_sector(at as usize, data);
+        }
+        Ok(())
+    }
+
+    /// A DX7 32-voice bank into the package's patch area (slots 1-32), over the flash as it is now
+    /// (restored sectors too). Only the sectors it changes are written, as `restore_sectors` writes
+    /// them: the window keeps the installed code elsewhere, the base stays the booted chip, and the
+    /// bank is among the changed sectors. Err: this package has no patch area, or the bank is not
+    /// one; nothing is written then.
+    pub fn load_syx(&mut self, bank: &[u8]) -> Result<(), String> {
+        let usr = self.usr.ok_or("this firmware has no patch area")?;
+        let mut flash = self.soc.flash.mem.clone();
+        fwsc::usr_load_syx(&mut flash, usr, self.usr_layout, bank, 0)?;
+        for at in (0..flash.len()).step_by(SECTOR) {
+            if flash[at..at + SECTOR] != self.soc.flash.mem[at..at + SECTOR] {
+                self.soc.restore_sector(at, &flash[at..at + SECTOR]);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2285,5 +2517,251 @@ mod tests {
         assert_eq!(probes(|_, s| s.xip_cache = Some(crate::XipCache::default())), (0, 0));
         assert_eq!(probes(|c, _| c.cost_model = true), (0, 0));
         assert_eq!(probes(|_, s| s.strict_align = true), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+    use crate::periph::Action;
+    use crate::{Board, XIP_BASE, XIP_FLASH_OFFSET};
+
+    /// A package booted as the front ends each had it written out before `Machine` (fm1-live's
+    /// lines; the page's and the plugin's were these without the strict clock and `sfc_boot`): the
+    /// oracle for `Machine`'s boot.
+    fn by_hand(pkg: &[u8], jit: bool, strict: bool, sfc: bool) -> (Cpu, Soc) {
+        let st = stock_from_package(pkg, None).unwrap();
+        let mut soc = Soc::new(1 << 20, st.xip.clone());
+        soc.set_flash_part(FlashPart::P25q80);
+        soc.periph.cycle_ticks = if strict { 8 } else { 1 };
+        soc.periph.hz = 240 * 1_000_000 * soc.periph.cycle_ticks;
+        soc.strict_align = strict;
+        if strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(XipCache::default());
+        }
+        soc.periph.skip_idle = true;
+        let mut cpu = Cpu::new(st.entry);
+        cpu.jit_on = jit && !strict;
+        cpu.cost_model = strict;
+        cpu.user = true;
+        let params = RAM_BASE + 0x7fc00;
+        soc.write32(params, params + 0x40);
+        cpu.regs[0] = stock_boot(&mut soc, &st.flash, params, st.board);
+        if sfc {
+            soc.sfc_boot(st.key, st.app_end);
+        }
+        (cpu, soc)
+    }
+
+    /// FM-1 SID's package (in the tree as a submodule: skipped where that is not checked out, but
+    /// not in CI, which checks it out and must not pass on nothing), booted and run through
+    /// `Machine` and by hand, with the JIT and interpreted, with the chip key and without, and on
+    /// the strict clock: the same machine after the same chunks, to the last byte of RAM and audio.
+    #[test]
+    fn a_package_boots_and_runs_as_the_recipe_written_out() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fm1-sid/web/sidplayer.fwsc");
+        let pkg = match std::fs::read(path) {
+            Ok(p) => p,
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no fm1-sid/web/sidplayer.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
+        };
+        let flash = stock_from_package(&pkg, None).unwrap().flash;
+        // (the JIT, the strict clock, the chip key, emulated ms)
+        let runs = [(true, false, true, 600), (true, false, false, 600), (false, false, true, 600), (false, false, false, 600)];
+        for (jit, strict, sfc, ms) in runs.into_iter().chain([(false, true, true, 60)]) {
+            let what = format!("jit {jit}, strict {strict}, sfc {sfc}");
+            let mut m = Machine::from_package(&pkg, None, &Options { jit, strict, sfc, ..Options::default() }).unwrap();
+            let (mut cpu, mut soc) = by_hand(&pkg, jit, strict, sfc);
+            assert!(m.flash_base() == &flash[..] && m.changed_sectors().is_empty(), "{what}: the base is the package's chip");
+            for s in [&mut m.soc, &mut soc] {
+                let at = s.periph.cycle_of_ms(ms / 2);
+                s.periph.script.push_back((at, Action::Key { id: 12, down: true }));
+            }
+            let (mut c1, mut tick) = (None, false);
+            while soc.periph.ms() < ms {
+                m.run(20_000).unwrap();
+                let jit = cpu.jit_on;
+                run_dual(&mut c1, &mut soc, 20_000, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut tick)).unwrap();
+            }
+            assert_eq!(m.soc.periph.cycles, soc.periph.cycles, "{what}");
+            assert_eq!((m.cpu.pc, m.cpu.regs, m.cpu.sp, m.cpu.insn_count), (cpu.pc, cpu.regs, cpu.sp, cpu.insn_count), "{what}");
+            assert_eq!((m.cpu1.is_some(), m.halted(), m.soc.resets), (c1.is_some(), None, soc.resets), "{what}");
+            assert!(m.soc.periph.audio == soc.periph.audio, "{what}: the audio");
+            assert!(strict || m.soc.periph.audio.len() > 20_000, "{what}: {} samples", m.soc.periph.audio.len());
+            assert!(m.soc.periph.keys_down[12] && soc.periph.keys_down[12], "{what}: the scripted key");
+            assert!(m.soc.flash.mem == soc.flash.mem && m.soc.xip == soc.xip, "{what}: the chip, the window");
+            assert!(m.soc.lcd.fb == soc.lcd.fb, "{what}: the screen");
+            assert!((0..1 << 20).step_by(4).all(|a| m.soc.ram.read32(a) == soc.ram.read32(a)), "{what}: RAM");
+        }
+    }
+
+    /// A machine whose chip (0xaa) and installed window (0x55) differ, as a scrambled package's
+    /// do; its app area ends at flash 0x7000.
+    fn blank(o: &Options) -> Machine {
+        let st = Stock { xip: vec![0x55; 0x80000], flash: vec![0xaa; FLASH_SIZE], entry: XIP_BASE + 0x120, board: Board::Fm1,
+                         identity: String::new(), key: 0x980f, app_end: 0x7000, usr: None, usr_layout: UsrLayout::FM1 };
+        Machine::from_stock(st, o)
+    }
+
+    #[test]
+    fn the_options_set_the_chip_and_cpu0() {
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &Options::default());
+        assert_eq!((m.soc.periph.hz, m.soc.periph.cycle_ticks, m.soc.periph.skip_idle), (240_000_000, 1, true));
+        assert!(m.cpu.user && !m.cpu.jit_on && !m.cpu.cost_model && !m.soc.strict_align && m.soc.xip_cache.is_none());
+        assert_eq!((m.cpu.pc, m.cpu.regs[0], m.soc.ram.read32(BOOT_PARAMS - RAM_BASE)), (XIP_BASE, BOOT_PARAMS, BOOT_PARAMS + 0x40));
+        assert!(m.flash_base().iter().all(|&b| b == 0xff) && m.usr.is_none() && m.cpu1.is_none() && m.halted().is_none());
+        assert_eq!((m.soc.ram.len(), m.soc.board, m.soc.flash.jedec), (RAM_SIZE, Board::Fm1, FlashPart::P25q80.jedec()));
+        // the strict clock: eighths of a cycle and the interpreter only, whatever was asked
+        let o = Options { mhz: 120, ram_size: 2 << 20, jit: true, skip_idle: false, user: false, strict: true, lcd_timed: true,
+                          flash_part: FlashPart::Uc25hq80, cpu1_survives: true, flaky_core1: Some((0.5, 7)), sfc: false };
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &o);
+        assert_eq!((m.soc.periph.hz, m.soc.periph.cycle_ticks, m.soc.periph.skip_idle), (960_000_000, 8, false));
+        assert!(!m.cpu.jit_on && m.cpu.cost_model && m.soc.strict_align && m.soc.xip_cache.is_some() && !m.soc.loop_skip.enabled);
+        assert!(!m.cpu.user && m.soc.lcd_timed && m.soc.cpu1_survives && m.soc.flaky_core1.is_some());
+        assert_eq!((m.soc.ram.len(), m.soc.flash.jedec), (2 << 20, FlashPart::Uc25hq80.jedec()));
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &Options { jit: true, ..Options::default() });
+        assert!(m.cpu.jit_on);
+        // a package's boot: its chip, the SPL's parameters in place of the empty pair
+        let m = blank(&Options::default());
+        assert!(m.flash_base().iter().all(|&b| b == 0xaa) && m.soc.flash.mem == m.flash_base());
+        assert_eq!((m.cpu.pc, m.cpu.regs[0], m.soc.ram.read32(BOOT_PARAMS - RAM_BASE)), (XIP_BASE + 0x120, BOOT_PARAMS, BOOT_PARAMS + 24));
+    }
+
+    #[test]
+    fn a_run_that_cannot_go_on_halts_with_its_reason_and_runs_no_more() {
+        let mut m = Machine::from_image(vec![0xff; 0x1000], XIP_BASE + 0x120, &Options::default()); // (no instruction)
+        let why = m.run(100).unwrap_err();
+        assert!(why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
+        assert_eq!(m.halted(), Some(&why[..]));
+        let was = (m.soc.periph.cycles, m.cpu.insn_count, m.cpu.pc);
+        assert_eq!(m.run(100), Err(why.clone()));
+        assert_eq!((m.soc.periph.cycles, m.cpu.insn_count, m.cpu.pc), was, "it ran no more");
+        m.halt("a panic".into());
+        assert_eq!(m.halted(), Some(&why[..]), "the first reason stays");
+        // halted from outside (a front end that caught its own failure around a run)
+        let mut m = Machine::from_image([0x20, 0x00].repeat(64), XIP_BASE, &Options::default()); // csync x 64
+        m.run(8).unwrap();
+        assert_eq!((m.cpu.insn_count, m.halted()), (8, None));
+        m.halt("the emulator failed".into());
+        assert_eq!(m.run(8), Err("the emulator failed".into()));
+        assert_eq!(m.cpu.insn_count, 8);
+    }
+
+    #[test]
+    fn a_tick_spent_on_the_next_instruction_is_carried_to_the_next_run() {
+        // cpu0 stops short where it finds a lock core 1 holds (`Soc::waits`, set by hand here); a key
+        // came due there (cycle 5), so the tick of the instruction it stopped before is spent
+        let boot = || {
+            let mut m = Machine::from_image([0x20, 0x00].repeat(64), XIP_BASE, &Options::default()); // csync x 64
+            m.soc.periph.script.push_back((5, Action::Key { id: 12, down: true }));
+            m.soc.waits[0] = Some(Wait::Lock);
+            m
+        };
+        let (mut m, mut hand, mut tick) = (boot(), boot(), false);
+        m.run(32).unwrap();
+        run_dual(&mut None, &mut hand.soc, 32, RAM_SIZE, false, |s, k| run_blocks(&mut hand.cpu, s, k, &mut tick)).unwrap();
+        assert!(m.pending_tick && tick);
+        assert_eq!((m.cpu.insn_count, m.soc.periph.cycles), (4, 5));
+        assert_eq!((hand.cpu.insn_count, hand.soc.periph.cycles), (4, 5));
+        // the next run does not tick again for its first instruction: a cycle an instruction, as before
+        (m.soc.waits[0], hand.soc.waits[0]) = (None, None);
+        m.run(8).unwrap();
+        run_dual(&mut None, &mut hand.soc, 8, RAM_SIZE, false, |s, k| run_blocks(&mut hand.cpu, s, k, &mut tick)).unwrap();
+        assert_eq!((m.cpu.insn_count, m.soc.periph.cycles, m.pending_tick), (12, 12, false));
+        assert_eq!((hand.cpu.insn_count, hand.soc.periph.cycles, tick), (12, 12, false));
+        assert!(m.soc.periph.keys_down[12]);
+    }
+
+    #[test]
+    fn a_restored_sector_replaces_its_whole_sector_in_the_window() {
+        let mut m = blank(&Options::default());
+        // one byte is not the chip's; the others are the chip's, which the window does not show
+        let mut saved = vec![0xaa; SECTOR];
+        saved[0] = 0x12;
+        m.restore_sectors(&[(0x74000, &saved)]).unwrap();
+        assert_eq!(m.soc.read32(0x0207_0000), 0xaaaa_aa12);
+        assert_eq!(m.soc.read32(0x0207_0ffc), 0xaaaa_aaaa, "also where the saved byte is the chip's");
+        assert_eq!(m.soc.read32(0x0207_1000), 0x5555_5555, "the next sector as installed");
+        assert_eq!((m.soc.flash.mem[0x74000], m.flash_base()[0x74000], m.soc.flash.revision), (0x12, 0xaa, 1));
+        // a sector that is all the chip's is written through as well, and is not a change
+        m.restore_sectors(&[(0x75000, &[0xaa; SECTOR])]).unwrap();
+        assert_eq!((m.soc.read32(0x0207_1000), m.soc.flash.revision), (0xaaaa_aaaa, 2));
+        assert_eq!(m.changed_sectors(), vec![(0x74000, saved)]);
+    }
+
+    #[test]
+    fn a_restored_sector_reads_as_the_firmwares_own_erase_and_program_left_it() {
+        let (mut live, mut restored) = (blank(&Options::default()), blank(&Options::default()));
+        // write enable, sector erase at 0x74000, write enable, page program of two bytes there
+        for cmd in [&[0x06][..], &[0x20, 0x07, 0x40, 0x00], &[0x06], &[0x02, 0x07, 0x40, 0x00, 0x12, 0x34]] {
+            live.soc.write32(0x500c0, 0); // PD0 low: chip select
+            for &b in cmd {
+                live.soc.write32(crate::spiflash::SPI0_BASE + 8, b as u32);
+            }
+            live.soc.write32(0x500c0, 1);
+        }
+        let saved = live.changed_sectors();
+        assert_eq!((saved.len(), saved[0].0, &saved[0].1[..4]), (1, 0x74000, &[0x12, 0x34, 0xff, 0xff][..]));
+        restored.restore_sectors(&[(saved[0].0, &saved[0].1)]).unwrap();
+        assert!(restored.soc.flash.mem == live.soc.flash.mem && restored.changed_sectors() == saved);
+        for a in (0x0207_0000..0x0207_2000).step_by(4) {
+            assert_eq!(restored.soc.read32(a), live.soc.read32(a), "XIP at {a:#x}");
+        }
+        assert_eq!((live.soc.read32(0x0207_0000), live.soc.read32(0x0207_1000)), (0xffff_3412, 0x5555_5555));
+    }
+
+    #[test]
+    fn an_invalid_restore_writes_nothing() {
+        let mut m = blank(&Options::default());
+        let (good, short) = (vec![0u8; SECTOR], vec![0u8; 10]);
+        // not on a sector, past the chip, not a sector long, a sector twice (after one that is fine)
+        for bad in [vec![(1, &good[..])], vec![(1 << 20, &good[..])], vec![(0, &short[..])], vec![(0x1000, &good[..]), (7, &good[..])],
+                    vec![(0, &good[..]), (0x1000, &good[..]), (0, &good[..])]] {
+            assert!(m.restore_sectors(&bad).is_err());
+            assert!(m.soc.flash.mem == m.flash_base() && m.soc.flash.revision == 0 && m.changed_sectors().is_empty());
+            assert_eq!(m.soc.read32(XIP_BASE), 0x5555_5555);
+        }
+        m.restore_sectors(&[(0, &good), (0xff000, &good)]).unwrap();
+        assert_eq!(m.changed_sectors(), vec![(0, good.clone()), (0xff000, good)]);
+    }
+
+    #[test]
+    fn a_bank_goes_over_the_flash_as_it_is_and_the_base_stays_the_booted_chip() {
+        let mut m = blank(&Options::default());
+        let bank = vec![0x23; 4096];
+        assert!(m.load_syx(&bank).is_err() && m.changed_sectors().is_empty(), "no patch area in this package");
+        m.usr = Some(0xe0000);
+        m.restore_sectors(&[(0x74000, &[0x17; SECTOR])]).unwrap();
+        let mut expected = m.soc.flash.mem.clone();
+        fwsc::usr_load_syx(&mut expected, 0xe0000, UsrLayout::FM1, &bank, 0).unwrap();
+        m.load_syx(&bank).unwrap();
+        assert!(m.soc.flash.mem == expected && expected != m.flash_base());
+        assert_eq!(m.soc.read32(XIP_BASE), 0x5555_5555, "the installed code stays in the window");
+        assert_eq!(m.soc.flash.mem[0x74000], 0x17, "over the restored flash, not in its place");
+        assert!(m.flash_base().iter().all(|&b| b == 0xaa));
+        let changed: Vec<u32> = m.changed_sectors().iter().map(|s| s.0).collect();
+        assert!(changed[0] == 0x74000 && changed.len() > 1 && changed[1..].iter().all(|&at| at >= 0xe0000), "{changed:x?}");
+        assert!(m.load_syx(&[1, 2, 3]).is_err());
+        assert!(m.soc.flash.mem == expected, "what is not a bank writes nothing");
+    }
+
+    #[test]
+    fn with_the_chip_key_a_restored_sector_of_the_app_area_shows_decrypted() {
+        // a sector as an updater stores it, scrambled for flash 0x5000 (fwsc::unscramble's cipher, its
+        // own inverse): restored there, below the app area's end (`blank`: 0x7000), and at 0x9000
+        let plain: Vec<u8> = (0..SECTOR as u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut stored = plain.clone();
+        for blk in (0..SECTOR).step_by(32) {
+            fwsc::unmask(&mut stored[blk..blk + 32], 0x980f ^ ((0x5000 + blk - XIP_FLASH_OFFSET) >> 2) as u16);
+        }
+        for sfc in [true, false] {
+            let mut m = blank(&Options { sfc, ..Options::default() });
+            assert_eq!(m.soc.read8(0x40300), if sfc { 3 } else { 0 }, "SFCENC as the loader leaves it, or as the chip starts");
+            m.restore_sectors(&[(0x5000, &stored), (0x9000, &stored)]).unwrap();
+            assert_eq!(m.soc.xip[0x1000..0x2000] == plain[..], sfc, "the app area: decrypted with the key, as stored without");
+            assert!(m.soc.xip[0x5000..0x6000] == stored[..], "past the app area: as stored");
+            assert!(m.soc.flash.mem[0x5000..0x6000] == stored[..], "the chip holds what was saved");
+        }
     }
 }
