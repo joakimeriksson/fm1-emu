@@ -198,6 +198,18 @@ fn catalog() -> Vec<(String, String, String, String)> {
     }).collect()
 }
 
+/// `--fw ID`: the catalog's firmware `want` as (the window's title, its package), or what to say:
+/// the catalog is read from the current directory, so outside a checkout there is none.
+fn catalog_pick(cat: Vec<(String, String, String, String)>, want: &str) -> Result<(String, String), String> {
+    if cat.is_empty() {
+        return Err("--fw: no firmware catalog here: web/firmwares.json is looked for in the current directory, so --fw \
+                    works from the top of a checkout (anywhere else: --fwsc FILE)".into());
+    }
+    let (_, name, ver, path) = cat.into_iter().find(|f| f.0 == want)
+        .ok_or_else(|| format!("--fw: no firmware {want:?} in web/firmwares.json (--fw list lists them)"))?;
+    Ok((format!("{name} {ver}"), path))
+}
+
 fn parse() -> Option<Opts> {
     parse_args(std::env::args().collect())
 }
@@ -250,16 +262,19 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                 // a firmware from web/firmwares.json by id (`--fw list` lists them)
                 let want = a.get(i + 1)?;
                 let cat = catalog();
-                if want == "list" {
+                if want == "list" && !cat.is_empty() {
                     for (id, name, ver, path) in &cat {
                         let have = if std::path::Path::new(path).exists() { "" } else { "  (missing: node tools/fetch_firmwares.mjs)" };
                         println!("{id:14} {name} {ver}{have}");
                     }
                     std::process::exit(0);
                 }
-                let (_, name, ver, path) = cat.into_iter().find(|f| &f.0 == want)?;
+                let (name, path) = catalog_pick(cat, want).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                });
                 o.fwsc = Some(path);
-                o.name = format!("{name} {ver}");
+                o.name = name;
             }
             "--fwsc" => {
                 let path = a.get(i + 1)?;
@@ -471,10 +486,27 @@ fn high_priority() -> Priority {
     Priority
 }
 
+/// Why `Machine::new` made no machine, for the user. An error that names its file (a package that
+/// does not unpack, a --flash file of another size) is said as it is; one from reading a file is
+/// the first of the run's files that cannot be read (one that opens may still not read: a folder),
+/// in the order they are read: the package's bank, the firmware (the package of --fwsc or --fw,
+/// else the --bin image), the --flash file, which is read only when it is there.
+fn load_error(o: &Opts, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        return e.to_string();
+    }
+    let firmware = o.fwsc.as_ref().unwrap_or(&o.bin);
+    let unread = |p: &&String| std::fs::read(p.as_str()).is_err();
+    let which = [o.syx.as_ref().filter(|_| o.fwsc.is_some()), Some(firmware)].into_iter().flatten().find(unread)
+        .or(o.flash.as_ref().filter(|p| std::path::Path::new(p.as_str()).exists() && unread(p)))
+        .unwrap_or(firmware);
+    format!("cannot read {which}: {e}")
+}
+
 fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_BENCH_NOKEYS").is_ok() {
@@ -560,7 +592,7 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     }
     if sample {
         let mut v: Vec<_> = pcs.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
         let tot: u64 = v.iter().map(|x| x.1).sum();
         for (pc, n) in v.iter().take(25) {
             println!("pc {pc:#010x} {:5.1}%", 100.0 * *n as f64 / tot as f64);
@@ -736,11 +768,6 @@ fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<Audi
     .map_err(|e| e.to_string())
 }
 
-/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
-/// the panel drawn at `ms` into work/panel.ppm.
-/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
-/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
-/// False when the variable is unset.
 /// --flash: the flash chip back to its file; and how many erases / programs it saw
 fn save_flash(m: &Machine, path: Option<&String>) {
     let f = &m.soc.flash;
@@ -763,6 +790,9 @@ fn halted(e: &str) {
     eprintln!("{}", buildinfo::halt_note("fm1-live"));
 }
 
+/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
+/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
+/// False when the variable is unset.
 fn script_keys(m: &mut Machine) -> bool {
     let Ok(mut keys) = std::env::var("FM1_BENCH_KEYS") else { return false };
     if let Some(path) = keys.strip_prefix('@') {
@@ -890,13 +920,15 @@ fn run_tail(m: &mut Machine, ms: u64, mut rec: Option<&mut Recorder>, theme: &pa
     Ok((in_isr, total))
 }
 
+/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
+/// the panel drawn at `ms` into work/panel.ppm.
 fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     if o.record.as_deref() == Some("-") {
         REPORTS_TO_STDERR.store(true, Ordering::Relaxed);
     }
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_NO_SKIP").is_ok() {
@@ -1586,7 +1618,7 @@ fn main() {
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("cannot read {}: {e}", o.bin);
+            eprintln!("{}", load_error(&o, &e));
             if std::env::args().len() == 1 {
                 eprintln!("(no firmware given)\n{USAGE}");
             }
@@ -2144,7 +2176,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     let mut analog = [0u16; 23];
     analog[ANALOG_PITCH as usize] = PITCH_REST;
     analog[ANALOG_MOD as usize] = MOD_REST;
-    let mut set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
+    let set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
         if analog[i] != v {
             analog[i] = v;
             let _ = tx.send(Action::Adc { ch: i as u8, value: v });
@@ -2320,7 +2352,7 @@ mod tests {
         // a device that needs 20 ms (WASAPI shared: a 10 ms period and jitter)
         let first = run(&mut t, t0, 0, 120, 20.0);
         let settled = t.ms;
-        assert!(settled >= 20.0 && settled <= 24.0, "settled at {settled}: {first:?}");
+        assert!((20.0..=24.0).contains(&settled), "settled at {settled}: {first:?}");
         // then an hour: no more underruns, no more probing below what it needs
         let later = run(&mut t, t0, 120, 3720, 20.0);
         assert!(later.iter().all(|&ms| ms >= 20.0), "went under 20: {:?}", later.iter().cloned().fold(f64::MAX, f64::min));
@@ -2419,6 +2451,51 @@ mod tests {
         assert!(check_opts(&o).is_err());
         let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
         assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn fw_says_why_it_finds_no_firmware() {
+        let cat = || vec![("felucca".to_string(), "Felucca".to_string(), "0.7".to_string(), "reference/firmwares/felucca.fwsc".to_string())];
+        assert_eq!(catalog_pick(cat(), "felucca"), Ok(("Felucca 0.7".into(), "reference/firmwares/felucca.fwsc".into())));
+        let unknown = catalog_pick(cat(), "feluca").unwrap_err();
+        assert!(unknown.contains("no firmware \"feluca\"") && unknown.contains("--fw list"), "{unknown}");
+        // outside a checkout (web/firmwares.json is not there): nothing to pick from, whatever is asked for
+        for want in ["felucca", "list"] {
+            let none = catalog_pick(Vec::new(), want).unwrap_err();
+            assert!(none.contains("web/firmwares.json") && none.contains("--fwsc FILE"), "{none}");
+        }
+    }
+
+    #[test]
+    fn a_firmware_that_does_not_load_is_named_by_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("fm1-live-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (there, gone) = (dir.join("there.fwsc"), dir.join("gone.fwsc"));
+        std::fs::write(&there, [0u8; 16]).unwrap();
+        let (there, gone, bank) = (there.to_string_lossy().into_owned(), gone.to_string_lossy().into_owned(), dir.join("gone.syx").to_string_lossy().into_owned());
+        let said = |a: &[&str]| {
+            let o = parse_args(args(a)).unwrap();
+            let e = Machine::new(&o).err().expect("nothing to boot");
+            load_error(&o, &e)
+        };
+        // a package that is not there: its own name, not the default --bin image's
+        let s = said(&["--fwsc", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a package that is there and is none says so itself, once; its bank that is not there is the file named
+        let s = said(&["--fwsc", &there]);
+        assert!(s.starts_with(&format!("{there}: ")) && !s.contains("cannot read"), "{s}");
+        let s = said(&["--fwsc", &there, "--syx", &bank]);
+        assert!(s.starts_with(&format!("cannot read {bank}: ")), "{s}");
+        // and with no package the image is
+        let s = said(&["--bin", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a file that opens and does not read (a folder) is the one named, not the firmware before it
+        let folder = dir.to_string_lossy().into_owned();
+        let s = said(&["--fwsc", &there, "--syx", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
+        let s = said(&["--bin", &there, "--flash", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

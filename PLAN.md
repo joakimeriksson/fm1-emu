@@ -1405,8 +1405,8 @@ Not done, in the order it would pay:
 - Boot stock firmware to a stable idle/main-loop state.
 - Boot a known custom firmware; diff behavior against hardware (front panel
   state, UART output, displayed content).
-- GDB stub over TCP (`crates/fm1-gdbstub`) so the existing toolchain's debugger works
-  against the emulator — huge payoff for both using and validating the emu.
+- GDB stub over TCP (not started; no crate for it yet) so the existing toolchain's debugger
+  works against the emulator — huge payoff for both using and validating the emu.
 
 ## 7. Phase 6 — Timing & validation
 
@@ -1438,7 +1438,6 @@ fm-1/
     ├── fm1-isa/         # codegen'd decoder/disassembler from fm1.yaml
     ├── fm1-core/        # CPU interpreter + bus trait
     ├── fm1-soc/         # memory map + peripherals
-    ├── fm1-gdbstub/     # GDB remote protocol
     └── fm1-emu/         # binary: runner + debugger CLI
 ```
 
@@ -1449,7 +1448,6 @@ fm-1/
   - `crates/fm1-core` — CPU interpreter + bus trait
   - `crates/fm1-soc` — memory map + peripherals
   - `crates/fm1-emu` — binary: runner, debugger CLI, GDB stub
-  - `crates/fm1-gdbstub` — GDB remote protocol integration
 - Bus as a Rust trait (`read`/`write` by width); peripherals implement it,
   keeping the core SoC-agnostic and unit-testable.
 - Rust also keeps the door open to `wasm32-unknown-unknown` later, if the

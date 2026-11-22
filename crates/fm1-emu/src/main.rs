@@ -16,7 +16,7 @@ use fm1_soc::{Soc, XIP_BASE, RAM_BASE};
 
 mod buildinfo;
 
-const DEFAULT_RAM: usize = 1 * 1024 * 1024;
+const DEFAULT_RAM: usize = 1024 * 1024;
 /// RAM runs from RAM_BASE up to the XIP window: more would cover the code with RAM
 const MAX_RAM: usize = (XIP_BASE - RAM_BASE) as usize;
 
@@ -45,7 +45,8 @@ env:   FM1_BREAK_MAX=N (8)        stop reporting --break-pc after N hits
        FM1_NO_RAM_BLOCKS          RAM code a step at a time (the reference)
        FM1_LCD_TIMED              the LCD's transfers take their time at the SPI clock, as on an FM-1
                                   (also with FM1_STRICT; FM1_LCD_INSTANT turns it off; default: at once)
-a bare-metal program ends its run by jumping outside every code region (else it runs to --steps)";
+a bare-metal program ends its run by jumping outside every code region: a halt, exit status 1
+(else it runs to --steps: 0)";
 const DEFAULT_STEPS: u64 = 5_000_000;
 
 /// Flash offset of `app.bin` inside the JLFS app area. The XIP window maps flash 0x4000 at
@@ -321,6 +322,8 @@ fn main() -> ExitCode {
 
     let mut flash_image: Option<Vec<u8>> = None;
     let mut stock: Option<fm1_soc::Stock> = None;
+    // a file the run was asked for could not be written: said on stderr, and the exit status is 1
+    let mut failed = false;
     if let Some(path) = &args.fwsc {
         let syx = match args.syx.as_ref().map(std::fs::read).transpose() {
             Ok(s) => s,
@@ -333,8 +336,13 @@ fn main() -> ExitCode {
             Ok(st) => {
                 // FM1_FWSC_XIP=file: save the XIP window (the app area unscrambled) for a disassembler
                 if let Ok(out) = std::env::var("FM1_FWSC_XIP") {
-                    let _ = std::fs::write(&out, &st.xip);
-                    println!("XIP window ({} bytes from 0x02000000, {}) -> {out}", st.xip.len(), st.identity);
+                    match std::fs::write(&out, &st.xip) {
+                        Ok(()) => println!("XIP window ({} bytes from 0x02000000, {}) -> {out}", st.xip.len(), st.identity),
+                        Err(e) => {
+                            eprintln!("error: cannot write {out}: {e}");
+                            failed = true;
+                        }
+                    }
                 }
                 if std::env::var_os("FM1_FWSC_DIR").is_some() {
                     if let Ok(u) = std::fs::read(path).map_err(|e| e.to_string()).and_then(|p| fm1_soc::fwsc::unpack(&p)) {
@@ -480,7 +488,6 @@ fn main() -> ExitCode {
     let extra_breaks: Vec<u32> = std::env::var("FM1_BREAK_PCS").ok()
         .map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect())
         .unwrap_or_default();
-    let mut last_pc = cpus[0].pc;
     let mut total_steps: u64 = 0;
     let mut ring: Vec<u32> = Vec::new();
     // last executed instructions (pc, class, sp) for the halt report
@@ -568,8 +575,8 @@ fn main() -> ExitCode {
             if total_steps > 0 && total_steps % dump_every == 0 {
                 let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
             }
-            last_pc = cpu.pc;
-            let tail_name = soc_instruction_name(&soc, &cpu, last_pc).unwrap_or("?");
+            let last_pc = cpu.pc;
+            let tail_name = soc_instruction_name(&soc, last_pc).unwrap_or("?");
             if let Some((a, b)) = trace_range {
                 if (a..b).contains(&total_steps) {
                     println!("T {total_steps} c{} {last_pc:#010x} {tail_name} irq={:?} ie={} r0={:#x} r1={:#x}", cpu.core_id, cpu.irq_levels, cpu.ie, cpu.regs[0], cpu.regs[1]);
@@ -613,7 +620,11 @@ fn main() -> ExitCode {
                 if let Some(&at) = snaps.first() {
                     if soc.periph.ms() >= at {
                         snaps.remove(0);
-                        let _ = fm1_soc::write_bmp(&format!("work/lcd_{at}.bmp"), &soc.lcd.fb, soc.lcd.inverted);
+                        let path = format!("work/lcd_{at}.bmp");
+                        if let Err(e) = fm1_soc::write_bmp(&path, &soc.lcd.fb, soc.lcd.inverted) {
+                            eprintln!("error: cannot write {path}: {e}");
+                            failed = true;
+                        }
                     }
                 }
             }
@@ -627,7 +638,7 @@ fn main() -> ExitCode {
                     }
                     cpu.interrupt(handler, prio);
                     irq_count += 1;
-                    *irq_by.entry((cpu.core_id, n as u8)).or_default() += 1;
+                    *irq_by.entry((cpu.core_id, n)).or_default() += 1;
                 }
             }
             if ci == 0 {
@@ -664,8 +675,7 @@ fn main() -> ExitCode {
                                 count = cpu.insn_count,
                                 pc = last_pc,
                                 sp = cpu.sp,
-                                insn = soc_instruction_name(&soc, &cpu, last_pc)
-                                    .unwrap_or("?"),
+                                insn = tail_name,
                                 r0 = cpu.regs[0],
                             );
                         }
@@ -695,25 +705,28 @@ fn main() -> ExitCode {
         }
     }
     let cpu = &cpus[report_core];
+    // the files of the run are written with --quiet too: it silences the report, not what was asked for
+    let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
+    let wav = args.wav.as_ref().map(|w| (w, write_wav(w, &soc.periph.audio)));
+    if let Some((w, Err(e))) = &wav {
+        eprintln!("error: cannot write {w}: {e}");
+        failed = true;
+    }
 
     if !args.quiet {
-        let stopped = halt.is_some() || true;
         let mut top: Vec<(&'static str, u64)> = hist.into_iter().collect();
         top.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
         let total: u64 = top.iter().map(|(_, c)| c).sum();
+        let top_n = std::env::var("FM1_HIST_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
         println!(
             "stopped after {} instructions ({}, hist top-{} of {} classes):",
             cpu.insn_count,
             if halt.is_some() { "halt" } else { "step limit" },
-            top.len().min(12),
-            top.len().min(1) * 0 + top.len().max(1),
+            top.len().min(top_n),
+            top.len(),
         );
-        let top_n = std::env::var("FM1_HIST_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
         for (name, n) in top.iter().take(top_n) {
             println!("  {name:<28} {n:8} ({:5.1}%)", 100.0 * *n as f64 / total as f64);
-        }
-        if total > 0 {
-            let _ = total;
         }
         let mut pcs: Vec<(u32, u64)> = pchist.into_iter().collect();
         pcs.extend(xip_hist.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, &n)| (XIP_BASE + 2 * i as u32, n)));
@@ -728,7 +741,6 @@ fn main() -> ExitCode {
             println!("  {pc:#010x}  {n}");
         }
         {
-            let _ = fm1_soc::write_bmp("work/lcd.bmp", &soc.lcd.fb, soc.lcd.inverted);
             let tot = (busy[0] + busy[1] + busy[2]).max(1) as f64;
             println!(
                 "cpu0: {:.1}% in an ISR, {:.1}% nested ({:.1} M ISR instructions per emulated s)",
@@ -750,11 +762,8 @@ fn main() -> ExitCode {
             if let Some(f) = &soc.flaky_core1 {
                 println!("flaky core 1 (seed {}): {} misreads in {} RAM loads", args.seed.unwrap_or(1), f.misreads, f.loads);
             }
-            if let Some(w) = &args.wav {
-                match write_wav(w, &soc.periph.audio) {
-                    Ok(()) => println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0),
-                    Err(e) => println!("wav: cannot write {w}: {e}"),
-                }
+            if let Some((w, Ok(()))) = &wav {
+                println!("wav: {w} ({:.2} s)", soc.periph.audio.len() as f64 / 2.0 / 44100.0);
             }
             let con = soc.console_string();
             if !con.is_empty() {
@@ -811,13 +820,7 @@ fn main() -> ExitCode {
             for (pc, name, sp) in &tails[report_core.min(1)] {
                 println!("  {pc:#010x} sp={sp:#010x} {name}");
             }
-            println!("halt reason: {e:?}");
-            println!("{}", buildinfo::halt_note("fm1-emu"));
-            println!("  pc={:#010x} sp={:#010x} rets={:#010x}", cpu.pc, cpu.sp, cpu.rets);
-            for (i, r) in cpu.regs.iter().enumerate() {
-                print!("r{i}={r:#010x} ");
-            }
-            println!();
+            println!("{}", halt_reason(e, cpu));
         }
         let mmio = soc.unknown_accesses();
         if !mmio.is_empty() {
@@ -839,7 +842,9 @@ fn main() -> ExitCode {
                 println!("  {op} @ {addr:#010x} first value={value:#010x} x{n}");
             }
         }
-        let _ = stopped;
+    } else if let Some(e) = &halt {
+        // (on stderr: with --quiet stdout is the --dump's)
+        eprintln!("{}", halt_reason(e, cpu));
     }
     if let Some((addr, n)) = args.dump {
         println!("dump {addr:#010x} ({n} words):");
@@ -848,16 +853,26 @@ fn main() -> ExitCode {
             println!("  {:#010x}: {}", addr + 4 * row, words.join(" "));
         }
     }
-    ExitCode::SUCCESS
+    if halt.is_some() || failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Why the run halted, which binary halted, and the halting core's registers: the end of the
+/// report, and with --quiet all that is said of a halt.
+fn halt_reason(e: &CoreError, cpu: &Cpu) -> String {
+    let regs: String = cpu.regs.iter().enumerate().map(|(i, r)| format!("r{i}={r:#010x} ")).collect();
+    format!("halt reason: {e:?}\n{}\n  pc={:#010x} sp={:#010x} rets={:#010x}\n{regs}", buildinfo::halt_note("fm1-emu"), cpu.pc, cpu.sp, cpu.rets)
 }
 
 /// The SoC doesn't track names; recover the executed class name by decoding
-/// at the PC the step started from (cheap; runs once per step only under
-/// tracing).
-fn soc_instruction_name(_soc: &Soc, cpu: &Cpu, pc: u32) -> Option<&'static str> {
-    if let Ok(win) = fetch_window(_soc, pc) {
+/// at the PC the step starts from (every step: the histogram and the tails
+/// of the report are by name; the decoder caches).
+fn soc_instruction_name(soc: &Soc, pc: u32) -> Option<&'static str> {
+    if let Ok(win) = fetch_window(soc, pc) {
         if let Ok(insn) = fm1_isa::decode_win_cached(win, pc) {
-            let _ = cpu;
             return Some(insn.entry.name);
         }
     }

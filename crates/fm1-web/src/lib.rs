@@ -17,6 +17,7 @@ use fm1_soc::{machine, Action, Soc};
 use std::collections::VecDeque;
 
 #[path = "../../fm1-live/src/panel.rs"]
+#[allow(dead_code)] // (the native window's file: the page has no key velocity from it, and picks themes by number)
 mod panel;
 #[path = "../../fm1-live/src/panel_smk.rs"]
 mod panel_smk;
@@ -224,8 +225,11 @@ pub extern "C" fn fm1_alloc(len: u32) -> *mut u8 {
 }
 
 /// Boot the image at `ptr` (from fm1_alloc). `entry` 0x02000120 for Felucca.
+///
+/// # Safety
+/// `ptr` is what `fm1_alloc(len)` returned, and is given here once: this takes the bytes over.
 #[no_mangle]
-pub extern "C" fn fm1_boot(ptr: *mut u8, len: u32, entry: u32, mhz: u32) {
+pub unsafe extern "C" fn fm1_boot(ptr: *mut u8, len: u32, entry: u32, mhz: u32) {
     // SAFETY: ptr/len come from fm1_alloc and JS filled them.
     let image = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     unsafe { M = Some(Machine::new(image, entry, mhz, None)) };
@@ -234,8 +238,11 @@ pub extern "C" fn fm1_boot(ptr: *mut u8, len: u32, entry: u32, mhz: u32) {
 /// Boot M-VAVE's stock firmware from its whole update package (.fwsc) at `ptr`, with a DX7
 /// 32-voice bank (.syx) for patch slots 1-32 at `syx` when `syx_len` is not 0 (both from
 /// fm1_alloc). Returns 0, or 1 when the package does not unpack (the machine is not booted).
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len` and (when `syx_len` is not 0) for `syx` / `syx_len`.
 #[no_mangle]
-pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u32, mhz: u32) -> u32 {
+pub unsafe extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u32, mhz: u32) -> u32 {
     // SAFETY: as fm1_boot.
     let pkg = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     let bank = (syx_len != 0).then(|| unsafe { Vec::from_raw_parts(syx, syx_len as usize, syx_len as usize) });
@@ -275,13 +282,23 @@ pub extern "C" fn fm1_flash_len() -> u32 { fm1_soc::FLASH_SIZE as u32 }
 pub extern "C" fn fm1_flash_revision() -> u32 { machine().map_or(0, |m| m.soc.flash.revision) }
 #[no_mangle]
 pub extern "C" fn fm1_flash_busy() -> u32 { machine().is_some_and(|m| m.soc.flash.busy()) as u32 }
+/// Saved sectors (records of a little-endian flash offset and its 4 KiB) over the booted flash.
+/// Returns 0, or 1 when they are not valid, the machine has rendered, or none is booted.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_flash_restore(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_flash_restore(ptr: *mut u8, len: u32) -> u32 {
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     (!machine().is_some_and(|m| m.restore(&bytes))) as u32
 }
+/// A DX7 32-voice bank into the booted firmware's patch area. Returns 0, 1 when the bank is not
+/// one (or the machine has rendered, or none is booted), 2 when this firmware has no patch area.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_load_syx(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_load_syx(ptr: *mut u8, len: u32) -> u32 {
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     match machine() {
         Some(m) if m.usr.is_none() => 2, // unsupported: keep booting without a bank
@@ -365,8 +382,11 @@ pub extern "C" fn fm1_jit_selftest_detail() -> *const u8 {
 }
 
 /// Install the same timestamped input script used by the native benchmark.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_bench_script(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_bench_script(ptr: *mut u8, len: u32) -> u32 {
     // SAFETY: owned allocation returned by fm1_alloc, consumed exactly once.
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     let Ok(script) = std::str::from_utf8(&bytes) else { return 1 };
@@ -427,9 +447,7 @@ pub extern "C" fn fm1_ahead(frames: u32) {
     unsafe { AHEAD = frames };
 }
 
-/// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
-/// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
-/// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
+/// `fm1_flash_part`'s number as the part.
 fn flash_part(n: u32) -> fm1_soc::FlashPart {
     if n == 1 { fm1_soc::FlashPart::Uc25hq80 } else { fm1_soc::FlashPart::P25q80 }
 }
@@ -443,6 +461,9 @@ pub extern "C" fn fm1_flash_part(part: u32) {
     if let Some(m) = machine() { m.soc.set_flash_part(flash_part(part)); }
 }
 
+/// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
+/// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
+/// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
 /// Before the boot, or for the machine running.
 #[no_mangle]
 pub extern "C" fn fm1_cpu1_survives(on: u32) {

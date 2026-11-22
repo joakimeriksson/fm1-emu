@@ -69,6 +69,9 @@ pub struct Fm1Params {
     pub controller: Mutex<map::Controller>,
     /// What the machine's thread tells the window about the controller (not saved).
     pub map: Mutex<map::MapView>,
+    /// Why the firmware loaded does not run, as the machine's thread tells the window (not saved):
+    /// it did not boot, or it halted.
+    pub halt: Mutex<Option<String>>,
 
     /// The MASTER pot.
     #[id = "master"]
@@ -174,6 +177,7 @@ impl Default for Fm1Params {
             rec: Mutex::new(RecView::default()),
             controller: Mutex::new(map::Controller::default()),
             map: Mutex::new(map::MapView::default()),
+            halt: Mutex::new(None),
             master: FloatParam::new("Master", 900.0 / 1023.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
@@ -191,20 +195,15 @@ impl Default for Fm1Params {
 pub struct Link {
     pub shared: Arc<Shared>,
     pub cmds: mpsc::Sender<Cmd>,
-    /// the package the machine runs (to boot only when the project's is another)
-    pub running: Mutex<Option<Arc<Vec<u8>>>>,
 }
 
 impl Link {
-    /// Boot `fw` unless the machine already runs it; `sectors` are the project's saved flash.
-    pub fn boot(&self, fw: &Firmware, sectors: &[Sector]) {
-        let mut running = self.running.lock().unwrap();
-        if fw.pkg.is_empty() || running.as_ref().is_some_and(|r| Arc::ptr_eq(r, &fw.pkg) || **r == *fw.pkg) {
-            return;
-        }
-        *running = Some(fw.pkg.clone());
-        let sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
-        let _ = self.cmds.send(Cmd::Boot { pkg: fw.pkg.clone(), sectors });
+    /// The project's state to the machine: the firmware and its saved flash in the parameters, which
+    /// the machine's thread reads when it gets to this (`Cmd::Init`) and boots unless that is what it
+    /// runs: the host initializes again for a new sample rate, and also after loading a state, which
+    /// may be the same firmware with other sectors (a preset, an undo).
+    pub fn boot(&self) {
+        let _ = self.cmds.send(Cmd::Init);
     }
 }
 
@@ -279,7 +278,7 @@ impl Fm1 {
         );
         self.midi = Some(midi_tx);
         self.audio = Some(audio_rx);
-        let link = Arc::new(Link { shared, cmds: tx, running: Mutex::new(None) });
+        let link = Arc::new(Link { shared, cmds: tx });
         self.link = Some(link.clone());
         link
     }
@@ -349,9 +348,7 @@ impl Plugin for Fm1 {
         self.lead = self.block + self.lead_of.frames();
         let _ = link.cmds.send(Cmd::Block(self.block));
         ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
-        let fw = self.params.firmware.lock().unwrap().clone();
-        let sectors = self.params.flash.lock().unwrap().clone();
-        link.boot(&fw, &sectors);
+        link.boot();
         // the project's controller. One never chosen is a new project (a saved one always has
         // its "controller", see filter_state): it takes the last choice and keeps it.
         let profile = {

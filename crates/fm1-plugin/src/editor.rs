@@ -160,8 +160,11 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     let _ = link.cmds.send(Cmd::Record);
                 }
                 bar.separator();
+                let stopped = params.halt.lock().unwrap().clone();
                 let status = if !ui.msg.is_empty() {
                     ui.msg.clone()
+                } else if let Some(why) = stopped.filter(|_| !booted || halted) {
+                    why
                 } else if !booted {
                     "Open a .fwsc firmware or shared .fm1save to start".into()
                 } else if halted {
@@ -531,7 +534,6 @@ fn file_job(action: FileAction, mut path: std::path::PathBuf, params: Arc<Fm1Par
                     link.cmds.send(Cmd::Load { firmware: data.firmware, sectors: data.sectors, reply: tx })
                         .map_err(|_| "the machine stopped".to_owned())?;
                     rx.recv().map_err(|_| "the machine stopped while loading".to_owned())??;
-                    *link.running.lock().unwrap() = Some(firmware.pkg);
                     Ok(format!("Loaded {}", firmware.name))
                 }
                 FileAction::Export => {
