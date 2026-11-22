@@ -1261,6 +1261,9 @@ impl Bus for Soc {
             }
             return u32::from_le_bytes([self.xip[x], self.xip[x + 1], self.xip[x + 2], self.xip[x + 3]]);
         }
+        if addr == 0x10804 {
+            return self.periph.read_t4_count();
+        }
         self.read32_slow(addr)
     }
 
