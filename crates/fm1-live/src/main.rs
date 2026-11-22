@@ -156,6 +156,7 @@ struct Opts {
     /// channel messages sent to this channel (1-16; 0 = as sent)
     midi_ch: u8,
     controller_raw: bool,
+    controller_fm1: bool,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
     cpu1_survives: bool,
@@ -221,7 +222,7 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0, controller_raw: false,
+                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0, controller_raw: false, controller_fm1: false,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "graphite".into(), layout: panel::Layout::Large, key_labels: false,
                        flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
     let mut i = 1;
@@ -269,6 +270,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             }
             "--syx" => o.syx = Some(a.get(i + 1)?.clone()),
             "--midi" => o.midi = a.get(i + 1)?.clone(),
+            "--controller-fm1" => { o.controller_fm1 = true; i -= 1; },
             "--controller-raw" => { o.controller_raw = true; i -= 1; },
             "--midi-ch" => o.midi_ch = a.get(i + 1)?.parse().ok().filter(|c| *c <= 16)?,
             "--entry" => o.entry = u32::from_str_radix(a.get(i + 1)?.trim_start_matches("0x"), 16).ok()?,
@@ -1327,6 +1329,7 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInpu
     if o.midi == "none" { return result; }
     let (wanted, channel, tx) = (o.midi.clone(), o.midi_ch, tx.clone());
     let controller_raw = o.controller_raw;
+    let controller_fm1 = o.controller_fm1;
     result.worker = Some(std::thread::spawn(move || {
         let mut connections = std::collections::HashMap::new();
         while !quit.load(Ordering::Relaxed) {
@@ -1344,7 +1347,10 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInpu
                     for ch in 0..16 { for cc in [64, 123, 120] {
                         for b in [0xb0 | ch, cc, 0] { let _ = tx.send(Action::Midi { b }); }
                     }}
-                    if *profile { for id in [3,8] {let _ = tx.send(Action::Key{id,down:false});} }
+                    if *profile { for id in 0..14 {
+                        let _ = tx.send(Action::Key{id,down:false});
+                        let _ = panel_tx.send(Action::Key{id,down:false});
+                    } }
                     false
                 });
                 for (id, port, name) in ports {
@@ -1354,7 +1360,7 @@ fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInpu
                     let sender = tx.clone();
                     let panel_sender = panel_tx.clone();
                     let profile = fm1_panel && !controller_raw && fm1_soc::controller::is_minilab3(&name);
-                    let mut controller = fm1_soc::controller::MiniLab3::default();
+                    let mut controller = if controller_fm1 { fm1_soc::controller::MiniLab3::fm1() } else { fm1_soc::controller::MiniLab3::default() };
                     match input.connect(&port, "fm1-live in", move |_, msg, _| {
                         if profile && controller.route(msg, |a| { let _ = panel_sender.send(a.clone()); let _ = sender.send(a); }) { return; }
                         for (i, &byte) in msg.iter().enumerate() {
@@ -1386,7 +1392,7 @@ const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc (or --area FIRMWARE.ar
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
 F6 (Fn-F6 on some Macs): open Hardware Library in Chrome or Edge
-options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw] [--midi-ch N] [--flash FILE] [--usb]
+options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw | --controller-fm1] [--midi-ch N] [--flash FILE] [--usb]
          [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 by default)
                                  audio queued ahead of the device to start with; it grows by itself
                                  on underruns and back down after 10 s without one, no lower
@@ -1505,7 +1511,7 @@ fn open_another() -> Option<Vec<String>> {
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn carried_over(args: &[String]) -> Vec<String> {
     const WITH_VALUE: [&str; 8] = ["--theme", "--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
-    const FLAGS: [&str; 4] = ["--usb", "--exclusive", "--midi-log", "--controller-raw"];
+    const FLAGS: [&str; 5] = ["--usb", "--exclusive", "--midi-log", "--controller-raw", "--controller-fm1"];
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -2373,6 +2379,13 @@ mod tests {
             }
         }
         drop(inputs);
+    }
+    #[test]
+    fn controller_fm1_flag_is_carried_to_the_next_firmware() {
+        let a=args(&["--controller-fm1", "--mhz", "200"]);
+        let o=super::parse_args(a.clone()).unwrap();
+        assert!(o.controller_fm1); assert_eq!(o.mhz,200);
+        assert!(super::carried_over(&a).contains(&"--controller-fm1".to_string()));
     }
     #[test]
     fn controller_raw_flag_does_not_consume_the_next_option() {

@@ -1,6 +1,6 @@
 ---
 load_when: "building, testing, installation or verification evidence"
-last_verified: 2026-11-16
+last_verified: 2026-11-22
 source_refs:
   - context/icons.md
   - assets/icons/README.md
@@ -39,7 +39,7 @@ The supplied ez-context helper can check staleness from source_refs. npm run che
 
 Standalone macOS app packaging: tools/package_macos_app.sh. It builds the native executable, creates target/apps/FM-1 Studio.app and ad-hoc signs the bundle. Public distribution/notarization is not implied.
 
-The MiniLab diagnostic example accepts an optional monitoring duration: `cargo run --release -p fm1-live --example midi_probe -- 120`. It receives only; it never configures or writes to a controller. Studio tests now cover the realtime queue’s bounded prefill/stale-boot/pause behavior and factory controller mapping. Browser asset packaging includes the render worker/runtime, with worker URLs stamped alongside imports. Keep direct-loop WASM benchmarks separate from end-to-end worker/output-underrun verification.
+The MiniLab diagnostic example accepts an optional monitoring duration: `cargo run --release -p fm1-live --example midi_probe -- 120`. It receives only; it never configures or writes to a controller. Studio tests now cover the realtime queue’s bounded prefill/stale-boot/pause behavior and factory and dedicated User controller mappings. Shared Rust tests cover native/plugin policy; plugin worker tests check profile-before-channel routing and default Raw compatibility. Physical MiniLab setup and real DAW routing remain separate acceptance checks. Browser asset packaging includes the render worker/runtime, with worker URLs stamped alongside imports. Keep direct-loop WASM benchmarks separate from end-to-end worker/output-underrun verification.
 
 ## Cross-host firmware acceptance
 

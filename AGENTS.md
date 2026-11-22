@@ -53,6 +53,7 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 | Icon artwork, app/plugin branding, favicons or platform icon builds | context/icons.md |
 | Building, testing, installation or verification evidence | context/development.md |
 | Using Studio, changing firmware, controller setup, backups or beginner troubleshooting | context/user-guide.md |
+| Dedicated MiniLab 3 mapping, pad banks or relative encoder setup | context/minilab.md |
 | USB hardware librarian, project transfers, firmware adapters or companion launch | context/hardware-library.md |
 | Current progress, next steps or known limitations | context/status.md |
 | Product requirements or scope decisions | context/product-specification.md |
