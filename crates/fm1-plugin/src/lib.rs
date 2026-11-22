@@ -171,7 +171,7 @@ impl Default for Fm1Params {
             channel: IntParam::new("MIDI channel", 0, IntRange::Linear { min: 0, max: 16 })
                 .with_value_to_string(Arc::new(|v| if v == 0 { "as sent".into() } else { v.to_string() })),
             clock: EnumParam::new("CPU clock", Clock::Mhz240).non_automatable(),
-            lead: EnumParam::new("Lead", Lead::Safe).non_automatable(),
+            lead: EnumParam::new("Lead", Lead::Low).non_automatable(),
         }
     }
 }
@@ -203,18 +203,15 @@ pub struct Fm1 {
     link: Option<Arc<Link>>,
     thread: Option<std::thread::JoinHandle<()>>,
     midi: Option<rtrb::Producer<Midi>>,
-    audio: Option<rtrb::Consumer<[f32; 2]>>,
+    audio: Option<fm1_host::audio::Playback>,
     /// machine frames per host sample
     ratio: f64,
     /// how far ahead of the host the machine runs, in its frames: a host block and the lead chosen
     lead: usize,
     block: usize,
     lead_of: Lead,
-    /// frames taken from the ring, and the resampler between the last two
+    /// Source frames consumed, for MIDI timestamps on the producer timeline
     taken: u64,
-    frac: f64,
-    cur: [f32; 2],
-    next: [f32; 2],
 }
 
 impl Default for Fm1 {
@@ -230,9 +227,6 @@ impl Default for Fm1 {
             block: 1024,
             lead_of: Lead::Safe,
             taken: 0,
-            frac: 0.0,
-            cur: [0.0; 2],
-            next: [0.0; 2],
         }
     }
 }
@@ -256,6 +250,7 @@ impl Fm1 {
                 late: 0,
             }),
             quit: Default::default(),
+            underruns: Default::default(),
         });
         let (tx, rx) = mpsc::channel();
         let (midi_tx, midi_rx) = rtrb::RingBuffer::new(4096);
@@ -268,7 +263,7 @@ impl Fm1 {
                 .expect("the machine's thread"),
         );
         self.midi = Some(midi_tx);
-        self.audio = Some(audio_rx);
+        self.audio = Some(fm1_host::audio::Playback::new(audio_rx, RATE));
         let link = Arc::new(Link { shared, cmds: tx, running: Mutex::new(None) });
         self.link = Some(link.clone());
         link
@@ -325,6 +320,7 @@ impl Plugin for Fm1 {
     fn initialize(&mut self, _layout: &AudioIOLayout, cfg: &BufferConfig, ctx: &mut impl InitContext<Self>) -> bool {
         let link = self.start();
         self.ratio = RATE / cfg.sample_rate as f64;
+        if let Some(audio) = &mut self.audio { audio.set_output_rate(cfg.sample_rate as f64); }
         // a host block's frames, and the lead chosen: room for a DMA half and the emulation's unevenness
         self.block = (cfg.max_buffer_size as f64 * self.ratio).ceil() as usize;
         self.lead_of = self.params.lead.value();
@@ -367,36 +363,15 @@ impl Plugin for Fm1 {
         let Some(rx) = self.audio.as_mut() else { return ProcessStatus::Normal };
         let out = buffer.as_slice();
         let n = out[0].len();
-        let mut starved = 0u64;
+        let before = rx.underruns;
         for i in 0..n {
-            self.frac += self.ratio;
-            while self.frac >= 1.0 {
-                match rx.pop() {
-                    Ok(f) => {
-                        self.cur = self.next;
-                        self.next = f;
-                        self.taken += 1;
-                        self.frac -= 1.0;
-                    }
-                    Err(_) => {
-                        // the machine is behind: hold, and take the frame next time
-                        self.frac = self.frac.min(1.0);
-                        starved += 1;
-                        break;
-                    }
-                }
-            }
-            let t = self.frac.min(1.0) as f32;
-            for c in 0..2 {
-                out[c][i] = self.cur[c] + (self.next[c] - self.cur[c]) * t;
-            }
+            let frame = rx.frame(self.lead);
+            out[0][i] = frame[0];
+            out[1][i] = frame[1];
         }
-        if starved > 0 {
-            if let Some(l) = &self.link {
-                if let Ok(mut v) = l.shared.view.try_lock() {
-                    v.starved += starved;
-                }
-            }
+        self.taken = rx.source_frame();
+        if let Some(link) = &self.link {
+            link.shared.underruns.fetch_add(rx.underruns - before, std::sync::atomic::Ordering::Relaxed);
         }
         ProcessStatus::KeepAlive
     }

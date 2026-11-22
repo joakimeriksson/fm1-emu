@@ -1,6 +1,6 @@
 ---
 load_when: "using Studio, changing firmware, controller setup, backups or beginner troubleshooting"
-last_verified: 2026-11-16
+last_verified: 2026-11-22
 source_refs:
   - web/studio/app.js
   - web/studio/library.js
@@ -359,9 +359,9 @@ Reference: [Arturia’s MIDI implementation chart](https://support.arturia.com/h
 
 In the app, page and plugin, **Shift-click** a key or button (Home, for example) to hold it down, then press another key while it's held. Shift-click it again, or click it, to release it. Drag encoders vertically; hold **Shift** for four-times finer mouse travel. Knob pointers now move between detents, with smaller visual rotation per step. Firmware parameters still move by their real encoder detents; the display never invents extra parameter precision. Mouse, keyboard and MIDI actions are sent immediately; visual easing does not delay them.
 
-Native playback now starts with a **12 ms** queue rather than 50 ms, and the FM-1 panel polls at up to 120 Hz. This is a queue target, not a measured end-to-end latency promise. The queue grows if needed to prevent underruns. For an explicit device buffer, add `--buffer 128`; if unsupported the app falls back to the device default. For more headroom add `--latency 24`.
+Native playback now starts with a **12 ms** queue, and the FM-1 panel polls at up to 120 Hz. This is a queue target, not a measured end-to-end latency promise. The queue grows if needed to prevent underruns. On macOS it requests a 128-frame device buffer and falls back to the device default if unsupported. Use `--buffer N` to choose another size. For more headroom add `--latency 24`.
 
-The browser executes firmware/JIT in a worker and feeds a bounded audio queue, starting at four quanta (about 11.6 ms at 44.1 kHz) and adding two quanta after an underrun, up to 16. LCD and save messages travel directly to the page without passing through the audio thread. The status tooltip separates boot/firmware short quanta from actual output underruns. If an old offline build appears, close all tabs for that origin and reopen; updates wait until active sessions finish. Browser storage belongs to its hostname and port: changing port opens a separate library.
+The browser executes firmware/JIT in a worker and feeds a bounded audio queue, starting at four quanta (about 11.6 ms at 44.1 kHz) and adding two quanta after an underrun, up to 16. After each ten seconds without an output underrun, it reduces the target by one quantum toward four without dropping queued samples. LCD and save messages travel directly to the page without passing through the audio thread. The status tooltip separates boot/firmware short quanta from actual output underruns. If an old offline build appears, close all tabs for that origin and reopen; updates wait until active sessions finish. Browser storage belongs to its hostname and port: changing port opens a separate library.
 
 ## Try GR!MM
 
@@ -403,3 +403,5 @@ Choose **Instrument → Reset Firmware State…** in the standalone, **Reset Fir
 Standalone asks for confirmation and retains the previous working-memory file beside it, named `*.before-reset-<timestamp>.bin`, after a normal shutdown. Files live in `~/Library/Application Support/FM-1 Studio/sessions/`; `last.json` records reopening options. Plugin/browser reset asks for confirmation: export a `.fm1save` before resetting to keep your work. Reset only affects the active plugin/working setup. Save the DAW project again if you want its reset state retained.
 
 Firmware-owned Save and Undo remain on the firmware panel; host reset restarts the instrument rather than invoking firmware Undo.
+
+New plugin instances use about 12 ms of lead beyond the maximum host block. Existing DAW projects retain their saved Lead setting. Raise Lead if the status shows output underruns; AU hosts need the plugin reloaded to update latency compensation. Recording writes run on a separate worker. If storage cannot keep up, recording stops with an error while playback continues. The 32-sample dropout fades reduce clicks but do not prove that firmware audio or end-to-end timing matches hardware.

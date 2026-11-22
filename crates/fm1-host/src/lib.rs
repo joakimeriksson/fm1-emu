@@ -1,4 +1,6 @@
-//! Shared desktop entry to the file-based hardware companion. No device or audio ownership.
+//! Shared desktop entry to the file-based hardware companion. Audio playback is consumer-owned in `audio`.
+pub mod audio;
+
 use std::{io, path::PathBuf, process::Command};
 pub fn companion_html() -> String {
     let modules = [include_str!("../../../web/hardware/protocol.js"),

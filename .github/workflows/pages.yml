@@ -38,7 +38,7 @@ jobs:
         run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web
 
       - name: Browser code regression tests
-        run: node --test web/*.test.mjs
+        run: node --test web/*.test.mjs web/studio/audio-buffer.test.mjs
 
       # The README's table of firmwares (links that open each one on the page) matches the catalog.
       - name: README firmware table

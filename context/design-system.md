@@ -1,6 +1,6 @@
 ---
 load_when: "UI work, styling, components, visual or design changes"
-last_verified: 2026-11-16
+last_verified: 2026-11-22
 source_refs:
   - context/icons.md
   - assets/icons/README.md
@@ -121,3 +121,5 @@ Native macOS menu bar uses File / Audio / Instrument / Hardware / Help, grouped 
 ## App identity and icons
 
 The user-approved icon uses the actual FM-1 control arrangement, no text, a blank unlit screen, ivory markers and smooth flat charcoal materials. Body fill is uniformly #292a2b; control faces and trays must also have no grain, mottling or metallic texture. Gentle top light and local contact shadows provide depth. Modern macOS artwork has no baked outer bevel or padding; the platform supplies the enclosure. Other platforms receive their required silhouette or masking variants. The full intent, asset distinctions and per-platform commands are maintained in [icons.md](icons.md); read it before changing artwork or packaging.
+
+Plugin performance status reports output underrun episodes, rather than missing frames. The Lead tooltip states the 12 ms default for new instances and the AU reload requirement. This copy change retains existing control geometry and visual states.

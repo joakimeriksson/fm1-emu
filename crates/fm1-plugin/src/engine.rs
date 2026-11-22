@@ -10,7 +10,7 @@
 use fm1_core::{Bus, Cpu};
 use fm1_soc::{machine, Action, Board, Soc};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -60,7 +60,7 @@ pub struct View {
     /// emulated time over the time spent emulating it, over the last second: how much faster
     /// than real time the machine could run (it runs at the host's pace)
     pub speed: f32,
-    /// frames the host found missing (the machine fell behind): all, and in the last second
+    /// Output underrun episodes: all, and in the last second
     pub starved: u64,
     pub late: u64,
 }
@@ -71,6 +71,7 @@ type Sectors = Vec<(u32, Vec<u8>)>;
 pub struct Shared {
     pub view: Mutex<View>,
     pub quit: AtomicBool,
+    pub underruns: AtomicU64,
 }
 
 struct Machine {
@@ -192,6 +193,7 @@ pub fn run(
     mut midi_in: rtrb::Consumer<Midi>,
     mut out: rtrb::Producer<[f32; 2]>,
 ) {
+    fm1_host::audio::prioritize_producer();
     let mut m: Option<Machine> = None;
     // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
     let lcd_timed = fm1_soc::lcd_timed_from_env();
@@ -209,7 +211,7 @@ pub fn run(
     let mut active_pkg: Option<Arc<Vec<u8>>> = None;
     let mut pending = Vec::new();
     let (mut speed_t, mut speed_ms, mut busy, mut starved0) = (Instant::now(), 0u64, Duration::ZERO, 0u64);
-    let mut rec: Option<crate::wav::Wav> = None;
+    let mut rec: Option<crate::wav::AsyncWav> = None;
     while !shared.quit.load(Ordering::Relaxed) {
         while let Ok(c) = cmds.try_recv() {
             let (c, prepared, loaded) = match c {
@@ -367,6 +369,7 @@ pub fn run(
             };
             v.pads = mm.soc.periph.smk.pads;
             v.halted = mm.halted;
+            v.starved = shared.underruns.load(Ordering::Relaxed);
             if speed_t.elapsed() >= Duration::from_secs(1) {
                 let ms = mm.soc.periph.ms();
                 // (the first second is the boot's: it runs flat out to fill the ring)
@@ -396,23 +399,27 @@ pub fn run(
 
 /// Start a WAV of the output (in the Music folder's fm1-emu, named after the firmware), or
 /// finish the one being written; what happened goes to the window.
-fn record(rec: &mut Option<crate::wav::Wav>, params: &crate::Fm1Params) {
-    let msg = match rec.take() {
-        Some(w) => match w.finish() {
-            Ok(p) => format!("Recorded {}", p.display()),
-            Err(e) => format!("Recording: {e}"),
-        },
-        None => {
-            let name = params.firmware.lock().unwrap().name.clone();
-            match crate::wav::Wav::create(if name.is_empty() { "fm1" } else { &name }) {
-                Ok(w) => {
-                    let m = format!("Recording to {}", w.path.display());
-                    *rec = Some(w);
-                    m
-                }
+fn record(rec: &mut Option<crate::wav::AsyncWav>, params: &Arc<crate::Fm1Params>) {
+    if let Some(w) = rec.take() {
+        { let mut status = params.rec.lock().unwrap(); status.file = None; status.msg = Some("Finishing recording".into()); }
+        let params = params.clone();
+        std::thread::spawn(move || {
+            let message = match w.finish() {
+                Ok(p) => format!("Recorded {}", p.display()),
                 Err(e) => format!("Recording: {e}"),
-            }
+            };
+            params.rec.lock().unwrap().msg = Some(message);
+        });
+        return;
+    }
+    let name = params.firmware.lock().unwrap().name.clone();
+    let msg = match crate::wav::AsyncWav::create(if name.is_empty() { "fm1" } else { &name }) {
+        Ok(w) => {
+            let message = format!("Recording to {}", w.path.display());
+            *rec = Some(w);
+            message
         }
+        Err(e) => format!("Recording: {e}"),
     };
     let mut r = params.rec.lock().unwrap();
     r.file = rec.as_ref().map(|w| (w.path.clone(), w.frames));

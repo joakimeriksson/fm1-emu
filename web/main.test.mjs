@@ -83,6 +83,8 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
       arrayBuffer: async () => new ArrayBuffer(0) }),
     WebAssembly: { instantiate: async () => ({ instance: { exports: { panel_board() {}, panel_width: () => 100, panel_height: () => 100, panel_theme_count: () => 1, panel_theme_name: () => 0, panel_theme() {}, panel_look() {}, memory: { buffer: new ArrayBuffer(256) } } } }) },
     requestAnimationFrame() {}, addEventListener() {}, AudioContext, AudioWorkletNode,
+    Worker: class { postMessage() {} terminate() {} },
+    MessageChannel: class { constructor() { this.port1 = {}; this.port2 = {}; } },
     matchMedia: () => ({ matches: false }), confirm: () => true,
     fetchPackage: async f => ({ bytes: new Uint8Array(960).fill(f.id === 'a' ? 1 : 2), url: f.package }),
     hubNewcomers: async () => [], hubCardUrl: id => `https://thefirmwarehub.com/#fw-${id}`,

@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'crates/fm1-plugin/**'
+      - 'crates/fm1-host/**'
+      - 'crates/fm1-live/**'
       - 'crates/fm1-core/**'
       - 'crates/fm1-soc/**'
       - 'tools/build_plugin.sh'
@@ -27,6 +29,8 @@ jobs:
         run: brew install cmake ninja
       - name: Firmware for engine tests
         run: node tools/fetch_firmwares.mjs felucca
+      - name: Native audio regression tests
+        run: cargo test --release --locked -p fm1-host -p fm1-live
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP, AU and VST3 without installation
@@ -43,6 +47,8 @@ jobs:
           node-version: '22'
       - name: Firmware for engine tests
         run: node tools/fetch_firmwares.mjs felucca
+      - name: Native audio regression tests
+        run: cargo test --release --locked -p fm1-host -p fm1-live
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP and VST3 without installation

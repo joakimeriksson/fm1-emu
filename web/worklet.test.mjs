@@ -1,18 +1,18 @@
-// Deterministic AudioWorklet harness: no audio device or browser required.
+// Deterministic render-worker runtime harness: no audio device or browser required.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 function harness() {
-  let Processor, time = 0, revision = 0, flashRevision = 0, busy = false;
+  let time = 0, revision = 0, flashRevision = 0, busy = false;
   const messages = [];
   const memory = new WebAssembly.Memory({ initial: 4 });
   const context = vm.createContext({ WebAssembly, Float32Array, Uint16Array, Uint32Array, Uint8Array,
     sampleRate: 44100, performance: { now: () => time },
-    AudioWorkletProcessor: class { constructor() { this.port = { postMessage(m) { messages.push(m); time += 2; } }; } },
-    registerProcessor(_, cls) { Processor = cls; } });
-  vm.runInContext(readFileSync(new URL('./worklet.js', import.meta.url), 'utf8'), context);
-  const p = new Processor();
+ });
+  const source = readFileSync(new URL('./render-runtime.js', import.meta.url), 'utf8');
+  vm.runInContext(source.replace('export class Fm1', 'class Fm1') + '\nglobalThis.Fm1 = Fm1;', context);
+  const p = new context.Fm1({ postMessage(m) { messages.push(m); time += 2; } });
   Object.assign(p, { x: { memory, fm1_render(n) { time += .1; return n; },
     fm1_out_l: () => 0, fm1_out_r: () => 4096, fm1_lcd: () => 8192,
     fm1_lcd_revision: () => revision, fm1_leds: () => 131072,
