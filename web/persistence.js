@@ -1,7 +1,7 @@
 // Firmware identity, sparse flash saves and browser storage. No audio-thread work here.
 export const FLASH_SIZE = 1 << 20;
 export const SECTOR_SIZE = 4096;
-const MAX_PACKAGE = 8 << 20;
+export const MAX_PACKAGE = 8 << 20;
 export const FORMAT = 'fm1-emulator-save';
 
 export async function packageHash(bytes) {

@@ -241,7 +241,9 @@ comes out as `work/lcd_<ms>.bmp` snapshots and a 44.1 kHz WAV:
 
     fm1-emu --bin work/felucca_xip.bin --entry 0x02000120 --ms 7000 \
       --keys "800-1500:n7,3300:K1:-2,5200:PLAY" --wav work/demo.wav --snap 400,500,...
-    tools/demo_page.py out.html     # snapshots + WAV + script -> one page
+
+(`tools/demo_page.py`, which put the snapshots, the WAV and the script on one page, has been
+removed: `tools/bench_video.sh` makes a video of an fm1-live run.)
 
 Peripherals added (`crates/fm1-soc/src/periph.rs`, `spiflash.rs`), all from
 Felucca's HAL headers: SPI0 NOR flash, TIMER4 (24 MHz base) and TIMER5
@@ -458,7 +460,9 @@ In Chrome, Melodee at 240 MHz went from ~122% of the audio thread (dropouts) to 
   up a warning with the fix: the highest clock that fits (load x 1.25), or a larger audio
   buffer (`latencyHint: "playback"`, remembered) when it drops out with time to spare; "Copy a
   report" gives device, browser, audio setup and load for a bug report. Chrome's CPU throttling
-  does not reach the audio thread; `?mhz=700` overloads it for a test.
+  does not reach the audio thread; `?mhz=700` overloaded it for a test (the page has since kept
+  `?mhz=` to the clocks it offers, 60 to 240 MHz: the interpreter alone, `?jit=0`, at 240 MHz is
+  the overload to try).
 - Next: Melodee is still the slowest natively (1.4x: the AArch64 JIT does not chain into RAM
   blocks; the same count would let it, with the flag check in its inline stores); careful pairs
   (a pair head whose second instruction reads its result) stay interpreted in both JITs.
