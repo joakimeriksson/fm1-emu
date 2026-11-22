@@ -156,6 +156,13 @@ jobs:
       - name: Core tests
         run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-live -p fm1-emu
 
+      # Clippy's errors (the lints it denies: code that is wrong or does nothing), in every crate of
+      # the workspace. Its warnings are not held to: they are style, and there are some.
+      - name: Clippy's errors
+        run: |
+          rustup component add clippy
+          cargo clippy --release --workspace
+
       - name: JIT against the interpreter
         run: |
           cargo build --release -p fm1-live
