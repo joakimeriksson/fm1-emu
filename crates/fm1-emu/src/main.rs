@@ -521,10 +521,14 @@ fn main() -> ExitCode {
         // core 1 as the runners start it (`machine::released_cpu1`): from the entry the release wrote
         // into the word at 0x01C7FFF8, or an older image's RAM loop, with its stacks
         if !cpu1_started {
-            let ram_size = soc.ram.len();
-            if let Some(c1) = machine::released_cpu1(&mut soc, ram_size) {
+            // (an entry in RAM is one in the FM-1's megabyte, whatever --ram says: the wild-jump check
+            // below knows that megabyte as code too)
+            if let Some(c1) = machine::released_cpu1(&mut soc, machine::RAM_SIZE) {
                 if !args.quiet {
-                    println!("cpu1 entry {:#010x} (word at 0x01C7FFF8: {:#010x})", c1.pc, soc.read32(0x01C7_FFF8));
+                    // (the word as the release read it, not through the bus again: with a --ram that
+                    // ends below it that would be a second unknown access in the summary)
+                    let word = if soc.ram.len() >= 0x7_fffc { soc.ram.read32(0x7_fff8) } else { 0 };
+                    println!("cpu1 entry {:#010x} (word at 0x01C7FFF8: {word:#010x})", c1.pc);
                 }
                 cpus.push(c1);
                 cpu1_started = true;
