@@ -40,6 +40,11 @@ jobs:
           test -f reference/firmwares/felucca.fwsc
       - name: Unit and engine tests
         run: cargo test --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
+      # (the plugin is a workspace of its own: pages.yml's clippy step does not see it)
+      - name: Clippy's errors
+        run: |
+          rustup component add clippy
+          cargo clippy --manifest-path crates/fm1-plugin/Cargo.toml --release --locked
       - name: Build CLAP, AU and VST3 without installation
         run: env NO_INSTALL=1 tools/build_plugin.sh
 
