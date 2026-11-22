@@ -832,6 +832,39 @@ mod portable_tests {
         assert_eq!(other.unwrap_err(), "the emulator failed (a panic)");
         assert_eq!(caught(|| Ok::<_, String>(3)), Ok(3));
     }
+    /// Felucca played as tools/catalog_check.py plays it in fm1-live (its script, 8 s at 240 MHz): the plugin's
+    /// machine makes the audio tests/catalog.json has the hash of, where the package is the build that was
+    /// hashed (a newer one of its author's is played, and its audio not compared). Needs
+    /// reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs): skipped without it, but not in CI, which
+    /// fetches it and must not pass on nothing.
+    #[test]
+    fn felucca_sounds_as_the_catalog_has_it() {
+        use sha2::{Digest, Sha256};
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        let pkg = match std::fs::read(path) {
+            Ok(p) => p,
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no reference/firmwares/felucca.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
+        };
+        let hex = |b: &[u8]| format!("{:x}", Sha256::digest(b))[..16].to_owned();
+        let catalog = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/catalog.json")).unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&catalog).unwrap();
+        let want = &catalog["felucca"];
+        let mut m = boot(&pkg, &[], 240, false).unwrap();
+        fm1_soc::script::queue(&mut m.soc, "2000:C4,2000:m903c64,3500:C4^,3500:m803c00,5000:PLAY");
+        while m.soc.periph.ms() < 8000 {
+            m.run(20_000).unwrap();
+        }
+        let audio: Vec<u8> = m.soc.periph.audio.iter().flat_map(|s| s.to_le_bytes()).collect();
+        assert!(audio.len() > 5 * 44_100 * 4, "{} bytes of audio in 8 s", audio.len());
+        if want["package"] != hex(&pkg) {
+            return eprintln!("felucca.fwsc is not the build tests/catalog.json hashed: played, its audio not compared");
+        }
+        let bytes = want["bytes"].as_u64().unwrap() as usize;
+        assert!(audio.len() >= bytes, "the audio ends at byte {}, the catalog's at {bytes}", audio.len());
+        assert_eq!(hex(&audio[..bytes]), want["audio"], "the audio of the first {bytes} bytes");
+    }
+
     /// Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs).
     #[test]
     fn a_panic_under_the_interpreter_is_the_runs_halt() {
