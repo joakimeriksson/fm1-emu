@@ -1863,11 +1863,15 @@ fn main() {
     let mut scroll_acc = [0f32; 8];
     let mut shown_leds = [0f32; 41];
     let mut grab: Option<Ctl> = None;
+    // Shift-click latches a key or button down so another can be pressed while it's held;
+    // shift-click or a plain click on it again releases it.
+    let mut latched = [false; 41];
+    let mut latch_vel = [100u8; 41];
     let mut was_pressed = false;
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
-    eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
+    eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), shift-click a key or button to hold it, click buttons, drag or scroll the knobs (MASTER = volume)");
     eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F2 layout (large screen, true to life, display only); F5 key labels; F3 records a WAV (to Music/fm1-emu); Cmd/Ctrl+O or F4 another firmware; Esc quits");
 
     // F4 picked another firmware: what to start once this run has ended
@@ -1927,6 +1931,18 @@ fn main() {
                 drag_acc = 0.0;
                 if let Some(Ctl::Key(k)) = grab {
                     mouse_vel = panel::key_vel(&lk, k, my);
+                }
+                let shift = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
+                if let Some(Ctl::Key(id) | Ctl::Btn(id)) = grab {
+                    let id = id as usize;
+                    if shift {
+                        latched[id] = !latched[id];
+                        latch_vel[id] = mouse_vel;
+                        grab = None;
+                    } else if latched[id] {
+                        latched[id] = false;
+                        grab = None;
+                    }
                 }
             } else if pressed {
                 match grab {
@@ -2010,12 +2026,16 @@ fn main() {
             want[id as usize] = true;
         }
         for id in 0..41 {
+            want[id] |= latched[id];
+        }
+        for id in 0..41 {
             if want[id] != down[id] {
                 down[id] = want[id];
                 if want[id] && id >= 14 {
                     // the mouse's key at its height, the computer keyboard's at 100
                     let mouse = matches!(grab, Some(Ctl::Key(k)) if k as usize == id);
-                    let _ = tx.send(Action::KeyVel { vel: if mouse { mouse_vel } else { 100 } });
+                    let vel = if mouse { mouse_vel } else if latched[id] { latch_vel[id] } else { 100 };
+                    let _ = tx.send(Action::KeyVel { vel });
                 }
                 let _ = tx.send(Action::Key { id: id as u8, down: want[id] });
             }
