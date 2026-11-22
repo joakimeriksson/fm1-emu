@@ -1,6 +1,6 @@
 ---
 load_when: "UI work, styling, components, visual or design changes"
-last_verified: 2026-11-16
+last_verified: 2026-11-22
 source_refs:
   - context/icons.md
   - assets/icons/README.md
@@ -110,7 +110,7 @@ For each new reusable control, record its purpose, available states, keyboard be
 
 ## Controller and encoder interaction increment
 
-The device page adds a labeled Controller select with Auto / Raw states, native keyboard selection and a 40 px minimum height, 8 px inset/radius. It changes host routing only. MiniLab page mapping follows the physical panel; pads retain note performance and never silently invoke Save/Record. Hardware canvas encoders use an 8 px drag detent, Shift for quarter sensitivity, and fractional visual positions with immediate discrete firmware input. Visual motion is decorative; it never reports finer firmware values. Native polling is up to 120 Hz, browser drawing follows requestAnimationFrame. Existing hardware artwork remains the documented geometry exception. On the hardware panel (panel.rs: app, page and plugin), a pressed or Shift-held key or button sits lower and gets a 2 px-gapped edge ring with a soft glow: white on dark themes, the tray color on light ones. LED light stays separate: it lights the key's bar or the button's label, never the edge.
+The device page adds a labeled Controller select with Factory / FM-1 User / Raw states, native keyboard selection and a 40 px minimum height, 8 px inset/radius. It changes host routing only. The factory MiniLab mapping retains musical pads. The explicitly selected FM-1 User program maps two banks to panel commands, including SAVE and REC; setup and consequences are documented in [minilab.md](minilab.md). Plugin selection uses a labeled 160 px enum menu in the wrapping toolbar; keyboard selection follows the existing enum-menu behavior. Hardware canvas encoders use an 8 px drag detent, Shift for quarter sensitivity, and fractional visual positions with immediate discrete firmware input. Visual motion is decorative; it never reports finer firmware values. Native polling is up to 120 Hz, browser drawing follows requestAnimationFrame. Existing hardware artwork remains the documented geometry exception. On the hardware panel (panel.rs: app, page and plugin), a pressed or Shift-held key or button sits lower and gets a 2 px-gapped edge ring with a soft glow: white on dark themes, the tray color on light ones. LED light stays separate: it lights the key's bar or the button's label, never the edge.
 
 ## Hardware Library
 

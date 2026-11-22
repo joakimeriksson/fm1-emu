@@ -1,6 +1,6 @@
 ---
 load_when: "current progress, next steps or known limitations"
-last_verified: 2026-11-16
+last_verified: 2026-11-22
 source_refs:
   - assets/icons/README.md
   - tools/generate-icons.swift
@@ -141,3 +141,9 @@ Refined the isolated hardware master against the approved flat-charcoal UI refer
 [icons.md](icons.md) now records the durable user intent, distinct platform assets, exact regeneration/build/package commands, macOS container/cache pitfalls and platform verification limits. It is routed from AGENTS.md and linked from the design/build docs. The portable archive now has a source-controlled `tools/package_icons.py` command, including the platform guide; the extracted package is refreshed with the ZIP.
 
 Refinement acceptance: uniform-body/blank-screen checks, icon sizes/frames/links/offline coverage, archive/catalog byte comparisons, all four macOS bundle signatures, both fm1-host tests and context integrity passed. Finder Quick Look visibly shows the refined matte controls and blank screen filling the native enclosure without the extra white frame or cropped controls. Windows/Linux/mobile and real DAW presentation retain the unverified limits in icons.md.
+
+## Dedicated MiniLab 3 FM-1 program
+
+Added an explicitly selected User program across standalone, browser and plugins. Knobs 1–4 are MASTER/SELECT/PRESETS/ALGORITHM; knobs 5–8 are K1–K4. Relative 1 avoids absolute encoder endpoints. Two gated CC pad banks cover every FM-1 button, with FX on Bank A pad 2 and actual OCT−/+ on Bank B pads 5/6. MiniLab's built-in octave/transpose still changes outgoing keyboard notes. The old factory profile remains available; plugins default to Raw and save their explicit profile per instance. Command pads are decoded before plugin channel reassignment. Duplicate holds, panic release and controller-volume persistence are covered by routing tests. Configure the User memory using [minilab.md](minilab.md); no controller settings were uploaded.
+
+Validation: 134 native/SoC tests passed (render-sample and CoreMIDI tests ignored); 31 plugin tests passed (one ignored); 15 Studio tests passed (two package fixtures skipped). Browser assets, standalone app and CLAP/AU/VST3 bundles built, with plugin installation disabled. Physical MiniLab relative output, bank switching, every mapped gesture and actual DAW acceptance remain unverified. The work is isolated from concurrent audio delivery changes.
