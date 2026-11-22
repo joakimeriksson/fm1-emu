@@ -131,12 +131,18 @@ fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&[u8]> {
     Some(unsafe { std::slice::from_raw_parts(m.ram.add(off as usize), (m.ram_len - off) as usize) })
 }
 
+/// A block of micro-ops (`Cpu::build_block`): the instructions from `pc` on, `ops` of `Cpu::bops`
+/// from `start`. The narrow fields hold what the builder can make: it stops at 32 ops, or one
+/// more for the second instruction of a glued pair that began as the 32nd.
 #[derive(Clone, Copy, Debug)]
 struct Block {
     pc: u32,
     start: u32,
+    /// The length of its code: at most 64 instructions of at most 6 bytes each.
     bytes: u16,
+    /// At most 33.
     ops: u8,
+    /// One per op, two for a swapped pair, which is never the 33rd: at most `STRETCH_ROOM`.
     instructions: u8,
 }
 
@@ -1164,6 +1170,8 @@ impl Cpu {
         self.block_probe_span(id, stop).0
     }
 
+    /// `len_to` for block `id`, without walking its ops when `stop` is not inside it (so for
+    /// nearly every block a stretch runs): then all of its instructions come before `stop`.
     #[inline]
     fn block_probe_span(&self, id: usize, stop: u32) -> (u32, bool) {
         let block = self.blocks[id];
@@ -6250,6 +6258,62 @@ mod tests {
         assert_eq!(cpu.run_fast(&mut bus, 3).unwrap(), (3, false));
         assert_eq!((cpu.regs, cpu.pc, cpu.insn_count), (stepped.regs, stepped.pc, stepped.insn_count));
         assert!(bus.0.mem == sbus.0.mem);
+    }
+
+    /// `block_probe_span` answers from the block's sizes when the stop is not inside it: for every
+    /// stop in and around a block that is what `len_to` counts, and the sizes of the longest
+    /// blocks the builder makes fit `Block`'s fields.
+    #[test]
+    fn a_blocks_sizes_give_what_len_to_counts() {
+        struct Xip(FlatRam);
+        impl Bus for Xip {
+            fn read8(&mut self, a: u32) -> u8 { self.0.read8(a & 0xffff) }
+            fn read16(&mut self, a: u32) -> u16 { self.0.read16(a & 0xffff) }
+            fn read32(&mut self, a: u32) -> u32 { self.0.read32(a & 0xffff) }
+            fn write8(&mut self, a: u32, v: u8) { self.0.write8(a & 0xffff, v) }
+            fn write16(&mut self, a: u32, v: u16) { self.0.write16(a & 0xffff, v) }
+            fn write32(&mut self, a: u32, v: u32) { self.0.write32(a & 0xffff, v) }
+            fn next_tick_due(&self) -> bool { false }
+        }
+        // `00 d7` r0 = r0.b0 (u) # is a pair head: swapped with `c8 4b` b[r4+11] = r0, which reads
+        // what it writes, and glued to a nop (`00 00`), which does not
+        let (swap, glue) = ([0x00, 0xd7, 0xc8, 0x4b], [0x00, 0xd7, 0x00, 0x00]);
+        // (name, code, what the block at its start holds: ops, instructions, bytes)
+        let cases: [(&str, Vec<u8>, (u8, u8, u16)); 4] = [
+            ("32 swapped pairs", swap.repeat(32), (32, 64, 128)),
+            ("31 swapped pairs and a glued one", [swap.repeat(31), glue.to_vec()].concat(), (33, 64, 128)),
+            ("a glued pair, a swapped one, nops", [&glue[..], &swap[..]].concat(), (32, 33, 66)),
+            ("a nop, a swapped pair, a glued one, nops", [&[0, 0][..], &swap[..], &glue[..]].concat(), (32, 33, 66)),
+        ];
+        for (name, code, sizes) in cases {
+            let mut mem = vec![0u8; 0x10000];
+            mem[..code.len()].copy_from_slice(&code);
+            let (mut cpu, mut bus) = (Cpu::new(0x0200_0000), Xip(FlatRam::new(mem)));
+            // (the block at the start, and those two and four bytes in: a pair cut in two, a later start)
+            for pc in [0x0200_0000u32, 0x0200_0002, 0x0200_0004] {
+                cpu.pc = pc;
+                let (id, start, len) = cpu.block_at(&mut bus, pc).unwrap().unwrap();
+                let b = cpu.blocks[id];
+                assert_eq!((b.pc, b.start, b.ops as u32), (pc, start, len), "{name} at {pc:#x}");
+                if pc == 0x0200_0000 {
+                    assert_eq!((b.ops, b.instructions, b.bytes), sizes, "{name}");
+                }
+                let (ops, swaps) = (cpu.bops[start as usize..(start + len) as usize].to_vec(), cpu.swaps.clone());
+                assert_eq!(b.bytes as u32, ops.iter().map(|o| o.len as u32).sum::<u32>(), "{name} at {pc:#x}");
+                assert!(b.ops <= 33 && b.instructions as u32 <= STRETCH_ROOM, "{name} at {pc:#x}: {b:?}");
+                // every address from before the block to past its end (odd ones too), and far ones:
+                // the same offset 64 KiB on (a 16-bit offset would take it for one inside)
+                let near = (pc - 8..=pc + b.bytes as u32 + 8).flat_map(|s| [s, s.wrapping_add(0x1_0000), s.wrapping_sub(0x1_0000)]);
+                for stop in near.chain([0, u32::MAX, pc ^ 0x8000_0000]) {
+                    let counted = len_to(&ops, &swaps, pc, stop);
+                    assert_eq!(cpu.block_probe_span(id, stop), counted, "{name} at {pc:#x}, stop {stop:#x}");
+                    assert_eq!(cpu.block_len_to(&mut bus, stop), counted.0, "{name} at {pc:#x}, stop {stop:#x}");
+                }
+            }
+            // (the cases hold what they are named for)
+            let kinds = |f: fn(&BOp) -> bool| cpu.bops.iter().filter(|o| f(o)).count();
+            assert!(kinds(|o| matches!(o.fast, Fast::Swap { .. })) > 0 && (!name.contains("glued") || kinds(|o| o.glue) > 0), "{name}");
+        }
     }
 
     #[test]
