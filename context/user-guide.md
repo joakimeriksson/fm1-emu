@@ -357,7 +357,7 @@ Reference: [Arturia’s MIDI implementation chart](https://support.arturia.com/h
 
 ## Responsive controls and audio
 
-In the native app, **Shift-click** a key or button (Home, for example) to hold it down, then press another key while it's held. Shift-click it again, or click it, to release it. Drag encoders vertically; hold **Shift** for four-times finer mouse travel. Knob pointers now move between detents, with smaller visual rotation per step. Firmware parameters still move by their real encoder detents; the display never invents extra parameter precision. Mouse, keyboard and MIDI actions are sent immediately; visual easing does not delay them.
+In the app, page and plugin, **Shift-click** a key or button (Home, for example) to hold it down, then press another key while it's held. Shift-click it again, or click it, to release it. Drag encoders vertically; hold **Shift** for four-times finer mouse travel. Knob pointers now move between detents, with smaller visual rotation per step. Firmware parameters still move by their real encoder detents; the display never invents extra parameter precision. Mouse, keyboard and MIDI actions are sent immediately; visual easing does not delay them.
 
 Native playback now starts with a **12 ms** queue rather than 50 ms, and the FM-1 panel polls at up to 120 Hz. This is a queue target, not a measured end-to-end latency promise. The queue grows if needed to prevent underruns. For an explicit device buffer, add `--buffer 128`; if unsupported the app falls back to the device default. For more headroom add `--latency 24`.
 
