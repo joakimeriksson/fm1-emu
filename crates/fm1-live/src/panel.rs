@@ -530,6 +530,36 @@ fn halo(buf: &mut [u32], x: f32, y: f32, w: f32, h: f32, r: f32, blur: f32, colo
     }
 }
 
+/// A rounded rectangle's outline (pixels), `w` wide, centred on its edge, anti-aliased.
+fn ring(buf: &mut [u32], x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, color: u32, alpha: f32) {
+    let half = width / 2.0;
+    for py in ((y - half - 1.0).floor() as i32)..=((y + h + half + 1.0).ceil() as i32) {
+        for px in ((x - half - 1.0).floor() as i32)..=((x + w + half + 1.0).ceil() as i32) {
+            let d = sdf(px as f32 + 0.5, py as f32 + 0.5, x, y, w, h, r).abs();
+            let a = (half + 0.5 - d).clamp(0.0, 1.0);
+            if a > 0.0 {
+                put(buf, px, py, color, alpha * a);
+            }
+        }
+    }
+}
+
+/// What marks a pressed or held control: white on dark bodies, the tray's dark on light ones.
+fn press_color(theme: &Theme) -> u32 {
+    let c = theme.body_top;
+    let luma = 0.299 * ((c >> 16) & 255) as f32 + 0.587 * ((c >> 8) & 255) as f32 + 0.114 * (c & 255) as f32;
+    if luma > 140.0 { theme.tray } else { LIT }
+}
+
+/// A pressed or held control's mark (pixels, around its cap): a soft glow and a crisp edge.
+fn press_mark(buf: &mut [u32], p: &Pen, x: f32, y: f32, w: f32, h: f32, r: f32, theme: &Theme) {
+    let c = press_color(theme);
+    let gap = p.s(2.0);
+    let (x, y, w, h, r) = (x - gap, y - gap, w + 2.0 * gap, h + 2.0 * gap, r + gap);
+    halo(buf, x, y, w, h, r, p.s(10.0), c, 0.35);
+    ring(buf, x, y, w, h, r, p.s(1.5).max(1.0), c, 0.9);
+}
+
 /// A line with round ends (pixels), anti-aliased.
 fn line(buf: &mut [u32], x0: f32, y0: f32, x1: f32, y1: f32, w: f32, color: u32, alpha: f32) {
     let r = w / 2.0;
@@ -877,6 +907,9 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State, theme: &Theme, look: &Loo
             shape(buf, x - 1.0, y - 1.0, w + 2.0, h + off + 4.0, p.s(8.0), |_, _| theme.tray);
         }
         button_cap(buf, &p, x, y + off, w, h, name, g.btn_font, theme, lit, down);
+        if down {
+            press_mark(buf, &p, x, y + off, w, h, p.s(8.0), theme);
+        }
     }
     let mut top = 0;
     for (id, x, y, w, h, is_top) in keys(g) {
@@ -892,6 +925,9 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State, theme: &Theme, look: &Loo
             shape(buf, x - 1.0, y - 1.0, w + 2.0, h + off + 5.0, w / 2.0, |_, _| theme.tray);
         }
         key_cap(buf, &p, x, y + off, w, h, lab, theme, lit, down);
+        if down {
+            press_mark(buf, &p, x, y + off, w, h, w / 2.0, theme);
+        }
     }
 }
 
