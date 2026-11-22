@@ -99,7 +99,7 @@ async function page(disk = storage(), initialSearch = '', selected = '', manualB
   const run = new Function(...Object.keys(environment), `return (async () => { ${source}\nreturn {
     startAudio, boot, flushRunning, setLatency, get running() { return running; },
     setFirmware(id) { fw = byId.get(id); fwSel.value = id; }, setBank(bytes) { bank = bytes; },
-    get fw() { return fw; }, perf, setMhz(c) { mhz = c; }, setPot, get bootSeq() { return bootSeq; }, get bootQueue() { return bootQueue; }, screen: { lcdRaw, showLcd }
+    get fw() { return fw; }, perf, setMhz(c) { pickedMhz = mhz = c; }, setPot, get bootSeq() { return bootSeq; }, get bootQueue() { return bootQueue; }, screen: { lcdRaw, showLcd }
   }; })()`);
   // (a page that could not come up: what it shows, with the error)
   const api = await run(...Object.values(environment)).catch(error => { throw Object.assign(error, { elements }); });
@@ -628,19 +628,31 @@ test("the catalog's minimum clock: the advice offers no clock under it, and only
   const p = await page(); await p.api.startAudio();
   p.api.fw.minMhz = 160;
   p.api.fw.minMhzPackage = (await persistence.packageHash(new Uint8Array(960).fill(1))).slice(0, 16);   // (a's package)
-  await p.api.boot(); await settle();
-  assert.equal(p.elements.get('perfwarn').hidden, true);   // (below it, no warning until it runs out of time)
-  for (let i = 0; i < 5; i++) {
-    p.api.perf.add({ busy: 400, quanta: 345, frames: 128, emulated: 1000, idle: 0, worst: 1, starved: 9 });
-    p.api.perf.second({ halted: false });
-  }
-  assert.equal(p.elements.get('perfwarn-fix').textContent, 'Use 160 MHz');
   p.api.setMhz(240); await p.api.boot(); await settle();
   p.api.perf.idleShare = 0.1;
   assert.equal(p.api.perf.lowerClock(3), 160);
-  // another build of the firmware: its own minimum is not known, only where it ran out of time
+  // another build of the firmware: its own minimum is not known
   p.api.fw.minMhzPackage = 'ffffffffffffffff';
-  assert.equal(p.api.perf.lowerClock(3), 120);
+  assert.equal(p.api.perf.lowerClock(3), 60);
+});
+
+test("a firmware boots at the catalog's minimum for its package, and the next one at the clock the user picked", async () => {
+  const p = await page(); await p.api.startAudio();
+  const booted = () => p.audio.messages.filter(m => m.type === 'boot').at(-1).mhz;
+  p.api.fw.minMhz = 160;
+  p.api.fw.minMhzPackage = (await persistence.packageHash(new Uint8Array(960).fill(1))).slice(0, 16);   // (a's package)
+  await p.api.boot(); await settle();
+  assert.equal(booted(), 160);
+  assert.equal(Number(p.elements.get('mhz').value), 160);
+  assert.match(p.location.search, /mhz=100/);
+  p.api.setFirmware('b'); await p.api.boot(); await settle();
+  assert.equal(booted(), 100);
+  assert.equal(Number(p.elements.get('mhz').value), 100);
+  p.api.setFirmware('a'); p.api.setMhz(240); await p.api.boot(); await settle();
+  assert.equal(booted(), 240);
+  // another build of the firmware: its minimum is not known
+  p.api.setMhz(100); p.api.fw.minMhzPackage = 'ffffffffffffffff'; await p.api.boot(); await settle();
+  assert.equal(booted(), 100);
 });
 
 test("a try-out boots with its sectors and script from this origin, starts by itself and saves nothing", async () => {

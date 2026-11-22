@@ -91,7 +91,10 @@ function endTryOut() {
 // is listed with them). Anything else is no clock: it would go to the machine as it is (not a number: 0 MHz; a huge one:
 // a quantum of audio that takes minutes to emulate).
 const clockOf = (v) => { const c = Number(v); return Number.isInteger(c) && c >= CLOCKS[0] && c <= CLOCKS[CLOCKS.length - 1] ? c : null; };
-let mhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
+// A firmware runs at its package's catalog minimum when that is above the picked clock;
+// the pick stays apart so the next firmware runs at it again.
+let pickedMhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
+let mhz = pickedMhz;
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
 // (an AudioContext refuses any other word)
@@ -432,7 +435,7 @@ function showFirmware() {
   about.replaceChildren(...parts);
   const q = new URLSearchParams(location.search);
   q.set("fw", fw.id);
-  q.set("mhz", mhz);
+  q.set("mhz", pickedMhz);
   if (!fw.link) { q.delete("package"); q.delete("name"); }
   history.replaceState(null, "", `?${q}`);
   const full = new URLSearchParams(fw.id === "local" ? "" : { fw: fw.id });
@@ -452,8 +455,8 @@ fwSel.addEventListener("change", () => {
   if (node) boot();
 });
 mhzSel.addEventListener("change", () => {
-  mhz = Number(mhzSel.value);
-  store("fm1.mhz", mhz);
+  pickedMhz = mhz = Number(mhzSel.value);
+  store("fm1.mhz", pickedMhz);
   showFirmware();
   mhzSel.blur();
   if (node) boot();
@@ -851,7 +854,8 @@ const outOfTime = new Map();
 const fwKey = () => `${fw.id}@${fw.version || fw.name}`;   // (every package from this computer is "local")
 // The advice offers no clock below the catalog's minimum either (tools/clock_floors.py), which
 // holds only for the package it was measured on: another build of the firmware can need more or less.
-const catalogMin = () => fw.minMhz && running?.record.hash.slice(0, 16) === fw.minMhzPackage ? fw.minMhz : 0;
+const minMhzOf = (f, hash) => f.minMhz && hash.slice(0, 16) === f.minMhzPackage ? f.minMhz : 0;
+const catalogMin = () => running ? minMhzOf(fw, running.record.hash) : 0;
 const perf = {
   reset() {
     this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.idleShare = 0; this.worst = 0;
@@ -1007,7 +1011,7 @@ document.getElementById("perfwarn-close").addEventListener("click", () => {
   perf.dismissed = true;
 });
 function setClock(c) {
-  mhz = c;
+  pickedMhz = mhz = c;
   if (![...mhzSel.options].some((o) => Number(o.value) === c)) mhzSel.add(new Option(`${c} MHz`, c));
   mhzSel.value = c;
   store("fm1.mhz", c);
@@ -1119,7 +1123,7 @@ async function flushRunning(pause = false) {
 // Serialize machine replacement, including the snapshot of the old machine. Requests that
 // became obsolete while downloading are skipped; every actual boot receives an acknowledgement.
 function boot(options = {}) {
-  const seq = showing = ++bootSeq, f = fw, clock = mhz;
+  const seq = showing = ++bootSeq, f = fw, picked = pickedMhz;
   // (the picks as stored for the next visit, which are those that ask for this machine: while it runs, a later pick
   // that does not boot gives them back. Not the firmware in a window on another site, which stores none: it is the
   // full page's)
@@ -1142,6 +1146,7 @@ function boot(options = {}) {
         }
       }
       const hash = await packageHash(got.bytes);
+      const clock = Math.max(picked, minMhzOf(f, hash));
       let record = trying ? null : memoryRecords.get(hash);
       if (!record && !trying) {
         try { record = await saveStore.load(hash); } catch (error) { saveFailure(error); }
@@ -1154,12 +1159,14 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, fw: f, mhz: clock, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, picked, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
       sessions.set(seq, session);
       loadedUrl = got.url;
+      mhz = clock;
+      mhzSel.value = clock;
       showFirmware();
       down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0);
       frame = last = null;
@@ -1215,6 +1222,7 @@ function boot(options = {}) {
 function backTo(session) {
   fw = session.fw;
   mhz = session.mhz;
+  pickedMhz = session.picked;
   show(session);
   for (const [k, v] of session.kept) store(k, v);
   if (fw.id === "local") {
