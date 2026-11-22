@@ -506,12 +506,19 @@ impl Soc {
         for at in (0..n).step_by(4096) {
             let end = (at + 4096).min(n);
             if self.flash.mem[at..end] != image[at..end] {
-                self.flash.mem[at..end].copy_from_slice(&image[at..end]);
-                self.flash.changed = Some((at, end));
-                self.sync_xip();
-                self.flash.revision = self.flash.revision.wrapping_add(1);
+                self.restore_sector(at, &image[at..end]);
             }
         }
+    }
+
+    /// `data` in place of what the chip holds from flash offset `at` (a saved sector: `restore_flash`,
+    /// `machine::Machine::restore_sectors`): to the chip and through to the XIP window, all of it, also
+    /// where a byte is the one the chip held (the window may still show the installed package's there).
+    pub fn restore_sector(&mut self, at: usize, data: &[u8]) {
+        self.flash.mem[at..at + data.len()].copy_from_slice(data);
+        self.flash.changed = Some((at, at + data.len()));
+        self.sync_xip();
+        self.flash.revision = self.flash.revision.wrapping_add(1);
     }
 
     /// `ram_size` in bytes; `xip` = the app binary mapped at XIP_BASE.
