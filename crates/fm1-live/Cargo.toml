@@ -13,6 +13,7 @@ ab_glyph = "0.2.32"
 minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"
+rtrb = "0.3"
 
 # --exclusive: WASAPI exclusive mode
 [target.'cfg(windows)'.dependencies]

@@ -39,8 +39,8 @@ fn wave(f: Fmt) -> WaveFormat {
 /// (or with why it could not), with a line saying what was opened. If the stream dies later
 /// (the device unplugged, or no longer answering), the thread says why and sets `ring.dead`,
 /// and the emulation goes by the clock from then on.
-pub fn start(ring: Arc<AudioRing>) -> Result<String, String> {
-    let (tx, rx) = std::sync::mpsc::channel::<Result<String, String>>();
+pub fn start(ring: Arc<AudioRing>) -> Result<(String, rtrb::Producer<[f32; 2]>), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(String, rtrb::Producer<[f32; 2]>), String>>();
     std::thread::Builder::new()
         .name("fm1-audio-exclusive".into())
         .spawn(move || {
@@ -103,7 +103,7 @@ impl Drop for ProAudio {
     }
 }
 
-fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, String>>, started: &std::sync::atomic::AtomicBool) -> Result<(), String> {
+fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<(String, rtrb::Producer<[f32; 2]>), String>>, started: &std::sync::atomic::AtomicBool) -> Result<(), String> {
     let _ = wasapi::initialize_mta();
     let e = |e: wasapi::WasapiError| e.to_string();
     let device = DeviceEnumerator::new().map_err(e)?.get_default_device(&Direction::Render).map_err(e)?;
@@ -135,28 +135,14 @@ fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, Stri
     let block = wf.get_blockalign() as usize;
     let buffer = client.get_buffer_size().map_err(e)?;
 
-    let step = 44_100.0 / fmt.rate as f64;
-    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
-    let mut data: Vec<u8> = Vec::new();
+    let (producer, consumer) = rtrb::RingBuffer::new(65_536);
+    let mut playback = fm1_host::audio::Playback::new(consumer, fmt.rate as f64);
+    let mut data = Vec::with_capacity(buffer as usize * block);
     let mut fill = |n: usize, data: &mut Vec<u8>| {
         data.clear();
-        let mut q = ring.q.lock().unwrap();
-        let mut starved = false;
+        let prefill = ring.prefill.load(Ordering::Relaxed);
         for _ in 0..n {
-            pos += step;
-            while pos >= 1.0 {
-                pos -= 1.0;
-                cur = next;
-                next = match (q.pop_front(), q.pop_front()) {
-                    (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
-                    _ => {
-                        starved = true;
-                        (0.0, 0.0)
-                    }
-                };
-            }
-            let t = pos as f32;
-            for s in [cur.0 + (next.0 - cur.0) * t, cur.1 + (next.1 - cur.1) * t] {
+            for s in playback.frame(prefill) {
                 let s = s.clamp(-1.0, 1.0);
                 match (fmt.float, fmt.store) {
                     (true, _) => data.extend_from_slice(&s.to_le_bytes()),
@@ -166,10 +152,7 @@ fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, Stri
                 }
             }
         }
-        drop(q);
-        if starved && ring.started.load(Ordering::Relaxed) {
-            ring.underruns.fetch_add(1, Ordering::Relaxed);
-        }
+        ring.underruns.store(playback.underruns, Ordering::Relaxed);
     };
     // a full buffer before the start, so it starts with sound rather than an underrun
     let n = client.get_available_space_in_frames().map_err(e)? as usize;
@@ -178,10 +161,10 @@ fn run(ring: Arc<AudioRing>, ready: &std::sync::mpsc::Sender<Result<String, Stri
     client.start_stream().map_err(e)?;
     let ms = buffer as f64 * 1000.0 / fmt.rate as f64;
     started.store(true, Ordering::Relaxed);
-    let _ = ready.send(Ok(format!(
+    let _ = ready.send(Ok((format!(
         "audio: WASAPI exclusive, {} Hz {}-bit{}, {} frames a period ({ms:.1} ms)",
         fmt.rate, fmt.valid, if fmt.float { " float" } else { "" }, buffer
-    )));
+    ), producer)));
     loop {
         if event.wait_for_event(1000).is_err() {
             let _ = client.stop_stream();

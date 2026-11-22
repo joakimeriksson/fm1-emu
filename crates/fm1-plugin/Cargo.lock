@@ -922,6 +922,7 @@ dependencies = [
 name = "fm1-host"
 version = "0.1.0"
 dependencies = [
+ "rtrb",
  "serde_json",
  "sha2",
 ]

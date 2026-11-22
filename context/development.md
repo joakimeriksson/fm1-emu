@@ -13,6 +13,8 @@ source_refs:
   - Cargo.toml
   - tools/check_firmware_alignment.sh
   - crates/fm1-host/src/lib.rs
+  - crates/fm1-host/src/audio.rs
+  - crates/fm1-host/tests/audio_callback.rs
 ---
 # Development
 
@@ -56,3 +58,9 @@ Session lifecycle: standalone Finder recall is a host preference, never a global
 ## App identity and icons
 
 Follow [the icon platform contract](icons.md) for source/generated assets, platform-specific commands and acceptance. Regenerate on macOS with full Xcode, validate, then rebuild standalone, plugins and web because the native companion embeds its favicon. Windows/Linux builds consume committed exports. Use NO_INSTALL=1 for plugin verification. The standalone macOS app and command-line release archives are separate packaging paths.
+
+## Realtime playback checks
+
+`cargo test --release --locked -p fm1-host -p fm1-live` covers stereo order, ring wraparound, conversion phase at 32/44.1/48/96 kHz, prefill, dropout fades, allocation-free playback and bounded recording overflow/finalization. `node --test web/studio/audio-buffer.test.mjs` covers queue bounds, stale boots, pause flush, recovery and latency decay. These deterministic tests do not establish device latency or sustained zero-underrun operation. Use `FM1_TEST_FWSC` with the plugin engine tests to exercise a local Felucca fixture rather than skipping it.
+
+For actual output-device playback without changing open sessions or saved flash, run `cargo run --release --locked -p fm1-live --example audio_probe -- reference/firmwares/sloop/sloop3-3.3.7.area 30 12`. The diagnostic holds three keys after four seconds, requests 128 device frames, uses the standalone adaptive queue from the specified starting target and reports output underruns, device errors and worst emulation chunk duration. It separates the first ten seconds from later underruns but does not establish perceptual equivalence. Do not run concurrent playback probes when comparing settings.

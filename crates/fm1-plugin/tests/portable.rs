@@ -16,7 +16,7 @@ impl Engine {
         let shared = Arc::new(Shared {
             view: Mutex::new(View { lcd: vec![0; 240 * 240], leds: [0.0; 41], pads: [0; 16],
                 board: fm1_soc::Board::Fm1, booted: false, halted: false, speed: 0.0, starved: 0, late: 0 }),
-            quit: Default::default(),
+            quit: Default::default(), underruns: Default::default(),
         });
         let params = Arc::new(Fm1Params::default());
         let (tx, rx) = mpsc::channel();

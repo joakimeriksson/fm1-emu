@@ -12,6 +12,8 @@ source_refs:
   - web/worklet.js
   - crates/fm1-soc/src/controller.rs
   - crates/fm1-host/src/lib.rs
+  - crates/fm1-host/src/audio.rs
+  - crates/fm1-live/src/wav.rs
   - crates/fm1-live/src/main.rs
   - crates/fm1-soc/src/fwsc.rs
   - web/hardware/**
@@ -26,9 +28,19 @@ The browser Studio hosts the upstream-compatible device page in a same-origin if
 
 Studio mode (`studio=1`) disables automatic Hub discovery and catalog downloads. The default clock is explicitly 240 MHz. The device still starts only after a user gesture. The upstream page remains available independently for comparison.
 
-The browser renderer (`render-worker.js` + `render-runtime.js`) owns the machine, JIT and snapshots. A direct MessageChannel connects it to `worklet.js`, which consumes a bounded stereo queue (four quanta initially, growing by two on an underrun to at most 16). LCD/flash messages travel directly from the worker to the page; only audio and small control messages reach the realtime thread. Boot IDs reject stale audio; pause acknowledgements flush queued output. No SharedArrayBuffer or cross-origin isolation is required. This adds about 11.6 ms of queue headroom at 44.1 kHz while moving compilation off audio deadlines.
+The browser renderer (`render-worker.js` + `render-runtime.js`) owns the machine, JIT and snapshots. A direct MessageChannel connects it to `worklet.js`, which consumes a bounded stereo queue (four quanta initially, growing by two on an underrun to at most 16 and shrinking by one after each ten seconds of uninterrupted output). LCD/flash messages travel directly from the worker to the page; only audio and small control messages reach the realtime thread. Boot IDs reject stale audio; pause acknowledgements flush queued output. No SharedArrayBuffer or cross-origin isolation is required. This adds about 11.6 ms of queue headroom at 44.1 kHz while moving compilation off audio deadlines.
 
 Factory MiniLab 3 profiles translate recognized CCs into physical panel actions before firmware MIDI. Only the standard performance port is auto-mapped. Mapped CCs are consumed once; other messages pass through. Rust and browser policies have matching regression cases. The dedicated [MiniLab User program](minilab.md) adds relative knobs and gated command pads in all three hosts. Plugin instances explicitly select it (Raw remains the default); mapping runs on the machine worker before performance-channel remapping. Its profile and controller volume override persist per instance; host Master changes take over from controller volume.
+
+## Desktop audio delivery
+
+Standalone and plugins use `fm1-host::audio::Playback` over preallocated SPSC stereo rings. Device/plugin callbacks take no queue or UI locks and allocate no playback buffers. Startup waits for prefill. A dropout counts once, fades to zero over 32 output samples, waits for refill and fades back in; steady playback retains fractional conversion phase. Linear rate conversion remains in use. This recovery softens a discontinuity; it cannot reconstruct missing samples.
+
+Standalone starts with a 12 ms queue and requests a 128-frame macOS device buffer, falling back to the device default if unsupported. Its adaptive queue can still grow to 80 ms. New plugin instances use a 512-source-frame lead (about 12 ms) beyond the configured maximum host block; saved Lead choices and latency reporting are retained. Both producers use interactive QoS on macOS, not an Audio Workgroup deadline guarantee. Plugin starvation telemetry uses an atomic episode counter instead of a callback-side view lock.
+
+WAV writes use a separate worker with a bounded queue of 32 audio batches. If storage cannot keep up, the take stops with an error; playback never waits for queue space. Finalization drains accepted batches. Queue copies still allocate on the producer, outside the device callback. Browser output uses a fixed 16-slot queue and the same 32-sample dropout fades; it retains MessageChannel transport.
+
+Firmware execution, dual-core scheduling, DMA extraction, DIN MIDI timing and GUI input polling are unchanged. Audio Workgroups, band-limited conversion, timestamped standalone input, shared-memory browser transport and verified offline DAW rendering remain separate work.
 
 ## Data ownership
 

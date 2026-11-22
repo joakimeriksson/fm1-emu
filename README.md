@@ -49,6 +49,8 @@ target/release/fm1-live --fwsc /path/to/firmware.fwsc --flash /path/to/working-f
 NO_INSTALL=1 tools/build_plugin.sh
 ```
 
+Native playback uses a bounded stereo queue without callback locks. Standalone starts with a 12 ms queue and requests a 128-frame macOS device buffer; new plugins use about 12 ms of lead beyond the maximum host block. These are buffering settings, not measured end-to-end latency.
+
 The standalone application is produced at `target/apps/FM-1 Studio.app`. It is ad-hoc signed for local use and retains the upstream native panel. Double-click it and select a firmware package.
 
 Plugin bundles are produced under `target/plugin/`. The current build retains upstream identifiers; install intentionally and avoid replacing another FM-1 installation. Signing/notarization and real DAW validation remain separate from a successful build. See the [upstream plugin guide](crates/fm1-plugin/README.md).

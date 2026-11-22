@@ -167,10 +167,10 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 }
                 bar.label("MIDI channel");
                 bar.add(widgets::ParamSlider::for_param(&params.channel, setter).with_width(90.0));
-                bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Lower it if this computer can't keep up with a heavy firmware (\"frames late\"); raise it if a firmware runs out of time. Changing it restarts the firmware");
+                bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Lower it if this computer can't keep up with a heavy firmware (\"underruns\"); raise it if a firmware runs out of time. Changing it restarts the firmware");
                 // a menu in the clocks' order (the parameter's own order keeps v0.2.0's projects)
                 enum_menu(bar, setter, "clock", &params.clock, &Clock::ALL, 90.0, Clock::name);
-                bar.label("Lead").on_hover_text("How far ahead of the host the firmware runs, beyond one host block: a note you play waits this long, plus the host's own buffers, before it sounds. 23 ms is room for any firmware; try less, and go back up if \"frames late\" appear in the status bar. An AU host learns the new latency when the plugin is loaded again");
+                bar.label("Lead").on_hover_text("How far ahead of the host the firmware runs, beyond one host block: a note you play waits this long, plus the host's own buffers, before it sounds. New instances use 12 ms. Increase it if \"underruns\" appear in the status bar. An AU host learns the new latency when the plugin is loaded again");
                 enum_menu(bar, setter, "lead", &params.lead, &Lead::ALL, 70.0, Lead::name);
                 bar.separator();
                 // the recorder: a WAV of the output, as the machine's thread reports it
@@ -198,7 +198,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 } else if halted {
                     "The firmware stopped: an instruction the emulator does not know".into()
                 } else {
-                    let late = if late > 0 { format!(", {late} frames late in the last second") } else { String::new() };
+                    let late = if late > 0 { format!(", {late} underruns in the last second") } else { String::new() };
                     if speed > 0.0 { format!("could run {speed:.1}x real time{late}") } else { format!("starting{late}") }
                 };
                 bar.label(status);

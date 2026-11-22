@@ -8,6 +8,10 @@ source_refs:
   - web/main.js
   - context/development.md
   - crates/fm1-host/src/lib.rs
+  - crates/fm1-host/src/audio.rs
+  - crates/fm1-live/src/wav.rs
+  - crates/fm1-live/examples/audio_probe.rs
+  - web/worklet.js
   - crates/fm1-live/src/main.rs
   - crates/fm1-plugin/src/editor.rs
   - web/hardware/**
@@ -141,6 +145,25 @@ Refined the isolated hardware master against the approved flat-charcoal UI refer
 [icons.md](icons.md) now records the durable user intent, distinct platform assets, exact regeneration/build/package commands, macOS container/cache pitfalls and platform verification limits. It is routed from AGENTS.md and linked from the design/build docs. The portable archive now has a source-controlled `tools/package_icons.py` command, including the platform guide; the extracted package is refreshed with the ZIP.
 
 Refinement acceptance: uniform-body/blank-screen checks, icon sizes/frames/links/offline coverage, archive/catalog byte comparisons, all four macOS bundle signatures, both fm1-host tests and context integrity passed. Finder Quick Look visibly shows the refined matte controls and blank screen filling the native enclosure without the extra white frame or cropped controls. Windows/Linux/mobile and real DAW presentation retain the unverified limits in icons.md.
+
+## Realtime audio delivery refactor (2026-11-22)
+
+Standalone and plugins share a preallocated SPSC stereo consumer with startup prefill, persistent conversion phase and 32-sample dropout fades. The standalone callback no longer locks the producer queue; display publication can skip a busy frame. Plugin underrun telemetry is atomic. Recording writes and finalization run away from the producer; a full 32-batch recording queue ends the take with an error instead of waiting or dropping samples inside it.
+
+Standalone retains its 12 ms adaptive queue default and requests 128 device frames on macOS, with device-default fallback. New plugin instances use a 512-frame lead (about 12 ms) instead of 1024; existing project choices retain their parameter IDs. Browser buffering uses a fixed 16-slot queue and returns toward four quanta after ten-second stable intervals without discarding queued audio. Shared firmware execution and sample extraction are unchanged.
+
+Verification: native/core regressions and cross-host firmware acceptance passed with local Felucca and SLOOP 3.3.7 fixtures, including WASM display/audio, flash round trips and browser/plugin save interchange. Playback tests cover ring wraparound, stereo order, output rates, source-frame MIDI positions, startup, recovery and zero callback allocations. Recording tests cover bounded overflow and finalized sample order. All 73 browser/Studio JavaScript tests passed. Runtime/lifecycle harnesses now exercise the worker boundary; audio queue tests cover recovery and latency decay. Rebuilt VST3 passed 47 validator tests with zero failures. Bundles are built without installing plugins.
+
+Actual device checks used the `audio_probe` example on output named M4, 48 kHz, 128 frames, 12 ms starting queue, 240 MHz emulated clock and three held keys after boot. The example shares the shipped consumer and adaptive policy, without opening a GUI, MIDI inputs or saved sessions:
+
+| Firmware | Wall duration | Output underruns | Device errors | Final queue target | Worst steady emulation chunk (after 10 s) |
+|---|---|---|---|---|---|
+| SLOOP 3.3.7 | 30 s | 0 | 0 | 12 ms | 0.477 ms |
+| Felucca | 30 s | 0 | 0 | 12 ms | 0.292 ms |
+
+Exploratory fixed queues during build activity produced underruns (6 ms: 16; 12 ms: 27, each over 30 seconds). These were not controlled comparisons; they reject a blanket 6 ms default or zero-dropout guarantee. A ten-second SLOOP scripted headless render remained byte-identical to the pre-refactor capture. This is engine preservation, not physical-device or perceptual equivalence.
+
+Still unverified: end-to-end input latency, sustained busy arrangements, real DAW playback/offline bounce, actual browser output and Windows exclusive playback. Linear rate conversion, DIN MIDI serialization and GUI input polling remain. Audio Workgroups and full timestamp/clock redesign are deferred; do not describe the refactor as resolving every reported artifact.
 
 ## Dedicated MiniLab 3 FM-1 program
 
