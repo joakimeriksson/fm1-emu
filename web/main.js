@@ -568,6 +568,7 @@ const at = (e) => {
 const holds = new Uint8Array(64);          // pointers holding each key / button
 function press(id) { if (holds[id]++ === 0) setKey(id, true); }
 function unpress(id) { if (holds[id] && --holds[id] === 0) setKey(id, false); }
+const latched = new Set();                // keys / buttons held by Shift-click
 const pointers = new Map();                // pointerId -> { grab, lastY, acc, held }
 canvas.addEventListener("pointerdown", (e) => {
   const [x, y] = at(e);
@@ -575,7 +576,18 @@ canvas.addEventListener("pointerdown", (e) => {
   pointers.set(e.pointerId, p);
   canvas.setPointerCapture(e.pointerId);
   if (p.grab >= 100 && p.grab < 200) {
-    p.held = p.grab - 100;
+    const id = p.grab - 100;
+    // Shift-click holds a key or button so another can be pressed while it's held;
+    // Shift-click or click it again to let go
+    if (e.shiftKey || latched.has(id)) {
+      p.grab = -1;
+      if (latched.delete(id)) { unpress(id); return; }
+      if (board === 1 && id < NKEY) setVelocity(ui.panel_hit_y());
+      latched.add(id);
+      press(id);
+      return;
+    }
+    p.held = id;
     // SMK-37: a key hit further down sounds harder
     if (board === 1 && p.held < NKEY) setVelocity(ui.panel_hit_y());
     press(p.held);

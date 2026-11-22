@@ -34,6 +34,8 @@ struct Ui {
     /// SMK-37: its analog inputs as set (fm1_soc::smk's ANALOG_* indices)
     analog: [u16; 23],
     grab: Option<Grab>,
+    /// keys and buttons held by Shift-click
+    latched: [bool; 64],
     wheel_acc: f32,
     msg: String,
     msg_until: Option<std::time::Instant>,
@@ -61,6 +63,7 @@ impl Default for Ui {
             turning: [0; 9],
             analog,
             grab: None,
+            latched: [false; 64],
             wheel_acc: 0.0,
             msg: String::new(),
             msg_until: None,
@@ -213,7 +216,19 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     let (x, y) = at(p);
                     let ctl = hit(smk, &look, x, y);
                     let mut g = Grab { ctl, last_y: y, acc: 0.0, held: -1 };
-                    if (100..200).contains(&ctl) {
+                    let shift = ctx.input(|i| i.modifiers.shift);
+                    if (100..200).contains(&ctl) && (shift || ui.latched[(ctl - 100) as usize]) {
+                        // Shift-click holds a key or button so another can be pressed while it's
+                        // held; Shift-click or click it again to let go
+                        let id = ctl - 100;
+                        g.ctl = -1;
+                        let on = !ui.latched[id as usize];
+                        ui.latched[id as usize] = on;
+                        if on && smk && id < NKEY {
+                            velocity(&link, panel_smk_hit_y(x, y));
+                        }
+                        key(ui, &link, id, on);
+                    } else if (100..200).contains(&ctl) {
                         g.held = ctl - 100;
                         if smk && g.held < NKEY {
                             velocity(&link, panel_smk_hit_y(x, y));
