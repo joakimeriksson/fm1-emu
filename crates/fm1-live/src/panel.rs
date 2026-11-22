@@ -91,6 +91,8 @@ impl Theme {
         THEMES.iter().find(|(n, _, _)| *n == name).map(|(_, _, t)| t)
     }
 
+    /// (For the plugin's window and the tests; fm1-live's own --theme refuses a name it does not know.)
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn by_name(name: &str) -> &'static Theme {
         Self::try_by_name(name).unwrap_or(&THEMES[0].2)
     }
@@ -385,7 +387,7 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State, theme: &Theme) {
     for y in 0..240 {
         for x in 0..240 {
             let p = st.lcd[y * 240 + x] as u32;
-            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | (p & 31) * 255 / 31;
+            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | ((p & 31) * 255 / 31);
             let o = (LCD_Y + 2 * y) * W + LCD_X + 2 * x;
             buf[o] = c;
             buf[o + 1] = c;
@@ -505,7 +507,7 @@ mod tests {
         let px = b[200 * W + 100];
         let r = (px >> 16) & 0xFF;
         // cool-gray body_top is 0xDAD1CC (R=0xDA=218), body_bot is 0xCCC3BC (R=0xCC=204)
-        assert!(r >= 190 && r <= 230, "body pixel R={r:#x} should be in cool-gray range");
+        assert!((190..=230).contains(&r), "body pixel R={r:#x} should be in cool-gray range");
     }
 
     #[test]

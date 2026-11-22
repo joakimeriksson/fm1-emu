@@ -7,11 +7,12 @@
 // writes the frames (jpeg, 2560x1690) with their timestamps and the status line's readings to frames.json. The
 // audio is fm1-live's for the same script (FM1_BENCH_FRAMES), aligned on the LCD: see the browser scene's
 // _source in tools/film-0.4.0.json.
-// record the tab's screencast: node rec.mjs <port> <url> <seconds> <outdir>
 const [port, url, secs, outdir] = process.argv.slice(2);
 const { writeFileSync, mkdirSync } = await import("node:fs");
 mkdirSync(outdir, { recursive: true });
-const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+// (that Chrome's one tab, about:blank: the targets it lists also have its service workers and extensions)
+const page = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()).find((t) => t.type === "page");
+if (!page) throw new Error(`no tab in the Chrome at port ${port}`);
 const ws = new WebSocket(page.webSocketDebuggerUrl);
 let id = 0; const pending = new Map(); const frames = []; const status = [];
 const send = (method, params = {}) => new Promise((ok, no) => { const i = ++id; pending.set(i, { ok, no, m: method }); ws.send(JSON.stringify({ id: i, method, params })); });

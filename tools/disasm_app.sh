@@ -2,6 +2,7 @@
 # Disassemble a raw FM-1 app image with JieLi's objdump: wrap it in an ELF (.incbin, linked at
 # BASE, default 0x02000120 as Felucca and its forks) and dump it.
 #   tools/disasm_app.sh reference/firmwares/x0x-1.0.3.app.bin work/x0x_objdump.txt [0x02000120]
+# (the app of an update package: node tools/fwsc_extract.mjs PACKAGE.fwsc OUT.bin)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 app="$1"; out="$2"; base="${3:-0x02000120}"

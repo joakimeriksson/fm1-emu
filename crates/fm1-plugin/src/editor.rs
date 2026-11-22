@@ -4,7 +4,8 @@
 //! that is the host's "Master" parameter), and a bar to load a firmware package.
 
 use crate::engine::Cmd;
-use crate::{panel, panel_smk, Clock, Fm1Params, Lead, Link};
+use crate::{map, panel, panel_smk, Clock, Fm1Params, Lead, Link};
+use fm1_map::{KeysMode, Profile, Target};
 use fm1_soc::Board;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, widgets};
@@ -36,6 +37,15 @@ struct Ui {
     /// the file dialog's answer, while it is open
     picking: Option<(FileAction, Answer)>,
     job: Option<Job>,
+    /// the controller profiles to choose from (built-ins and the user's)
+    profiles: Vec<Profile>,
+    /// a click on the panel learns that control instead of pressing it
+    learn_mode: bool,
+    labels: bool,
+    /// the profile as the machine's thread last published it, and its revision
+    map_rev: u64,
+    map_profile: Option<Profile>,
+    map_labels: u32,
 }
 
 impl Default for Ui {
@@ -59,6 +69,12 @@ impl Default for Ui {
             msg_until: None,
             picking: None,
             job: None,
+            profiles: Vec::new(),
+            learn_mode: false,
+            labels: false,
+            map_rev: 0,
+            map_profile: None,
+            map_labels: 0,
         }
     }
 }
@@ -144,8 +160,11 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     let _ = link.cmds.send(Cmd::Record);
                 }
                 bar.separator();
+                let stopped = params.halt.lock().unwrap().clone();
                 let status = if !ui.msg.is_empty() {
                     ui.msg.clone()
+                } else if let Some(why) = stopped.filter(|_| !booted || halted) {
+                    why
                 } else if !booted {
                     "Open a .fwsc firmware or shared .fm1save to start".into()
                 } else if halted {
@@ -157,6 +176,98 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                 bar.label(status);
             });
         });
+
+        // the MIDI controller: its profile, learning, labels, the keys' mode
+        let (keys_mode, learning, map_down, map_enc, map_save, map_labels, map_msg) = {
+            let mut v = params.map.lock().unwrap();
+            if v.rev != ui.map_rev {
+                ui.map_rev = v.rev;
+                // (MASTER is the host's parameter here: the labels leave its bindings out)
+                ui.map_profile = v.profile.clone().map(|mut p| {
+                    p.bindings.retain(|b| b.to != Target::Master);
+                    p
+                });
+            }
+            (v.keys_mode, v.learning, v.down, v.enc, v.save.take(), v.labels, v.msg.take())
+        };
+        if map_labels != ui.map_labels {
+            ui.map_labels = map_labels;
+            ui.labels = !ui.labels;
+        }
+        if let Some(msg) = map_msg {
+            ui.msg = msg;
+            ui.msg_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+        }
+        if let Some(p) = map_save {
+            // a learned profile, to the user's profiles (here, not on the machine's thread)
+            match fm1_map::save_user(&p) {
+                Ok(_) => ui.msg = format!("Learned: saved as {}", p.name),
+                Err(e) => ui.msg = format!("Learned, not saved: {e}"),
+            }
+            ui.msg_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(4));
+        }
+        if ui.profiles.is_empty() {
+            ui.profiles = fm1_map::all_profiles().0;
+        }
+        egui::TopBottomPanel::top("controller").show(ctx, |bar| {
+            bar.horizontal_wrapped(|bar| {
+                bar.label("Controller").on_hover_text("A MIDI controller as the FM-1's panel: its pads hold the buttons, its knobs turn the encoders, its keys press the panel's keys (or go to the firmware's MIDI IN). Profiles are JSON; yours are saved in your settings folder's fm1-emu\\controllers");
+                let now = ui.map_profile.as_ref().map(|p| p.name.clone());
+                let mut pick: Option<Option<Profile>> = None;
+                egui::ComboBox::from_id_salt("profile").width(170.0)
+                    .selected_text(now.clone().unwrap_or_else(|| "Off (MIDI IN only)".into()))
+                    .show_ui(bar, |menu| {
+                        if menu.selectable_label(now.is_none(), "Off (MIDI IN only)").clicked() {
+                            pick = Some(None);
+                        }
+                        for p in &ui.profiles {
+                            if menu.selectable_label(now.as_deref() == Some(p.name.as_str()), p.name.as_str()).on_hover_text(p.notes.as_str()).clicked() {
+                                pick = Some(Some(p.clone()));
+                            }
+                        }
+                    });
+                if let Some(p) = pick {
+                    {
+                        let mut c = params.controller.lock().unwrap();
+                        c.chosen = true;
+                        c.profile = p.clone();
+                    }
+                    map::remember(p.as_ref());
+                    let _ = link.cmds.send(Cmd::Map(p));
+                }
+                if bar.small_button("⟳").on_hover_text("Read the profiles again (after editing a file)").clicked() {
+                    ui.profiles = fm1_map::all_profiles().0;
+                }
+                let on = ui.map_profile.is_some();
+                if on {
+                    bar.label("Keys");
+                    egui::ComboBox::from_id_salt("keys-mode").width(100.0).selected_text(keys_mode.name()).show_ui(bar, |menu| {
+                        for k in [KeysMode::Panel, KeysMode::Midi, KeysMode::Auto] {
+                            if menu.selectable_label(k == keys_mode, k.name()).clicked() && k != keys_mode {
+                                let _ = link.cmds.send(Cmd::KeysMode(k));
+                            }
+                        }
+                    }).response.on_hover_text("Panel keys: your keys press the FM-1's keys (every firmware, every layer). MIDI IN: they play the firmware over MIDI, with your keyboard's range. Auto: MIDI IN, but the panel's keys while a function button (FX..SEQ) is held");
+                    let learn = bar.toggle_value(&mut ui.learn_mode, if learning.is_some() { "Learning…" } else { "Learn" })
+                        .on_hover_text("Click a knob, button or key on the panel, then move or press a control of your controller. A key: press the note that should play it");
+                    if learn.changed() {
+                        ui.labels |= ui.learn_mode;
+                        if !ui.learn_mode {
+                            let _ = link.cmds.send(Cmd::Learn(None));
+                        }
+                    }
+                    if let Some(t) = learning {
+                        bar.label(format!("{t}: move a control"));
+                        if bar.small_button("Unbind").clicked() {
+                            let t = if matches!(t, fm1_map::Target::Key(_)) { fm1_map::Target::Keys } else { t };
+                            let _ = link.cmds.send(Cmd::Unbind(t));
+                        }
+                    }
+                    bar.checkbox(&mut ui.labels, "Labels").on_hover_text("Show what each panel control is bound to");
+                }
+            });
+        });
+
 
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x18, 0x19, 0x1b))).show(ctx, |c| {
             let avail = c.available_rect_before_wrap();
@@ -173,7 +284,11 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     let (x, y) = at(p);
                     let ctl = hit(smk, x, y);
                     let mut g = Grab { ctl, last_y: y, acc: 0.0, held: -1 };
-                    if (100..200).contains(&ctl) {
+                    let learn_target = if ui.learn_mode && !smk { map::target_of_hit(ctl) } else { None };
+                    if let Some(t) = learn_target {
+                        let _ = link.cmds.send(Cmd::Learn(Some(t)));
+                        g.ctl = -1; // (learning, not pressing)
+                    } else if (100..200).contains(&ctl) {
                         g.held = ctl - 100;
                         if smk && g.held < NKEY {
                             velocity(&link, panel_smk_hit_y(x, y));
@@ -284,13 +399,18 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
             } else {
                 let st = panel::State {
                     lcd: &lcd,
-                    enc_clicks: &std::array::from_fn(|i| ui.enc_clicks[i]),
+                    enc_clicks: &std::array::from_fn(|i| ui.enc_clicks[i] + map_enc[i]),
                     pot: (params.master.value() * 1023.0).round() as u16,
-                    down: &std::array::from_fn(|i| ui.down[i]),
+                    down: &std::array::from_fn(|i| ui.down[i] || map_down[i]),
                     leds: &leds,
                     turning: &std::array::from_fn(|i| ui.turning[i]),
                 };
                 panel::draw(&mut ui.buf, &ui.base, &st, panel::Theme::by_name("default"));
+                if ui.labels {
+                    if let Some(p) = &ui.map_profile {
+                        crate::labels::draw(&mut ui.buf, p, learning);
+                    }
+                }
             }
             for t in ui.turning.iter_mut() {
                 *t = t.saturating_sub(1);
@@ -414,7 +534,6 @@ fn file_job(action: FileAction, mut path: std::path::PathBuf, params: Arc<Fm1Par
                     link.cmds.send(Cmd::Load { firmware: data.firmware, sectors: data.sectors, reply: tx })
                         .map_err(|_| "the machine stopped".to_owned())?;
                     rx.recv().map_err(|_| "the machine stopped while loading".to_owned())??;
-                    *link.running.lock().unwrap() = Some(firmware.pkg);
                     Ok(format!("Loaded {}", firmware.name))
                 }
                 FileAction::Export => {

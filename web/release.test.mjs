@@ -98,6 +98,7 @@ test('the pages carry the release blocks, and a rerun changes nothing', () => {
   assert.match(index, /<!-- release:pill -->[\s\S]*<!-- \/release:pill -->/);
   assert.match(index, /<section id="release"[^>]*><!-- release:section -->[\s\S]*<!-- \/release:section --><\/section>/);
   assert.match(read('web/smk37/index.html'), /<!-- release:pill -->[\s\S]*<!-- \/release:pill -->/);
+  assert.match(read('web/dev/index.html'), /<!-- release:pill -->[\s\S]*<!-- \/release:pill -->/);
   const once = apply(index, blocks);
   assert.equal(apply(once, blocks), once);
   assert.throws(() => apply('<p>no blocks</p>', blocks), /no <!-- release/);

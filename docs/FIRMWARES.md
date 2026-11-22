@@ -1,6 +1,6 @@
 # Firmwares that run in the emulator
 
-200 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
+201 community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here, a few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/), FM-1 SID, and
 M-VAVE's stock firmware. Each name opens [the page](https://joakimeriksson.github.io/fm1-emu/) with
 that firmware picked (press Start); each author links to the firmware's source.
@@ -13,7 +13,8 @@ Generated from `web/firmwares.json` and `web/smk37/firmwares.json` by `node tool
 <!-- firmwares: node tools/readme_firmwares.mjs -->
 | Firmware (opens it on the page) | By | What it is |
 |---|---|---|
-| [M-VAVE stock firmware](https://joakimeriksson.github.io/fm1-emu/?fw=mvave) | [M-VAVE](https://github.com/joakimeriksson/fm1-emu/blob/master/docs/stock-firmware.md) | The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. Bring your own `FM-1.fwsc`. |
+| [M-VAVE stock firmware V15](https://joakimeriksson.github.io/fm1-emu/?fw=mvave-v15) | [M-VAVE](https://github.com/m-vave/fm1_open) | The firmware the FM-1 ships with, version 15: a DX7-style FM synth, both cores running. |
+| [M-VAVE stock firmware (your copy)](https://joakimeriksson.github.io/fm1-emu/?fw=mvave) | [M-VAVE](https://github.com/joakimeriksson/fm1-emu/blob/master/docs/stock-firmware.md) | M-VAVE's current version (V16 since October 2026), the one its update page installs: a DX7-style FM synth, both cores running. Bring your own `FM-1.fwsc`. |
 | [Felucca 1.8.2](https://joakimeriksson.github.io/fm1-emu/?fw=felucca) | [hugelton](https://github.com/hugelton/Felucca) | The original open firmware: a four-operator FM synth with sequencer, arpeggiator and effects. |
 | [Felucca [Salt] 0.9-salt14](https://joakimeriksson.github.io/fm1-emu/?fw=felucca-salt) | [ChanceTheMaker](https://github.com/ChanceTheMaker/Felucca) | A Felucca fork with its own sound and editor changes. |
 | [386DX 2.0](https://joakimeriksson.github.io/fm1-emu/?fw=386dx) | [seajaysec](https://github.com/seajaysec/386-DX-FM1-KaraokeBot) | A karaoke robot with a band: it sings songs from karaoke and MIDI files, or lines you type, to the notes you play. |

@@ -212,7 +212,7 @@ fn resources_n(file: &[u8], blocks: usize) -> Option<(usize, Vec<u8>)> {
         MAGIC_BASE => u32le(e, RES_AT) as usize,
         _ => return None,
     };
-    if base % 0x1000 != 0 || base < RES_LO || base >= RES_HI || data.len() > RES_HI - base {
+    if base % 0x1000 != 0 || !(RES_LO..RES_HI).contains(&base) || data.len() > RES_HI - base {
         return None;
     }
     let len = u32le(data, 4) as usize;
@@ -252,6 +252,41 @@ fn chip_key(blob: &[u8]) -> u16 {
     key
 }
 
+/// An `isd_config.ini`'s 32-byte blob and its CRC-16, where `h` is that file's head and they lie in
+/// the image (a head's offset is the package's word: any 32 bits).
+fn config_at<'a>(flash: &'a [u8], h: &Head) -> Option<&'a [u8]> {
+    if h.name != "isd_config.ini" {
+        return None;
+    }
+    flash.get(h.offset..h.offset.checked_add(34)?)
+}
+
+/// The chip key of a whole flash image as installed (the boot area's `isd_config.ini`, as
+/// `unpack` finds it; one whose CRC checks first). None: no such file.
+pub fn flash_key(flash: &[u8]) -> Option<u16> {
+    let (mut key, mut unchecked) = (None, None);
+    let mut o = 32;
+    while o + 32 <= flash.len() && key.is_none() {
+        let mut e = [0u8; 32];
+        e.copy_from_slice(&flash[o..o + 32]);
+        unmask(&mut e, 0xffff);
+        let h = head(&e, 0);
+        if let Some(c) = config_at(flash, &h) {
+            let k = chip_key(c);
+            if crc16(&c[..32]) == u16le(c, 32) {
+                key = Some(k);
+            } else {
+                unchecked = Some(k);
+            }
+        }
+        if h.last {
+            break;
+        }
+        o += 32;
+    }
+    key.or(unchecked)
+}
+
 fn unscramble(buf: &mut [u8], from: usize, len: usize, base: usize, key: u16) {
     let mut i = 0;
     while i < len {
@@ -283,9 +318,9 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
     while o + 32 <= flash.len() {
         unmask(&mut flash[o..o + 32], 0xffff);
         let h = head(&flash, o);
-        if h.name == "isd_config.ini" && h.offset + 34 <= flash.len() {
-            let k = chip_key(&flash[h.offset..h.offset + 32]);
-            if crc16(&flash[h.offset..h.offset + 32]) == u16le(&flash, h.offset + 32) {
+        if let Some(c) = config_at(&flash, &h) {
+            let k = chip_key(c);
+            if crc16(&c[..32]) == u16le(c, 32) {
                 key = Some(k);
             } else {
                 key_unchecked = Some(k);
@@ -302,11 +337,18 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
     let (Some(key), Some(area)) = (key.or(key_unchecked), area) else {
         return Err("no chip key or app area in the flash image".into());
     };
-    let first = ((area + 32 + 31) & !31) - area;
+    // (the area's head, to the end of the 32-byte block of the image it ends in: 32 bytes of an
+    // area on a block, as every package's is, up to 63 of one that is not)
+    let first = 32 + (32 - area % 32) % 32;
+    let past = || "app area runs past the flash image".to_string();
+    // (where the area starts and how long it is are the package's words: any 32 bits)
+    if area.checked_add(first).is_none_or(|e| e > flash.len()) {
+        return Err(past());
+    }
     unscramble(&mut flash, area, first, area, key);
     let size = head(&flash, area).size;
-    if area + size > flash.len() {
-        return Err("app area runs past the flash image".into());
+    if area.checked_add(size).is_none_or(|e| e > flash.len()) {
+        return Err(past());
     }
     if size > first {
         unscramble(&mut flash, area + first, size - first, area, key);
@@ -339,7 +381,7 @@ fn unpack_n(file: &[u8], blocks: usize) -> Result<Unpacked, String> {
     if end > area + size {
         let blk = area + first + ((area + size).saturating_sub(area + first) & !31);
         let mut t = raw[..end].to_vec();
-        unscramble(&mut t, blk, end - blk, area, key);
+        unscramble(&mut t, blk, end.saturating_sub(blk), area, key);
         flash[area + size..end].copy_from_slice(&t[area + size..end]);
     }
     let res = resources_n(file, blocks);
@@ -498,6 +540,10 @@ pub fn full_flash(raw: &[u8], size: usize) -> Vec<u8> {
 /// Put the default bank into the USR area (laid out as `layout`) if no voice there was ever
 /// written. Returns whether it did.
 pub fn usr_fill_defaults(flash: &mut [u8], usr: usize, layout: UsrLayout) -> bool {
+    // (the area's offset is the package's word: one past the chip has no bank)
+    if usr > flash.len() {
+        return false;
+    }
     let voices = layout.voices(usr);
     let settings = layout.settings(usr);
     if settings.end > flash.len() || voices.end > flash.len() || flash[voices.clone()].iter().any(|&b| b != 0xff) {
@@ -523,6 +569,9 @@ pub fn usr_load_syx(flash: &mut [u8], usr: usize, layout: UsrLayout, syx: &[u8],
     } else {
         return Err("not a DX7 32-voice bank (4104-byte sysex or 4096 bytes)".into());
     };
+    if usr > flash.len() {
+        return Err("USR area past the flash".into());
+    }
     let n = 32.min(SLOTS.saturating_sub(first));
     let at = usr + layout.voices + first * 128;
     let s = usr + layout.settings + first * layout.settings_len;
@@ -644,6 +693,35 @@ mod tests {
         assert_eq!(resources_n(&package(&[(0, 0, flash)]), 20), None, "no entry, no region");
     }
 
+    /// The chip key found in a whole flash image (its isd_config.ini), and the boot-parameter
+    /// block as an FM-1's loaders hand it over: chip key, trim 0xF80A, MAC all 0xFF.
+    #[test]
+    fn the_boot_block_has_the_chip_key() {
+        let mut flash = vec![0xffu8; 0x1000];
+        let mut e = [0u8; 32];
+        e[4..8].copy_from_slice(&0x200u32.to_le_bytes());
+        e[14] = 1; // the last entry
+        e[16..30].copy_from_slice(b"isd_config.ini");
+        unmask(&mut e, 0xffff);
+        flash[32..64].copy_from_slice(&e);
+        let blob: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        flash[0x200..0x220].copy_from_slice(&blob);
+        let crc = crc16(&blob);
+        flash[0x220..0x222].copy_from_slice(&crc.to_le_bytes());
+        let key = chip_key(&blob);
+        assert_eq!(flash_key(&flash), Some(key));
+        assert_eq!(flash_key(&vec![0xffu8; 0x1000]), None);
+
+        use fm1_core::Bus;
+        let mut soc = crate::Soc::new(512 * 1024, vec![0; 16]);
+        let at = crate::RAM_BASE + 0x7fc00;
+        assert_eq!(crate::write_boot_info(&mut soc, at, &flash), at);
+        let mut w = |k: u32| soc.read32(at + 4 * k);
+        assert_eq!((w(0), w(1), w(2)), (at + 24, 0x4000, crate::XIP_BASE));
+        assert_eq!(w(3), key as u32 | 0xf80a << 16, "chip key, trim");
+        assert_eq!((w(4), w(5)), (u32::MAX, u32::MAX), "no MAC");
+    }
+
     #[test]
     fn container_counts_blocks_and_reads_the_identity() {
         assert_eq!(container(&header("FM-1_015", 20)), (20, "FM-1_015".to_string()));
@@ -677,5 +755,151 @@ mod tests {
         assert_eq!(usr_load_syx(&mut smk, usr, UsrLayout::SMK37, &bank, 0), Ok(32));
         assert!(smk[usr..usr + 4096].iter().all(|&b| b == 0x23));
         assert_eq!(&smk[usr + 4096 + 118..usr + 4096 + 128], b"INIT VOICE", "slot 32 kept");
+    }
+
+    /// A 32-byte JLFS head as stored plain: offset +4, size +8, flags +12, last +14, name +16.
+    fn plain_head(name: &str, offset: u32, size: u32, flags: u8, last: bool) -> [u8; 32] {
+        let mut h = [0u8; 32];
+        h[4..8].copy_from_slice(&offset.to_le_bytes());
+        h[8..12].copy_from_slice(&size.to_le_bytes());
+        h[12] = flags;
+        h[14] = last as u8;
+        h[16..16 + name.len()].copy_from_slice(name.as_bytes());
+        h
+    }
+
+    const AREA: usize = 0x100;
+    /// The plain image's words a test changes: the offsets of isd_config.ini and of the app area in
+    /// their heads, the area's size in its own, and the offsets of app.bin and USR in the area's
+    /// directory.
+    const ISD_AT: usize = 32 + 4;
+    const AREA_AT: usize = 64 + 4;
+    const SIZE_AT: usize = AREA + 8;
+    const APP_AT: usize = AREA + 32 + 4;
+    const USR_AT: usize = AREA + 96 + 4;
+
+    /// A small stock package: a 0x300-byte image with the chip key's file, the app area at 0x100
+    /// (0x100 long: app.bin, PRCT to 0x280, USR at 0xEA000), the heads masked and the area scrambled
+    /// as an updater stores them. `patch` changes the image while it is still plain.
+    fn stock_package(patch: impl Fn(&mut [u8])) -> Vec<u8> {
+        let mut img: Vec<u8> = (0..0x300u32).map(|i| (i * 13 + 5) as u8).collect();
+        img[32..64].copy_from_slice(&plain_head("isd_config.ini", 0x80, 34, 0, false));
+        img[64..96].copy_from_slice(&plain_head("app_dir_head", AREA as u32, 0x100, 0x81, true));
+        let blob: Vec<u8> = (0..32u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        img[0x80..0xa0].copy_from_slice(&blob);
+        img[0xa0..0xa2].copy_from_slice(&crc16(&blob).to_le_bytes());
+        img[AREA..AREA + 32].copy_from_slice(&plain_head("app_dir_head", 0, 0x100, 0x81, false));
+        img[AREA + 32..AREA + 64].copy_from_slice(&plain_head("app.bin", 0x80, 0x80, 0, false));
+        img[AREA + 64..AREA + 96].copy_from_slice(&plain_head("PRCT", 0, 0x280, 0, false));
+        img[AREA + 96..AREA + 128].copy_from_slice(&plain_head("USR", 0xea000, 0x12000, 0, true));
+        patch(&mut img);
+        unmask(&mut img[32..64], 0xffff);
+        unmask(&mut img[64..96], 0xffff);
+        unscramble(&mut img, AREA, 0x100, AREA, chip_key(&blob));
+        package(&[(0, 0, img)])
+    }
+
+    fn put(at: usize, v: u32) -> impl Fn(&mut [u8]) {
+        move |img| img[at..at + 4].copy_from_slice(&v.to_le_bytes())
+    }
+
+    /// Where a package's words point is the package's to say: an area, a size or a file past the
+    /// image is an error or left out, whatever the 32 bits (also where an address is 32 bits wide:
+    /// the browser), and a package cut short or with any one byte changed unpacks or fails.
+    #[test]
+    fn a_malformed_package_is_an_error_not_a_panic() {
+        let good = stock_package(|_| {});
+        let u = unpack(&good).unwrap();
+        assert_eq!((u.area, u.size, u.end, u.identity.as_str()), (AREA, 0x100, 0x280, "FM-1_015"));
+        assert_eq!(u.dir.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["app.bin", "PRCT", "USR"]);
+        assert_eq!(&u.xip[0x80..0x100], &(0x180..0x200u32).map(|i| (i * 13 + 5) as u8).collect::<Vec<_>>()[..], "the area unscrambled");
+        let st = crate::stock_from_package(&good, None).unwrap();
+        assert_eq!((st.entry, st.usr, st.app_end), (crate::XIP_BASE + 0x80, Some(0xea000), 0x280));
+        assert_eq!(&st.flash[0xea000 + 0x4000 + 118..0xea000 + 0x4000 + 128], b"EMU E.PNO ", "the bank in its USR area");
+
+        for area in [0x2f0, 0x300, 0x00ff_ff00, 0xffff_ffe0, 0xffff_fff0, u32::MAX] {
+            assert!(unpack(&stock_package(put(AREA_AT, area))).is_err(), "the area at {area:#x}");
+        }
+        for size in [0x201, 0x00ff_ff00, 0xffff_ff00, u32::MAX] {
+            assert!(unpack(&stock_package(put(SIZE_AT, size))).is_err(), "an area of {size:#x} bytes");
+        }
+        for isd in [0x2df, 0x300, 0xffff_ffde, 0xffff_ffe0, u32::MAX] {
+            assert!(unpack(&stock_package(put(ISD_AT, isd))).is_err(), "no chip key from a file at {isd:#x}");
+        }
+        for usr in [0xff000, 0x10_0000, 0xffff_0000, u32::MAX] {
+            let st = crate::stock_from_package(&stock_package(put(USR_AT, usr)), None).unwrap();
+            assert!(st.flash[0xea000..].iter().all(|&b| b == 0xff), "no bank for a USR area at {usr:#x}");
+            let mut flash = st.flash;
+            assert!(usr_load_syx(&mut flash, usr as usize, UsrLayout::FM1, &[0; 4096], 0).is_err());
+        }
+        let st = crate::stock_from_package(&stock_package(put(APP_AT, 0xffff_fff0)), None).unwrap();
+        assert_eq!(st.entry, crate::XIP_BASE.wrapping_add(0xffff_fff0));
+        // (an image that ends below the XIP window: the SFC's plain window from its start)
+        let mut soc = crate::Soc::new(64 * 1024, vec![0; 64]);
+        soc.sfc_boot(0x980f, 0x280);
+        assert_eq!(fm1_core::Bus::read32(&mut soc, 0x4030c), crate::XIP_BASE);
+
+        for n in 0..good.len() {
+            let _ = unpack(&good[..n]);
+            for flip in [0xff, 0x01, 0x80] {
+                let mut bad = good.clone();
+                bad[n] ^= flip;
+                if unpack(&bad).is_ok() {
+                    let _ = crate::stock_from_package(&bad, None);
+                }
+            }
+        }
+    }
+
+    /// The same of a firmware's own package, cut short and with a byte changed in its header, in the
+    /// image's heads, in the chip key's file, in the app area's head and directory and here and there
+    /// in the rest. The package is FM-1 SID's, in the tree as a submodule: skipped where that is
+    /// not checked out, but not in CI, which checks it out and must not pass on nothing.
+    #[test]
+    fn a_firmwares_package_cut_short_or_changed_is_an_error_or_unpacks() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fm1-sid/web/sidplayer.fwsc");
+        let pkg = match std::fs::read(path) {
+            Ok(p) => p,
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no fm1-sid/web/sidplayer.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
+        };
+        let u = unpack(&pkg).unwrap();
+        // the image in the file: its entry's offset in the stream, plus the header's 20 markers
+        let (_, entries) = directory(&pkg, 20).unwrap();
+        let image = u32le(entries.iter().find(|e| u16le(e, 0) == 0).unwrap(), 8) as usize + 20;
+        assert_eq!(&pkg[image..image + u.raw.len()], &u.raw[..]);
+        let mut at: Vec<usize> = (0..image).step_by(7).collect();
+        at.extend(image..image + 32 * 16);
+        at.extend(image + u.area..image + u.area + 32 * 12);
+        at.extend((image..pkg.len()).step_by(4099));
+        // (the chip key's file, where its head says)
+        let mut o = 32;
+        while o + 32 <= u.raw.len() {
+            let mut e = [0u8; 32];
+            e.copy_from_slice(&u.raw[o..o + 32]);
+            unmask(&mut e, 0xffff);
+            let h = head(&e, 0);
+            if h.name == "isd_config.ini" {
+                at.extend(image + h.offset..image + h.offset + 34);
+            }
+            if h.last {
+                break;
+            }
+            o += 32;
+        }
+        let mut unpacked = 0;
+        for n in at {
+            let mut bad = pkg.clone();
+            bad[n] ^= 0xff;
+            if unpack(&bad).is_ok() {
+                unpacked += 1;
+                let _ = crate::stock_from_package(&bad, None);
+            }
+        }
+        for n in (0..pkg.len()).step_by(pkg.len() / 61).chain(image - 2..image + 100).chain(image + u.area - 2..image + u.area + 70) {
+            // (cut inside the image: an error; in what follows it, as it may be)
+            assert!(unpack(&pkg[..n]).is_err() || n >= image + u.raw.len(), "cut to {n} bytes");
+        }
+        assert!(unpacked > 0, "a byte changed in the app's code still unpacks");
     }
 }

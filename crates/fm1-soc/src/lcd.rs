@@ -114,7 +114,7 @@ impl Lcd {
 
     fn take_args(&mut self) {
         if lcd_trace_on() {
-            eprintln!("lcd: cmd {:#04x} args {:02x?} (got {})", self.cmd, &self.arg, self.arg_next);
+            eprintln!("lcd: cmd {:#04x} args {:02x?} (got {})", self.cmd, self.arg, self.arg_next);
         }
         match self.cmd {
             0x2A => {
@@ -138,11 +138,9 @@ impl Lcd {
         }
         self.pixels_in_window += 1;
         let (x, y) = (self.cursor.0 as usize, self.cursor.1 as usize);
-        if x < W && y < H {
-            if self.fb[y * W + x] != px {
-                self.fb[y * W + x] = px;
-                self.revision = self.revision.wrapping_add(1);
-            }
+        if x < W && y < H && self.fb[y * W + x] != px {
+            self.fb[y * W + x] = px;
+            self.revision = self.revision.wrapping_add(1);
         }
         // advance through the window
         if self.cursor.0 >= x1 {
@@ -178,7 +176,7 @@ pub fn write_bmp(path: &str, fb: &[u16], inverted: bool) -> std::io::Result<()> 
     let size = 54 + row * h;
     let f = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut f = f;
-    f.write_all(&[b'B', b'M'])?;
+    f.write_all(b"BM")?;
     f.write_all(&size.to_le_bytes())?;
     f.write_all(&0u32.to_le_bytes())?;
     f.write_all(&54u32.to_le_bytes())?;

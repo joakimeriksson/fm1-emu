@@ -222,3 +222,47 @@ test("a try-out's sectors and input script are installed before the first quantu
   await h.p.port.onmessage({ data: { type: 'boot', seq: 3, mhz: 100, package: new Uint8Array(960).buffer, script: script.buffer } });
   assert.ok(h.messages.some(m => m.type === 'error' && m.seq === 3 && /input script/.test(m.message)));
 });
+
+// The JIT's host side is written twice: web/jit.js, which the Node checks and benchmarks import, and the copy the page
+// runs, in worklet.js (an AudioWorklet does not import modules everywhere). Both get the same blocks from the same
+// stand-in for the emulator here: what they do to its function table and what they return must not drift apart; what
+// each does of its own (how the worklet's reports its work, how jit.js's goes without) is stated below.
+test("worklet.js's own jitImports does to the emulator what web/jit.js's does", async () => {
+  const { jitImports } = await import('./jit.js');
+  // a block's module as jit_wasm.rs lays it out: env.memory and the three helpers imported, `run` exported
+  const text = (s) => [s.length, ...Buffer.from(s)];
+  const imports = [[...text('env'), ...text('memory'), 2, 0, 1], ...['h_read', 'h_write', 'h_op'].map((n) => [...text('env'), ...text(n), 0, 0])].flat();
+  const block = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 2, imports.length + 1, 4, ...imports,
+    3, 2, 1, 0, 7, 7, 1, ...text('run'), 0, 3, 10, 4, 1, 2, 0, 0x0b]);
+  const drive = (make, stats, tick = () => {}) => {
+    const memory = new WebAssembly.Memory({ initial: 1 }), did = [];
+    const table = { length: 8, get(i) { did.push(`get ${i}`); return () => {}; }, grow(n) { did.push(`grow ${n}`); this.length += n; },
+      set(i, f) { did.push(`set ${i} ${typeof f}`); tick(); } };
+    const compile = make(() => ({ memory, __indirect_function_table: table }), stats).fm1_jit_compile;
+    new Uint8Array(memory.buffer).set(block, 64);
+    const slots = [];
+    for (let i = 0; i < 300; i++) slots.push(compile(64, block.length, 5, 6, 7));   // (more than one chunk of the table)
+    slots.push(compile(0, 16, 5, 6, 7));                                            // not a module: 0, the block stays interpreted
+    return { slots, did, stats, slotsNow: table.length };
+  };
+  const fresh = () => ({ regions: 0, failed: 0, error: '', bytes: 0, tableSlots: 0, compileMs: 0, compileMaxMs: 0 });
+  const h = harness();
+  const page = drive(h.context.jitImports, fresh(), () => h.advance(2)), node = drive(jitImports, fresh());
+  assert.equal(page.slots[0], 8);
+  assert.equal(page.slots[256], 264, 'a second chunk of the table');
+  assert.equal(page.slots.at(-1), 0);
+  assert.deepEqual(page.slots, node.slots);
+  assert.deepEqual(page.did, node.did);
+  for (const k of ['regions', 'failed', 'bytes']) assert.equal(page.stats[k], node.stats[k], k);
+  assert.deepEqual([page.stats.regions, page.stats.failed, page.stats.bytes], [300, 1, 300 * block.length]);
+  // the worklet's alone: its clock (performance.now() is not in every AudioWorklet), the table's size and what failed,
+  // with what it was called, for the page's report
+  assert.equal(page.stats.compileMs, 600);
+  assert.equal(page.stats.compileMaxMs, 2);
+  assert.equal(page.stats.tableSlots, page.slotsNow);
+  assert.match(page.stats.error, /^CompileError: .* \(helpers 5, 6, 7; table 520\)$/);
+  assert.deepEqual([node.stats.tableSlots, node.stats.error], [0, '']);
+  assert.ok(node.stats.compileMs > 0);
+  // jit.js's alone: it also works with nothing to count in (smoke.mjs calls it so)
+  assert.deepEqual(drive(jitImports, undefined).slots, node.slots);
+});

@@ -137,7 +137,7 @@ fn run_eq(a: &[u32]) -> Vec<u32> {
     let con0 = ((och - 1) << 8) | (runm << 2) | (inm << 4) | (outm << 6) | ((nsec - 1) << 16) | a[7];
     for (r, v) in [
         (0, 0), (7, FLT), (0, con0), (1, chl_out << 16 | chl_in),
-        (2, ((chl_out << 16).wrapping_mul(och - 1)) | chl_in * (ch - 1)), (3, out_step << 16 | in_step),
+        (2, ((chl_out << 16).wrapping_mul(och - 1)) | (chl_in * (ch - 1))), (3, out_step << 16 | in_step),
         (4, IN), (5, OUT), (6, n - 1), (0, con0 | 1 << 30), (0, con0 | 3),
     ] {
         eq.write(&mut ram, hweq::BASE + 4 * r, v, 0);
@@ -251,7 +251,7 @@ fn run_src(a: &[u32]) -> (Vec<i16>, Vec<(u32, u32, u32)>) {
         runs.push((done, il, ol));
     }
     let out = (out_off..out_off + out_n)
-        .map(|i| (ram.rd(OUT + 2 * i & !3) >> ((2 * i & 2) * 8)) as u16 as i16)
+        .map(|i| (ram.rd((OUT + 2 * i) & !3) >> (((2 * i) & 2) * 8)) as u16 as i16)
         .collect();
     (out, runs)
 }

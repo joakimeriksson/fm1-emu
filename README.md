@@ -42,7 +42,9 @@ keeps USB, the installers and the rescue.
 The community firmwares: every one on [the FM-1 Firmware Hub](https://thefirmwarehub.com/) that
 runs here (its packages, fetched from the Hub; `tools/hub_catalog.mjs` follows its catalog), and a
 few more from [fm1-editor.com/firmware](https://fm1-editor.com/firmware/). Also FM-1 SID, and
-M-VAVE's stock firmware (V13 and V15) with both CPU cores running. The ones the Hub doesn't list
+M-VAVE's stock firmware with both CPU cores running (V13, V15 and V16 tested): V15 plays from the
+Hub's copy of the recovery image M-VAVE publishes under Apache-2.0 in its
+[FM1 Open](https://github.com/m-vave/fm1_open) SDK, the current one from your own `FM-1.fwsc`. The ones the Hub doesn't list
 are our own list, `web/firmwares-own.json`: add a firmware there, and the tool appends it. The page
 also lists, last and marked as not yet run here, whatever else the Hub has a package for, so a new
 firmware is playable the day it is published. **The list, each firmware with its author and a
@@ -67,6 +69,11 @@ driver: Web MIDI on the page (Chrome, Edge, Firefox), any MIDI input natively. M
 firmware listens on channel 2 in the emulator (not yet checked on a real FM-1); Felucca plays
 its parts on channels 1–4.
 
+A MIDI controller can also be the FM-1's panel, natively (fm1-live and the plugin): its pads
+hold the buttons, its knobs turn the encoders and MASTER, its keys press the panel's keys or go
+to MIDI IN, with MIDI learn for any control. Profiles are JSON; one for the Akai MPK mini 3 and
+a generic one come with it. See [crates/fm1-map](crates/fm1-map/README.md).
+
 ## The SMK-37
 
 M-VAVE's SMK-37 (Pro / Elite, the MKE-P37 and the Donner Starrykey 37 Play share its hardware) is a
@@ -87,7 +94,7 @@ Its firmwares, each with its author: [docs/FIRMWARES.md](docs/FIRMWARES.md#the-s
 
 ## On your computer
 
-**Download** `fm1-live` for macOS (Apple silicon and Intel) or Linux (ARM64, x86-64) from
+**Download** `fm1-live` for macOS (Apple silicon), Windows (x86-64) or Linux (ARM64, x86-64) from
 [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest), and play a firmware
 package: `./fm1-live --fwsc felucca.fwsc`. Or build it from a checkout:
 
@@ -171,7 +178,7 @@ other synth:
   the heaviest at about 1.5x.
 
 **Download it** from [the releases](https://github.com/joakimeriksson/fm1-emu/releases/latest):
-a zip for Macs with Apple silicon or Intel (AU, VST3 and CLAP) and one for Windows (x86-64;
+a zip for Macs with Apple silicon (AU, VST3 and CLAP) and one for Windows (x86-64;
 VST3 and CLAP). Each has an `INSTALL.txt` that says where the files go. Until a release is signed
 with an Apple Developer ID, macOS blocks it until you allow it, with one Terminal command that
 `INSTALL.txt` gives; the Windows build is unsigned too, and Windows hosts load it as it is.
@@ -258,10 +265,13 @@ its first users, the rounds that made it work there, and what fm1-dock's probes 
 
 - `crates/`: `fm1-isa` (decoder tables), `fm1-core` (CPU and JITs), `fm1-soc` (the chip and
   the board), `fm1-live` (the native synth), `fm1-emu` (batch runner), `fm1-web` (the wasm
-  build), `fm1-gdbstub`
+  build), `fm1-map` (a MIDI controller as the panel: its profiles and MIDI learn, for fm1-live
+  and the plugin), `fm1-plugin` (the CLAP plugin, and the AU and VST3 made of it; outside the
+  workspace, with its own `Cargo.lock`)
 - `web/`: the page; `web/fwsc.js` unpacks the update packages
 - `docs/`: the hardware notes (`recon.md`), the instruction set (`isa-notes.md`), M-VAVE's
-  firmware (`stock-firmware.md`); `PLAN.md` is the work log
+  firmware (`stock-firmware.md`), the `FM1_*` environment variables (`environment.md`); `PLAN.md`
+  is the work log
 - `tools/`, `probes/`: ISA extraction, benchmarks, differential test programs
 - `fm1-sid/`: the SID study and player firmware, [joakimeriksson/fm1-sid](https://github.com/joakimeriksson/fm1-sid) as a submodule
   (its own README; `git submodule update --init` after a plain clone)

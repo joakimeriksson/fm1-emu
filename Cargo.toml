@@ -4,9 +4,9 @@ members = [
     "crates/fm1-isa",
     "crates/fm1-core",
     "crates/fm1-soc",
-    "crates/fm1-gdbstub",
     "crates/fm1-emu",
     "crates/fm1-live",
+    "crates/fm1-map",
     "crates/fm1-web",
 ]
 # the plugin is a workspace of its own (its GUI and plugin dependencies)

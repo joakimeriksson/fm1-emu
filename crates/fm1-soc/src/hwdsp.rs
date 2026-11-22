@@ -54,6 +54,12 @@ pub struct HwDsp {
 }
 
 impl HwDsp {
+    /// A chip reset: the unit as at power-on (its registers 0, no job done). The jobs it ran
+    /// still count.
+    pub fn chip_reset(&mut self) {
+        *self = HwDsp { jobs: self.jobs, ..Default::default() };
+    }
+
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
         match addr {
             0x1ee0400 => {
@@ -80,11 +86,12 @@ impl HwDsp {
                 if start {
                     let n = ((v >> 8) & 0xff).max(1);
                     let mut cost = 0u64;
+                    let mut room = WRITE_WORK;
                     for i in 0..n {
                         cost += if v & 8 != 0 {
-                            vector(m, self.cadr.wrapping_add(32 * i), self.cnst)
+                            vector(m, self.cadr.wrapping_add(32 * i), self.cnst, &mut room)
                         } else {
-                            fft_job(m, self.cadr.wrapping_add(16 * i))
+                            fft_job(m, self.cadr.wrapping_add(16 * i), &mut room)
                         };
                     }
                     self.jobs += n as u64;
@@ -101,7 +108,34 @@ impl HwDsp {
     }
 }
 
+/// The most one CON write makes the host do, in element operations (a vector job's nlen x nloop,
+/// an FFT's `fft_work`): 2^24, which is one vector job of the largest nlen and nloop a descriptor
+/// can say (4095 x 4095) and more than 255 FFTs of the SDK's largest size. A job in the row that
+/// would go past it is not run: it reads and writes nothing and takes the cycles it would have.
+/// (The fields are the firmware's words: 255 descriptors of 4095 x 4095 elements, or of a prime
+/// number of points, kept the host busy for minutes.)
+pub const WRITE_WORK: u64 = 1 << 24;
+/// The most one FFT may come to (`fft_work`): 2^20, 23 times the SDK's largest (2048 points:
+/// 45,056; its sizes are 10 to 2048 points with the factors 2, 3 and 5, tools/hwdsp.py's table).
+/// Past it are only sizes with a prime factor in the hundreds, a prime N from 1031 on.
+pub const FFT_WORK: u64 = 1 << 20;
+
 // ---- FFT ----------------------------------------------------------------------------------
+
+/// What `dft` does for N points: N rotations for each prime factor's size at that factor's level,
+/// N times the sum of N's prime factors (a prime N: N x N).
+pub fn fft_work(n: usize) -> u64 {
+    let (mut m, mut sum, mut p) = (n, 0u64, 2);
+    while m > 1 {
+        if m.is_multiple_of(p) {
+            sum += p as u64;
+            m /= p;
+        } else {
+            p += 1;
+        }
+    }
+    n as u64 * sum
+}
 
 /// (N, real, inverse) of an FFT con word
 pub fn fft_shape(con: u32) -> (usize, bool, bool) {
@@ -149,7 +183,7 @@ pub fn dft(x: &[(f64, f64)], inverse: bool) -> Vec<(f64, f64)> {
     if n <= 1 {
         return x.to_vec();
     }
-    let p = (2..=n).find(|p| n % p == 0).unwrap();
+    let p = (2..=n).find(|p| n.is_multiple_of(*p)).unwrap();
     let m = n / p;
     let subs: Vec<Vec<(f64, f64)>> = (0..p)
         .map(|r| dft(&(0..m).map(|k| x[k * p + r]).collect::<Vec<_>>(), inverse))
@@ -205,8 +239,13 @@ pub fn fft(con: u32, input: &[i32]) -> Vec<i32> {
     }
 }
 
-fn fft_job(m: &mut impl Mem, d: u32) -> u64 {
+fn fft_job(m: &mut impl Mem, d: u32, room: &mut u64) -> u64 {
     let con = m.rd(d);
+    let work = fft_work(fft_shape(con).0);
+    if work > FFT_WORK.min(*room) {
+        return fft_cycles(con); // (not run: `WRITE_WORK`, `FFT_WORK`)
+    }
+    *room -= work;
     let (iadr, oadr) = (m.rd(d.wrapping_add(4)), m.rd(d.wrapping_add(8)));
     let (ni, no) = fft_words(con);
     let input: Vec<i32> = (0..ni).map(|k| m.rd(iadr.wrapping_add(4 * k as u32)) as i32).collect();
@@ -286,11 +325,12 @@ fn rnd(x: i128, q: i32) -> i128 {
     if q <= 0 {
         return x << (-q).min(64);
     }
-    let a = (x.abs() + (1i128 << (q - 1))) >> q.min(120);
-    if x < 0 { -a } else { a }
+    // (wrapping: a product of two 64-bit elements at their ends with a q past 120 leaves 128 bits)
+    let a = x.wrapping_abs().wrapping_add(1i128 << (q - 1)) >> q.min(120);
+    if x < 0 { a.wrapping_neg() } else { a }
 }
 
-fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
+fn vector(m: &mut impl Mem, d: u32, cnst: u32, room: &mut u64) -> u64 {
     let con = m.rd(d);
     let (xa, ya, za) = (m.rd(d.wrapping_add(4)), m.rd(d.wrapping_add(8)), m.rd(d.wrapping_add(12)));
     let (c0, c1) = (m.rd(d.wrapping_add(16)), m.rd(d.wrapping_add(20)));
@@ -305,6 +345,12 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
     let accum = con & VEC_ACC != 0;
     let cpx = mode == 2 || (mode == 3 && con & VEC_CPX_QDT != 0);
     let count = if mode == 2 { nlen } else if cpx { nlen / 2 } else { nlen };
+    let per = if con & VEC_MAC32 != 0 { 45 } else { 33 };
+    let cycles = 30 + (nlen as u64) * (nloop as u64) * per / 10;
+    if nlen as u64 * nloop as u64 > *room {
+        return cycles; // (not run: `WRITE_WORK`)
+    }
+    *room -= nlen as u64 * nloop as u64;
     for l in 0..nloop {
         let (x0, y0, z0) = (xa.wrapping_add(l * xi), ya.wrapping_add(l * yi), za.wrapping_add(l * zi));   // (l < 4096, inc < 1024)
         let (mut acc, mut acc_i) = (0i128, 0i128);
@@ -318,16 +364,18 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                 if con & VECY_CONJ != 0 {
                     yim = -yim;
                 }
-                let (re, im) = (yr * xr - yim * xim, yr * xim + yim * xr);
+                // (64-bit elements at -2^63 make 2^127: sums of products wrap in the 128 bits, as the
+                // accumulators do, which keep 64)
+                let (re, im) = ((yr * xr).wrapping_sub(yim * xim), (yr * xim).wrapping_add(yim * xr));
                 if accum {
-                    acc += re;
-                    acc_i += im;
+                    acc = acc.wrapping_add(re);
+                    acc_i = acc_i.wrapping_add(im);
                     continue;
                 }
                 let (mut r, mut s) = (rnd(re, q), rnd(im, q));
                 if con & VEC_MAC32 != 0 {
                     let (zr, zim) = (load(m, z0, wz, 2 * i) as i128, load(m, z0, wz, 2 * i + 1) as i128);
-                    (r, s) = if sub { (zr - r, zim - s) } else { (zr + r, zim + s) };
+                    (r, s) = if sub { (zr.wrapping_sub(r), zim.wrapping_sub(s)) } else { (zr.wrapping_add(r), zim.wrapping_add(s)) };
                 }
                 store(m, z0, wz, 2 * i, sat(r, wz));
                 store(m, z0, wz, 2 * i + 1, sat(s, wz));
@@ -350,13 +398,13 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                         let v = if sub { x - t } else { x + t };
                         (if wz == 2 { wrap(v, wz) } else { sat(v, wz) }) as i128
                     } else if accum {
-                        acc += y * x;
+                        acc = acc.wrapping_add(y * x);
                         continue;
                     } else {
                         let mut r = rnd(y * x, q);
                         if con & VEC_MAC32 != 0 {
                             let z = load(m, z0, wz, i) as i128;
-                            r = if sub { z - r } else { z + r };
+                            r = if sub { z.wrapping_sub(r) } else { z.wrapping_add(r) };
                         }
                         sat(r, wz) as i128
                     }
@@ -366,14 +414,14 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
                         if con & VEC_MAX != 0 { x.max(k) } else { x.min(k) }
                     } else if cpx {
                         let xim = load(m, x0, wx, 2 * i + 1) as i128;
-                        x * x + xim * xim
+                        (x * x).wrapping_add(xim * xim)
                     } else if con & VEC_QDT != 0 {
                         if con & VEC_CONST_MUL != 0 { x * k } else { x * x }
                     } else {
                         x
                     };
                     if accum {
-                        acc += p;
+                        acc = acc.wrapping_add(p);
                         continue;
                     }
                     sat(rnd(p, q), wz) as i128
@@ -395,8 +443,7 @@ fn vector(m: &mut impl Mem, d: u32, cnst: u32) -> u64 {
             }
         }
     }
-    let per = if con & VEC_MAC32 != 0 { 45 } else { 33 };
-    30 + (nlen as u64) * (nloop as u64) * per / 10
+    cycles
 }
 
 #[cfg(test)]
@@ -431,7 +478,7 @@ mod tests {
     #[test]
     fn the_inverse_divides_by_a_power_of_two() {
         // N = 120: by 64, the SDK header's "res x 1.875" (measured)
-        let x: Vec<i32> = (0..240).map(|k| ((k * 7919) % 2001) as i32 - 1000).collect();
+        let x: Vec<i32> = (0..240).map(|k| ((k * 7919) % 2001) - 1000).collect();
         let back = fft(con(120, false, true), &fft(con(120, false, false), &x));
         for (a, b) in back.iter().zip(&x) {
             assert!((*a as f64 - *b as f64 * 120.0 / 64.0).abs() <= 1.0, "{a} {b}");
@@ -496,5 +543,76 @@ mod tests {
         ram.0[0x800 / 4] = -2144644789i32 as u32;
         vjob(&mut ram, &mut u, [w32, 0x400, 0x800, 0xc00, (1 << 12) | 1, 0, 0, 0]);
         assert_eq!(ram.0[0xc00 / 4] as i32, 4055520);
+    }
+
+    #[test]
+    fn vector_sums_of_64_bit_products_wrap() {
+        // a complex product of 64-bit elements all at -2^63: the real part 2^126 - 2^126, the
+        // imaginary 2^126 + 2^126, one past what 128 bits hold signed: wrapped, then saturated to z
+        let mut ram = Ram(vec![0; 4096]);
+        let mut u = HwDsp::default();
+        let w64 = (3 << 6) | (3 << 8) | (3 << 10);
+        for a in [0x400, 0x800] {
+            for k in 0..2 {
+                (ram.0[a / 4 + 2 * k], ram.0[a / 4 + 2 * k + 1]) = (0, 0x8000_0000);
+            }
+        }
+        vjob(&mut ram, &mut u, [w64 | 2, 0x400, 0x800, 0xc00, (1 << 12) | 1, 0, 0, 0]);
+        assert_eq!(&ram.0[0xc00 / 4..0xc00 / 4 + 4], &[0, 0, 0, 0x8000_0000]);
+        // |x|^2 of the same, and the rounding of what 128 bits can hold, at the largest q
+        vjob(&mut ram, &mut u, [w64 | 3 | VEC_CPX_QDT, 0x400, 0x800, 0xc00, (1 << 12) | 2, 0, 0, 0]);
+        assert_eq!(&ram.0[0xc00 / 4..0xc00 / 4 + 2], &[0, 0x8000_0000]);
+        for x in [i128::MAX, i128::MIN, 1 << 126] {
+            let _ = (rnd(x, 127), rnd(x, 1), rnd(x, -128));
+        }
+    }
+
+    /// A RAM that counts its reads and writes, and stops a job that goes on for ever.
+    struct Counted(Ram, u64);
+    impl Mem for Counted {
+        fn rd(&mut self, a: u32) -> u32 {
+            self.1 += 1;
+            assert!(self.1 < 1 << 28, "the unit runs on");
+            self.0.rd(a)
+        }
+        fn wr(&mut self, a: u32, v: u32) {
+            self.1 += 1;
+            self.0.wr(a, v)
+        }
+    }
+
+    #[test]
+    fn a_con_write_does_a_bounded_amount_of_work() {
+        assert_eq!((fft_work(2048), fft_work(960), fft_work(1021), fft_work(1031)), (2048 * 22, 960 * 20, 1021 * 1021, 1031 * 1031));
+        assert!(fft_work(2048) * 255 < WRITE_WORK && fft_work(1021) < FFT_WORK && fft_work(1031) > FFT_WORK);
+        // 255 vector descriptors of 4095 x 4095 elements each (the same one, 255 times): the first
+        // runs, all of it; the rest are past what one write does
+        let mut ram = Counted(Ram(vec![0; 0x5000]), 0);
+        let mut u = HwDsp::default();
+        let w32 = (2 << 6) | (2 << 8) | (2 << 10);
+        for d in 0..255 {
+            for (i, w) in [w32 | 1, 0x4000, 0x8000, 0xc000, (4095 << 12) | 4095, 0, 0, 0].iter().enumerate() {
+                ram.0.0[0x40 + 8 * d + i] = *w;
+            }
+        }
+        (ram.0.0[0x4000 / 4], ram.0.0[0x8000 / 4]) = (7, 6);
+        u.write(&mut ram, 0x1ee0404, 0x100, 0);
+        u.write(&mut ram, 0x1ee0400, (255 << 8) | (1 << 6) | (1 << 3) | 1, 0);
+        assert_eq!(ram.0.0[0xc000 / 4], 42, "the first job ran");
+        assert!(ram.1 > 3 * 4095 * 4095 && ram.1 < 4 * 4095 * 4095, "and only it: {} accesses", ram.1);
+        assert_eq!(u.jobs, 255);
+        assert_eq!(u.read(0x1ee0400, 0) & 0x80, 0, "busy for the cycles of all of them");
+        // an FFT of a prime number of points past `FFT_WORK` is not run (its output stays); one
+        // under it is
+        for (n, runs) in [(1031, false), (1021, true), (2048, true)] {
+            let mut ram = Counted(Ram(vec![0; 16384]), 0);
+            (ram.0.0[0x100 / 4], ram.0.0[0x100 / 4 + 1], ram.0.0[0x100 / 4 + 2]) = (con(n, false, false), 0x1000, 0x8000);
+            (ram.0.0[0x1000 / 4], ram.0.0[0x8000 / 4]) = (5, 0x7777);
+            u.write(&mut ram, 0x1ee0404, 0x100, 0);
+            u.write(&mut ram, 0x1ee0400, (1 << 8) | (1 << 6) | 1, 0);
+            assert_eq!(ram.0.0[0x8000 / 4] == 5, runs, "{n} points");
+            assert_eq!(ram.0.0[0x8000 / 4] == 0x7777, !runs, "{n} points");
+            assert_ne!(u.read(0x1ee0400, 1 << 40) & 0x80, 0, "done either way");
+        }
     }
 }

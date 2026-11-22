@@ -9,14 +9,17 @@ on:
   pull_request:
   workflow_dispatch:
 
+# (publishing rights are the deploy job's alone)
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
+# One run at a time for each branch: master's runs build and deploy in the order they were pushed
+# (with only the deploy jobs in a group, a slower build of an older push would deploy last and
+# leave the site behind master). A pull request has its own group, so its tests wait behind no
+# other run, and a new push to it replaces the run of the one before.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: pages-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -35,10 +38,7 @@ jobs:
 
       # The CPU, decoder and peripherals (fm1-live needs ALSA headers, the tests do not).
       - name: Unit tests
-        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web
-
-      - name: Browser code regression tests
-        run: node --test web/*.test.mjs
+        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web -p fm1-map
 
       # The README's table of firmwares (links that open each one on the page) matches the catalog.
       - name: README firmware table
@@ -47,6 +47,14 @@ jobs:
       - name: Build the site
         run: tools/build_site.sh _site
 
+      # After the build: the wasm JIT's self-test needs the wasm, and skips itself without one.
+      # A test that skips here checks nothing, so none may.
+      - name: Browser code regression tests
+        run: |
+          set -o pipefail
+          FM1_WASM=_site/fm1_web.wasm node --test --test-reporter=tap web/*.test.mjs | tee tests.tap
+          if grep -n '# SKIP' tests.tap; then echo "::error::a test skipped itself"; exit 1; fi
+
       # The emulator's wasm boots a real firmware (Felucca, fetched from its author's site like
       # the page does) to audio and a screen, and a MIDI note sounds.
       - name: Test the emulator page
@@ -54,6 +62,24 @@ jobs:
 
       - name: WASM save round trip
         run: node web/persistence.wasm.mjs _site
+
+      # The wasm JIT against the wasm interpreter (its oracle), as the jobs below do for the native
+      # JITs: the page's own build gives the same audio either way, byte for byte, and the JIT did
+      # compile. FM-1 SID's package is in the tree; Felucca and mono2k (two cores) come from their
+      # authors' sites, and one of those that could not be fetched is said, not failed.
+      - name: WASM JIT against the interpreter
+        run: |
+          node tools/fetch_firmwares.mjs felucca mono2k
+          test -f fm1-sid/web/sidplayer.fwsc
+          for pkg in fm1-sid/web/sidplayer.fwsc reference/firmwares/felucca.fwsc reference/firmwares/mono2k.fwsc; do
+            test -f "$pkg" || { echo "::warning::$pkg was not fetched: its JIT audio was not compared"; continue; }
+            FM1_WASM=_site/fm1_web.wasm FM1_FWSC=$pkg FM1_BENCH_JSON=jit.json node web/bench.mjs 240 5 jit.raw > /dev/null
+            FM1_WASM=_site/fm1_web.wasm FM1_FWSC=$pkg FM1_NO_JIT=1 node web/bench.mjs 240 5 int.raw > /dev/null
+            test "$(stat -c %s jit.raw)" -gt 100000
+            cmp jit.raw int.raw
+            node -e 'const j = require("./jit.json").jit; if (!(j.regions > 0) || j.failed) { console.error("the JIT did not run", j); process.exit(1); }'
+            echo "$pkg: $(stat -c %s jit.raw) bytes, the same with the JIT and interpreted"
+          done
 
       # The SMK-37 page's wasm boots an SMK-37 build (GHOULBOX, from genkigenki's install page)
       # as the SMK-37 board, and a key on its keybed sounds.
@@ -64,8 +90,6 @@ jobs:
       - name: Test the FM-1 SID player page
         run: node fm1-sid/web/smoke.mjs _site/fm1-sid
 
-      - if: github.event_name != 'pull_request'
-        uses: actions/configure-pages@v5
       - if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
@@ -122,8 +146,22 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libasound2-dev pkg-config
 
+      # (the two programs' own tests too: this job has the ALSA headers fm1-live builds against;
+      # two of fm1-live's boot Felucca and skip themselves without its package, so it must be there)
+      - name: Firmware for fm1-live's tests
+        run: |
+          node tools/fetch_firmwares.mjs felucca
+          test -f reference/firmwares/felucca.fwsc
+
       - name: Core tests
-        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc
+        run: cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-live -p fm1-emu
+
+      # Clippy's errors (the lints it denies: code that is wrong or does nothing), in every crate of
+      # the workspace. Its warnings are not held to: they are style, and there are some.
+      - name: Clippy's errors
+        run: |
+          rustup component add clippy
+          cargo clippy --release --workspace
 
       - name: JIT against the interpreter
         run: |
@@ -168,9 +206,13 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/configure-pages@v5
       - id: deployment
         uses: actions/deploy-pages@v4

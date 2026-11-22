@@ -36,6 +36,11 @@ pub const RAM_END: u32 = RAM + 4 * RAM_WORDS - 1;
 pub const RAM_SLOTS: u32 = 20;
 /// word 7 of a slot whose state is this model's (f64, in `HwEq::state`)
 pub const STATE_TAG: u32 = 0x5145_4d31;
+/// The most slots whose states `HwEq::state` keeps: 2^14, sixteen EQs of the largest size (16
+/// channels of 64 sections). A firmware that filters at ever new coefficient addresses would
+/// add states without end; at this many all are dropped, and a slot's next run starts from
+/// silence, as one whose state words the driver zeroed.
+const STATES_MAX: usize = 1 << 14;
 
 #[derive(Default, Clone, Debug)]
 pub struct HwEq {
@@ -46,11 +51,19 @@ pub struct HwEq {
     /// (s1, s2) of a slot, by its address
     state: std::collections::HashMap<u32, (f64, f64)>,
     pub runs: u64,
+    /// a channel's frames while a run filters them, kept so that a run allocates nothing
+    buf: Vec<f64>,
 }
 
 impl HwEq {
     pub fn new() -> Self {
         HwEq { ram: vec![0; RAM_WORDS as usize], ..Default::default() }
+    }
+
+    /// A chip reset: the registers as at power-on (0, no run done). The unit's RAM is a memory
+    /// and stays as the chip's other RAMs do, the sections' states with it; the runs still count.
+    pub fn chip_reset(&mut self) {
+        (self.regs, self.pending, self.done_at) = ([0; 8], false, 0);
     }
 
     pub fn read(&self, addr: u32, cycles: u64) -> u32 {
@@ -125,15 +138,16 @@ impl HwEq {
         let (in_step, out_step) = (self.regs[3] & 0xffff, self.regs[3] >> 16);
         let (ia, oa) = (self.regs[4], self.regs[5]);
         // the input's channels: CON2's low half is the step to the last one
-        let ch = if in_ch == 0 { 1 } else { (self.regs[2] & 0xffff) / in_ch + 1 };
+        let ch = (self.regs[2] & 0xffff).checked_div(in_ch).map_or(1, |last| last + 1);
+        let mut x = std::mem::take(&mut self.buf);
         for o in 0..och {
             let k = o % ch;
             let at = |s: u32| ia.wrapping_add(k.wrapping_mul(in_ch)).wrapping_add(s.wrapping_mul(in_step));
-            let mut x: Vec<f64> = (0..n).map(|s| load(m, at(s), fin)).collect();
+            x.clear();
+            x.extend((0..n).map(|s| load(m, at(s), fin)));
             for sec in 0..nsec {
                 let j = o * nsec + sec;
-                let c: Vec<f64> = (0..5).map(|w| f32::from_bits(self.slot_word(m, j, w)) as f64).collect();
-                let (g, c1, c2, c3, c4) = (c[0], c[1], c[2], c[3], c[4]);
+                let [g, c1, c2, c3, c4]: [f64; 5] = std::array::from_fn(|w| f32::from_bits(self.slot_word(m, j, w as u32)) as f64);
                 let at = self.slot_addr(j);
                 let tag = self.slot_word(m, j, 7);
                 let (mut s1, mut s2) = if tag == STATE_TAG {
@@ -149,6 +163,9 @@ impl HwEq {
                     s2 = g * c2 * xi + c1 * y;
                     *v = y;
                 }
+                if self.state.len() >= STATES_MAX && !self.state.contains_key(&at) {
+                    self.state.clear();
+                }
                 self.state.insert(at, (s1, s2));
                 self.slot_store(m, j, 5, (s2 as f32).to_bits());
                 self.slot_store(m, j, 6, (s1 as f32).to_bits());
@@ -158,6 +175,7 @@ impl HwEq {
                 store(m, oa.wrapping_add(o.wrapping_mul(out_ch)).wrapping_add((s as u32).wrapping_mul(out_step)), fout, *v);
             }
         }
+        self.buf = x;
         100 + (n as u64) * (och as u64) * (8 + 26 * nsec as u64)
     }
 }
@@ -212,7 +230,7 @@ mod tests {
             ram.0[0x1000 / 4 + k] = v.to_bits();
         }
         let n = x.len() as u32;
-        for (r, v) in [(1, 4 * n << 16 | 4 * n), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, n - 1), (7, 0x3000)] {
+        for (r, v) in [(1, ((4 * n) << 16) | (4 * n)), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, n - 1), (7, 0x3000)] {
             eq.write(ram, BASE + 4 * r, v, 0);
         }
         eq.write(ram, BASE, (2 << 4) | (2 << 6), 0);
@@ -263,5 +281,26 @@ mod tests {
     #[test]
     fn integers_round_half_away_and_saturate() {
         assert_eq!([int(-19.5, 16), int(19.5, 16), int(-9.75, 16), int(44560.0, 16)], [-20, 20, -10, 32767]);
+    }
+
+    #[test]
+    fn the_states_kept_are_bounded() {
+        // 16 channels of 64 sections, one frame, at 40 coefficient addresses in turn (1004 slots
+        // past the EQ's RAM each): never more than STATES_MAX states, and the EQ still runs
+        let mut ram = Ram(vec![0; 0x10_0000]);
+        let mut eq = HwEq::new();
+        let mut most = 0;
+        for k in 0..40u32 {
+            for (r, v) in [(1, 0), (2, 0), (3, 4 << 16 | 4), (4, 0x1000), (5, 0x2000), (6, 0), (7, 0x10000 + 0x8000 * k)] {
+                eq.write(&mut ram, BASE + 4 * r, v, 0);
+            }
+            let con = (63 << 16) | (15 << 8) | (2 << 4) | (2 << 6);
+            eq.write(&mut ram, BASE, con | 0x4000_0000, 0);
+            eq.write(&mut ram, BASE, con | 3, 0);
+            assert_ne!(eq.read(BASE, 1 << 40) & 0x8000_0000, 0, "run {k} done");
+            most = most.max(eq.state.len());
+        }
+        assert!(most > STATES_MAX / 2 && most <= STATES_MAX, "{most} states at most");
+        assert_eq!(eq.runs, 40);
     }
 }

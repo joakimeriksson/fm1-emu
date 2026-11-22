@@ -1,4 +1,7 @@
 /* The emulator's page: the FM-1's (index.html) and the SMK-37's (smk37/index.html) */
+/* the headline face: Archivo (SIL Open Font License, fonts/OFL.txt), its Latin letters, served from here */
+@font-face { font-family: "Archivo"; font-style: normal; font-weight: 700 900; font-stretch: 100% 125%; font-display: swap;
+             src: url("fonts/archivo-latin.woff2") format("woff2"); }
 :root { --room: #18191b; --ink: #e9e6de; --dim: #a9a7a1; --faint: #8c8a85; --text: #c9c6be; --amber: #f2a33a;
         --amber-hi: #ffc56e; --green: #7cc48a; --well: #232427; --line: #3a3b3f; --rule: #2a2b2e; --card: #1e1f22;
         --bar: #161719; color-scheme: dark; }
@@ -31,6 +34,10 @@ header.site .wrap { padding-block: 12px; display: flex; flex-wrap: wrap; align-i
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; font-size: 16px;
          letter-spacing: -.01em; }
 .brand:hover { color: var(--ink); }
+/* the name: fm1-emu, and what it is under it */
+.wordmark { display: flex; flex-direction: column; line-height: 1.1; }
+.wordmark b { font: 800 18px/1.1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: -.02em; }
+.wordmark small { font-size: 11.5px; font-weight: 400; color: var(--dim); letter-spacing: 0; }
 .logo { width: 26px; height: 26px; border-radius: 7px; color: #2a1a03; display: grid; place-items: center;
         background: linear-gradient(140deg, var(--amber-hi), var(--amber) 55%, #d8861d);
         box-shadow: 0 0 0 1px rgba(255, 197, 110, .25), 0 4px 14px -4px rgba(242, 163, 58, .55); }
@@ -75,13 +82,13 @@ main { max-width: 1360px; margin: 0 auto; padding: 20px 24px 0; display: grid; g
 .player { display: flex; flex-wrap: wrap; gap: 20px 24px; align-items: flex-start; }
 .deck { flex: 999 1 600px; min-width: 0; display: grid; gap: 12px; }
 .deck-head { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; justify-content: space-between; }
-h1 { font-size: 17px; font-weight: 600; margin: 0; }
+#title { font-size: 17px; font-weight: 600; margin: 0; }
 #status { color: var(--dim); font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
 .stage { position: relative; padding: 16px; border: 1px solid var(--rule); border-radius: 18px;
          background: radial-gradient(120% 90% at 30% 0%, #26272b 0%, #1b1c1f 70%);
          box-shadow: inset 0 1px 0 rgba(255, 255, 255, .035), 0 28px 60px -40px #000; }
-/* the whole synth in view on a laptop: as wide as the room allows below the header (--above,
-   --aspect: set by main.js; 84px: the stage's padding and the hint line), never narrower than 560px */
+/* the whole synth in view on a laptop: as wide as the room allows below what is over it in the player
+   (--above, --aspect: set by main.js; 84px: the stage's padding and the hint line), never narrower than 560px */
 canvas { display: block; width: 100%; height: auto; touch-action: none; user-select: none; margin: 0 auto;
          max-width: max(560px, calc((100svh - var(--above, 140px) - 84px) * var(--aspect, 1.56))); }
 #start { position: absolute; inset: 0; margin: auto; width: clamp(110px, 30%, 220px); height: clamp(36px, 9vw, 56px);
@@ -101,6 +108,21 @@ canvas { display: block; width: 100%; height: auto; touch-action: none; user-sel
   .stage { padding: 0; border: 0; background: none; }
   canvas { width: auto; max-width: 100%; height: calc(100svh - 12px); margin: 0 auto; }
 }
+
+/* the screen for eyes that need more (main.js): Big screen shows it again, large, above the panel;
+   Screen colours recolours both in two colours of strong contrast */
+.view { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.view button { min-height: 40px; padding: 0 16px; font-family: inherit; font-size: 15px; font-weight: 600; color: var(--ink);
+               background: var(--well); border: 1px solid var(--line); border-radius: 999px; cursor: pointer; }
+.view button:hover { border-color: var(--faint); }
+.view button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--room); }
+.view label { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 14px; }
+.view select { min-height: 40px; }
+/* as wide as the deck, and short enough that the top of the panel shows below it */
+#big { width: min(100%, max(320px, calc(100svh - var(--above, 140px) - 140px))); max-width: none; height: auto;
+       aspect-ratio: 1; margin: 0 auto; image-rendering: pixelated; touch-action: auto; background: #000;
+       border-radius: 10px; box-shadow: 0 0 0 1px #000, 0 24px 50px -30px #000; }
+#big[hidden] { display: none; }
 
 /* under the synth: one line of the essentials, then the way into the guide */
 .hint { margin: 0; color: var(--dim); font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
@@ -293,3 +315,90 @@ section li { margin: 4px 0; }
 
 /* (an element the page hides stays hidden whatever its display rule) */
 [hidden] { display: none !important; }
+
+/* ---------------------------------------------------------------- the opening: the claim, and a wall of real screens */
+.hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--rule); }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; }
+.hero-text { position: relative; z-index: 1; display: grid; gap: 18px; padding-block: 56px 60px; }
+.kicker { margin: 0; font: 600 12px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .12em;
+          text-transform: uppercase; color: var(--amber); }
+.hero h1 { margin: 0; font-family: "Archivo", -apple-system, "Helvetica Neue", Arial, sans-serif; font-weight: 900; font-stretch: 118%;
+           font-size: clamp(38px, 5.2vw, 72px); line-height: .98; letter-spacing: -.02em; text-wrap: balance; }
+.hero h1 em { font-style: normal; color: var(--amber); }
+.hero .lead { margin: 0; font-size: 18px; color: var(--text); max-width: 36em; }
+.ctas { display: flex; flex-wrap: wrap; gap: 12px; }
+.cta { display: inline-flex; align-items: center; min-height: 46px; padding: 0 22px; border-radius: 999px; border: 1px solid var(--line);
+       background: var(--well); color: var(--ink); font-weight: 600; text-decoration: none; }
+.cta:hover { color: var(--ink); border-color: #55565b; }
+.cta.primary { background: var(--amber); border-color: var(--amber); color: #2a1a03; }
+.cta.primary:hover { background: var(--amber-hi); border-color: var(--amber-hi); color: #2a1a03; }
+.facts { margin: 0; display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--dim);
+         font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.facts b { color: var(--ink); font-weight: 600; }
+/* the wall: columns of screens drifting up and down, tilted, fading at its edges. Out of the
+   layout at every width (its columns are thousands of pixels tall): beside the text from the
+   middle of the hero to its right edge, and behind the text on a narrow screen (below) */
+.hero-grid { position: relative; }
+.wall { position: absolute; top: -80px; bottom: -80px; left: calc(50% + 20px); right: -24px;
+        -webkit-mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent);
+        mask-image: linear-gradient(90deg, transparent, #000 16%, #000 86%, transparent); }
+.wall { display: flex; gap: 14px; }
+.wall .col { flex: 0 0 136px; display: flex; flex-direction: column; gap: 14px; animation: drift 120s linear infinite; }
+.wall .col:nth-child(even) { animation-direction: reverse; animation-duration: 150s; }
+.wall .col:nth-child(3n) { margin-top: -60px; }
+.wall img { width: 136px; height: 136px; border-radius: 6px; image-rendering: pixelated;
+            box-shadow: 0 0 0 1px #000, 0 10px 26px rgba(0, 0, 0, .45); }
+.wall { transform: rotate(-8deg) scale(1.15); transform-origin: 30% 50%; }
+@keyframes drift { from { transform: translateY(0); } to { transform: translateY(-50%); } }
+@media (prefers-reduced-motion: reduce) { .wall .col { animation: none; } }
+@media (max-width: 900px) {
+  .hero-grid { grid-template-columns: 1fr; }
+  .wall { inset: 0; opacity: .18; }
+  .hero-text { padding-block: 36px 40px; }
+}
+/* a phone held sideways, and a window on another site: the synth first */
+@media (max-height: 500px) and (orientation: landscape) { .hero:not(.dev-hero) { display: none; } }
+[data-embed] .hero { display: none; }
+
+/* ---------------------------------------------------------------- the firmware cards' pictures and the search */
+.finder { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-top: 18px; }
+.search { flex: 0 1 420px; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-radius: 999px;
+          background: var(--card); border: 1px solid var(--line); color: var(--dim); }
+.search:focus-within { border-color: var(--amber); }
+.search input { flex: 1; min-width: 0; background: none; border: 0; outline: none; color: var(--ink); font: inherit; }
+.cards li.has-pic { padding-top: 0; overflow: hidden; }
+.cards .pic { margin: 0 -16px 8px; aspect-ratio: 1; background: #000; cursor: pointer; }
+.cards .pic img { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+.cards li.has-pic:hover { border-color: #4a4b50; }
+.cards li[hidden] { display: none; }
+
+/* ---------------------------------------------------------------- the developer page (dev/index.html) */
+.term { margin: 0; padding: 18px 20px; overflow-x: auto; background: #0f1011; border: 1px solid var(--rule); border-radius: 14px;
+        color: var(--ink); font: 13.5px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, .03), 0 24px 50px -34px #000; }
+.term .c { color: var(--faint); }
+.term .p { color: var(--amber); user-select: none; }
+.dev-hero .term { align-self: center; }
+main.dev { display: grid; gap: 0; padding-top: 0; }
+.devsec { display: grid; gap: 14px; padding-block: 48px; border-bottom: 1px solid var(--rule); }
+.devsec:last-child { border-bottom: 0; }
+.devsec .eyebrow { color: var(--amber); }
+.devsec h2 { margin: 0; font-family: "Archivo", -apple-system, "Helvetica Neue", Arial, sans-serif; font-weight: 800;
+             font-stretch: 112%; font-size: clamp(28px, 3.4vw, 40px); line-height: 1.05; letter-spacing: -.015em; }
+.devsec > p { max-width: 78ch; }
+.devsec .lead { margin: 0; color: var(--text) !important; }
+.devsec .more { color: var(--dim); font-size: 14px; }
+.devcards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); margin-top: 6px; }
+.devcards article { background: var(--card); border: 1px solid var(--rule); border-radius: 14px; padding: 16px 18px; }
+.devcards h3 { margin: 0 0 8px; font-size: 16px; color: var(--ink); }
+.devcards p { margin: 0; }
+.params { list-style: none; padding: 0 !important; margin: 0 !important; display: grid; gap: 8px; }
+.params li { margin: 0; }
+.params code { display: inline-block; margin-right: 4px; color: var(--amber-hi); }
+.crates { list-style: none; padding: 0 !important; margin: 4px 0 0 !important; display: grid; gap: 10px;
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.crates li { margin: 0; display: grid; gap: 2px; background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 12px 14px; }
+.crates li > code { color: var(--amber-hi); font-weight: 600; }
+.crates span { font-size: 14px; }
+@media (max-width: 900px) { .dev-hero .term { margin: -12px 0 36px; } }
+@media (max-width: 760px) { .devsec { padding-block: 36px; } .term { font-size: 12.5px; padding: 14px; } }
