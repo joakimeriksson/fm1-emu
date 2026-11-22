@@ -4,7 +4,7 @@
 //! that is the host's "Master" parameter), and a bar to load a firmware package.
 
 use crate::engine::Cmd;
-use crate::{panel, panel_smk, Clock, Fm1Params, Lead, Link};
+use crate::{panel, panel_smk, Controller, Clock, Fm1Params, Lead, Link};
 use fm1_soc::Board;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui, widgets};
@@ -161,6 +161,10 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                         .on_hover_text("OP1-OP6, PIT, GLO, MONO and POLY under the top keys, as printed on the real FM-1 for M-VAVE's own firmware");
                     bar.separator();
                 }
+                if !smk {
+                    bar.label("Controller");
+                    enum_menu(bar, setter, "controller", &params.controller, &Controller::ALL, 160.0, Controller::name);
+                }
                 bar.label("MIDI channel");
                 bar.add(widgets::ParamSlider::for_param(&params.channel, setter).with_width(90.0));
                 bar.label("CPU clock").on_hover_text("The emulated FM-1's clock, 240 MHz as on the chip. Lower it if this computer can't keep up with a heavy firmware (\"underruns\"); raise it if a firmware runs out of time. Changing it restarts the firmware");
@@ -270,7 +274,8 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                         turn(ui, &link, smk, ctl, clicks as i32);
                     }
                 } else if !smk && g.ctl == 7 {
-                    let v = (params.master.value() + (g.last_y - y) * 4.0 / 1023.0).clamp(0.0, 1.0);
+                    let v = ((params.controller_master.lock().unwrap().map_or(params.master.value(), |v| v as f32 / 1023.0)) + (g.last_y - y) * 4.0 / 1023.0).clamp(0.0, 1.0);
+                    *params.controller_master.lock().unwrap() = None;
                     setter.set_parameter(&params.master, v);
                     ui.turning[7] = 10;
                 }
@@ -302,8 +307,9 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                         let i = 16 + (h - 300) as usize;
                         analog(ui, &link, i, (ui.analog[i] as f32 + scroll * 2.0).clamp(0.0, 1023.0) as u16);
                     } else if !smk && h == 7 {
-                        let v = (params.master.value() + scroll * 0.5 / 1023.0).clamp(0.0, 1.0);
+                        let v = ((params.controller_master.lock().unwrap().map_or(params.master.value(), |v| v as f32 / 1023.0)) + scroll * 0.5 / 1023.0).clamp(0.0, 1.0);
                         setter.begin_set_parameter(&params.master);
+                        *params.controller_master.lock().unwrap() = None;
                         setter.set_parameter(&params.master, v);
                         setter.end_set_parameter(&params.master);
                     } else if (0..if smk { 8 } else { 7 }).contains(&h) {
@@ -345,7 +351,7 @@ pub fn create(params: Arc<Fm1Params>, link: Arc<Link>) -> Option<Box<dyn Editor>
                     lcd: &lcd,
                     enc_clicks: &std::array::from_fn(|i| ui.enc_clicks[i]),
                     positions: Some(&ui.positions),
-                    pot: (params.master.value() * 1023.0).round() as u16,
+                    pot: params.controller_master.lock().unwrap().unwrap_or((params.master.value() * 1023.0).round() as u16),
                     down: &std::array::from_fn(|i| ui.down[i]),
                     leds: &leds,
                     turning: &std::array::from_fn(|i| ui.turning[i]),

@@ -30,7 +30,7 @@ Studio mode (`studio=1`) disables automatic Hub discovery and catalog downloads.
 
 The browser renderer (`render-worker.js` + `render-runtime.js`) owns the machine, JIT and snapshots. A direct MessageChannel connects it to `worklet.js`, which consumes a bounded stereo queue (four quanta initially, growing by two on an underrun to at most 16 and shrinking by one after each ten seconds of uninterrupted output). LCD/flash messages travel directly from the worker to the page; only audio and small control messages reach the realtime thread. Boot IDs reject stale audio; pause acknowledgements flush queued output. No SharedArrayBuffer or cross-origin isolation is required. This adds about 11.6 ms of queue headroom at 44.1 kHz while moving compilation off audio deadlines.
 
-Factory MiniLab 3 profiles translate recognized CCs into physical panel actions before firmware MIDI. Only the standard performance port is auto-mapped. Mapped CCs are consumed once; other messages pass through. Rust and browser policies have matching regression cases. DAW plugin MIDI retains its existing raw behavior.
+Factory MiniLab 3 profiles translate recognized CCs into physical panel actions before firmware MIDI. Only the standard performance port is auto-mapped. Mapped CCs are consumed once; other messages pass through. Rust and browser policies have matching regression cases. The dedicated [MiniLab User program](minilab.md) adds relative knobs and gated command pads in all three hosts. Plugin instances explicitly select it (Raw remains the default); mapping runs on the machine worker before performance-channel remapping. Its profile and controller volume override persist per instance; host Master changes take over from controller volume.
 
 ## Desktop audio delivery
 

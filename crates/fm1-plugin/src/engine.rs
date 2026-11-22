@@ -201,6 +201,9 @@ pub fn run(
     let mut made: u64 = 0; // frames pushed since boot
     let mut due: VecDeque<Midi> = VecDeque::new();
     let mut pot = u16::MAX;
+    let mut controller = fm1_soc::controller::MiniLab3::fm1();
+    let mut controller_mode = params.controller.value();
+    let mut host_master = params.master.value();
     // the sectors last put in the project's state
     let mut saved: Sectors = Vec::new();
     let mut last_view = Instant::now();
@@ -230,6 +233,7 @@ pub fn run(
                     m = prepared.or_else(|| Machine::boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed).ok());
                     active_pkg = m.as_ref().map(|_| pkg);
                     pot = u16::MAX;
+                    controller = fm1_soc::controller::MiniLab3::fm1();
                     let mut v = shared.view.lock().unwrap();
                     v.booted = m.is_some();
                     v.halted = false;
@@ -281,6 +285,7 @@ pub fn run(
                 let sectors = mm.changed_sectors();
                 if let Ok(next) = Machine::boot(pkg, &sectors, mhz, lcd_timed) {
                     m = Some(next);
+                    controller = fm1_soc::controller::MiniLab3::fm1();
                     pot = u16::MAX;
                     due.clear();
                     let mut v = shared.view.lock().unwrap();
@@ -291,8 +296,19 @@ pub fn run(
             }
         }
         snapshots(&mut pending, m.as_ref(), &params, Instant::now());
-        // the MASTER pot, a host parameter
-        let p = (params.master.value() * 1023.0).round().clamp(0.0, 1023.0) as u16;
+        let mode = params.controller.value();
+        if mode != controller_mode {
+            controller.release(|a| apply(&mut m, a));
+            controller_mode = mode;
+            *params.controller_master.lock().unwrap() = None;
+        }
+        // Host automation takes over from the last controller volume movement.
+        if host_master != params.master.value() {
+            host_master = params.master.value();
+            *params.controller_master.lock().unwrap() = None;
+        }
+        let p = params.controller_master.lock().unwrap().unwrap_or(
+            (host_master * 1023.0).round().clamp(0.0, 1023.0) as u16);
         if p != pot && m.as_ref().is_some_and(|m| m.soc.board == Board::Fm1) {
             pot = p;
             apply(&mut m, Action::Adc { ch: 4, value: p });
@@ -333,9 +349,14 @@ pub fn run(
         } else {
             while due.front().is_some_and(|e| e.frame <= made) {
                 let e = due.pop_front().unwrap();
-                for &b in &e.bytes[..e.len as usize] {
-                    mm.soc.periph.apply(&Action::Midi { b });
-                }
+                route_input(&mut controller, controller_mode, mm.soc.board,
+                    params.channel.value() as u8, &e.bytes[..e.len as usize], |a| {
+                        if let Action::Adc { ch: 4, value } = a {
+                            *params.controller_master.lock().unwrap() = Some(value);
+                            pot = value;
+                        }
+                        mm.soc.periph.apply(&a);
+                    });
             }
             let t0 = Instant::now();
             mm.run(20_000);
@@ -432,6 +453,15 @@ fn apply(m: &mut Option<Machine>, a: Action) {
     }
 }
 
+// Decode the command channel before remapping performance MIDI to a firmware part.
+fn route_input(controller: &mut fm1_soc::controller::MiniLab3, mode: crate::Controller,
+    board: Board, channel: u8, bytes: &[u8], mut emit: impl FnMut(Action)) {
+    if board == Board::Fm1 && mode == crate::Controller::MiniLab && controller.route(bytes, &mut emit) { return; }
+    for (i, &b) in bytes.iter().enumerate() {
+        emit(Action::Midi { b: if i == 0 && channel != 0 { (b & 0xf0) | (channel - 1) } else { b } });
+    }
+}
+
 /// Frames waiting in the ring.
 fn rtrb_fill(p: &rtrb::Producer<[f32; 2]>) -> usize {
     p.buffer().capacity() - p.slots()
@@ -506,5 +536,39 @@ mod portable_tests {
         snapshots(&mut pending, Some(&m), &params, start + Duration::from_secs(6));
         assert!(rx.try_recv().unwrap().is_err());
         assert!(pending.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod controller_tests {
+    use super::*;
+    #[test]
+    fn explicit_profile_precedes_channel_remap_and_raw_preserves_ccs() {
+        let mut p = fm1_soc::controller::MiniLab3::fm1();
+        let mut out = vec![];
+        route_input(&mut p, crate::Controller::MiniLab, Board::Fm1, 2, &[0xbf,21,127], |a|out.push(a));
+        assert!(matches!(out.as_slice(), [Action::Key{id:2,down:true}]));
+        out.clear();
+        route_input(&mut p, crate::Controller::Raw, Board::Fm1, 2, &[0xbf,21,0], |a|out.push(a));
+        assert!(matches!(out.as_slice(),[Action::Midi{b:0xb1},Action::Midi{b:21},Action::Midi{b:0}]));
+        out.clear();
+        route_input(&mut p, crate::Controller::MiniLab, Board::Fm1, 3, &[0x90,60,100], |a|out.push(a));
+        assert!(matches!(out.as_slice(),[Action::Midi{b:0x92},Action::Midi{b:60},Action::Midi{b:100}]));
+        out.clear();
+        route_input(&mut p, crate::Controller::MiniLab, Board::Smk37, 0, &[0xbf,21,127], |a|out.push(a));
+        assert!(matches!(out.first(),Some(Action::Midi{b:0xbf})));
+    }
+    #[test]
+    fn old_projects_default_to_raw_and_profile_state_has_stable_ids() {
+        use nih_plug::prelude::Enum;
+        let params=crate::Fm1Params::default();
+        assert_eq!(params.controller.value(),crate::Controller::Raw);
+        assert_eq!(crate::Controller::ids().unwrap(), &["raw", "fm1"]);
+        assert_eq!(*params.controller_master.lock().unwrap(), None);
+        *params.controller_master.lock().unwrap()=Some(321);
+        let saved=nih_plug::prelude::Params::serialize_fields(&params);
+        let recalled=crate::Fm1Params::default();
+        nih_plug::prelude::Params::deserialize_fields(&recalled, &saved);
+        assert_eq!(*recalled.controller_master.lock().unwrap(),Some(321));
     }
 }

@@ -725,12 +725,13 @@ function midiMessage(e, input) {
 
   if (board === 0 && controllerSel.value !== "raw" && isMiniLab3(input?.name)) {
     let profile = controllerProfiles.get(input.id);
-    if (!profile) {profile = new MiniLab3();controllerProfiles.set(input.id, profile);}
+    if (!profile) {profile = new MiniLab3(controllerSel.value === "fm1" ? "fm1" : "factory");controllerProfiles.set(input.id, profile);}
     const actions = profile.route(bytes);
     if (actions) {
       for (const a of actions) {
         if (a.type === "enc") {const i=[0,6,1,2,3,4,5].indexOf(a.enc);turn(i,a.clicks);}
         else if (a.type === "pot") setPot(a.value);
+        else if (a.type === "midi") send(a);
         else if (a.type === "key") {
           if (a.down) controllerButtons.add(a.id); else controllerButtons.delete(a.id);
           setKey(a.id,a.down);
@@ -763,6 +764,7 @@ let connectedMidiIds = new Set();
 function panicMidi() {
   for (const id of controllerButtons) setKey(id,false);
   controllerButtons.clear();
+  controllerProfiles.clear();
   if (board === 0) for (const bytes of panicMessages()) send({type:"midi",bytes});
 }
 function midiConnect() {

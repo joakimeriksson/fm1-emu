@@ -62,6 +62,10 @@ pub struct Fm1Params {
     /// The recorder, as the machine's thread reports it to the window (not saved).
     pub rec: Mutex<RecView>,
 
+    #[id = "controller"]
+    pub controller: EnumParam<Controller>,
+    #[persist = "controller-master"]
+    pub controller_master: Mutex<Option<u16>>,
     /// The MASTER pot.
     #[id = "master"]
     pub master: FloatParam,
@@ -157,6 +161,20 @@ impl Lead {
     }
 }
 
+#[derive(Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Controller {
+    #[id = "raw"]
+    #[name = "Raw MIDI"]
+    Raw,
+    #[id = "fm1"]
+    #[name = "MiniLab FM-1 User"]
+    MiniLab,
+}
+impl Controller {
+    pub const ALL: [Self; 2] = [Self::Raw, Self::MiniLab];
+    pub fn name(self) -> String { match self { Self::Raw => "Raw MIDI", Self::MiniLab => "MiniLab FM-1 User" }.into() }
+}
+
 impl Default for Fm1Params {
     fn default() -> Self {
         Self {
@@ -164,6 +182,8 @@ impl Default for Fm1Params {
             firmware: Mutex::new(Firmware::default()),
             flash: Mutex::new(Vec::new()),
             rec: Mutex::new(RecView::default()),
+            controller: EnumParam::new("Controller", Controller::Raw).non_automatable(),
+            controller_master: Mutex::new(None),
             master: FloatParam::new("Master", 900.0 / 1023.0, FloatRange::Linear { min: 0.0, max: 1.0 })
                 .with_unit(" %")
                 .with_value_to_string(formatters::v2s_f32_percentage(0))
@@ -344,16 +364,12 @@ impl Plugin for Fm1 {
             ctx.set_latency_samples((self.lead as f64 / self.ratio).round() as u32);
         }
         let start = self.taken;
-        let ch = self.params.channel.value() as u8;
         while let Some(ev) = ctx.next_event() {
             let at = ev.timing();
-            let Some(MidiResult::Basic(mut b)) = ev.as_midi() else { continue };
+            let Some(MidiResult::Basic(b)) = ev.as_midi() else { continue };
             let len = midi_len(b[0]);
             if len == 0 {
                 continue;
-            }
-            if ch != 0 {
-                b[0] = (b[0] & 0xf0) | (ch - 1);
             }
             let frame = start + (at as f64 * self.ratio) as u64 + self.lead as u64;
             if let Some(m) = self.midi.as_mut() {
