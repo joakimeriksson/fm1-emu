@@ -413,6 +413,16 @@ test('a machine that booted while a later pick waited is gone back to with its o
   assert.deepEqual([p.api.running.fw.id, boards.at(-1), p.audio.messages.at(-1)], ['a', 0, { type: 'pot', value: 300 }]);
 });
 
+test('a page that is not on https or localhost says so at Start: the browser gives it no audio worklet', async () => {
+  class AudioContext { constructor() { this.state = 'running'; } async resume() {} async close() { this.state = 'closed'; } }
+  const p = await page(storage(), '', '', false, { AudioContext });
+  const start = p.elements.get('start');
+  await start.listeners.click();
+  assert.equal(p.elements.get('status').textContent,
+    'the audio did not start: this page is not on https or localhost, and the browser gives such a page no audio worklet to run the emulator in');
+  assert.equal(start.disabled, false);
+});
+
 test('Start says what kept the audio from starting and is there to try again', async () => {
   let fail = true;
   const contexts = [];

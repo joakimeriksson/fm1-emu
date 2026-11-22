@@ -1265,6 +1265,9 @@ async function startAudio(auto = false) {
     ac = null;
     return false;
   }
+  // (a browser has the audio worklet only for a page it trusts: one from https, or from this computer. Over plain
+  // http from another one, as a build tried from a second device, there is none, and nothing to run the emulator in)
+  if (!ac.audioWorklet) throw new Error("this page is not on https or localhost, and the browser gives such a page no audio worklet to run the emulator in");
   await ac.audioWorklet.addModule("worklet.js");
   node = new AudioWorkletNode(ac, "fm1", { numberOfInputs: 0, outputChannelCount: [2] });
   node.connect(ac.destination);
