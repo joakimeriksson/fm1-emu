@@ -131,6 +131,21 @@ fn ram_code<B: Bus>(bus: &mut B, pc: u32) -> Option<&[u8]> {
     Some(unsafe { std::slice::from_raw_parts(m.ram.add(off as usize), (m.ram_len - off) as usize) })
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Block {
+    pc: u32,
+    start: u32,
+    bytes: u16,
+    ops: u8,
+    instructions: u8,
+}
+
+impl Block {
+    fn location(self) -> (u32, u32, u32) {
+        (self.pc, self.start, self.ops as u32)
+    }
+}
+
 /// How many instructions of a block (its ops, the first at pc; a swapped pair is two) come before
 /// `stop`, if an instruction of it after the first begins there (the second of a swapped pair
 /// too: then its head runs alone), and whether that is all of them.
@@ -258,7 +273,7 @@ pub struct Cpu {
     bops: Vec<BOp>,
     /// `Fast::Swap`'s pairs: (head, second instruction, the head's length)
     swaps: Vec<(Fast, Fast, u8)>,
-    blocks: Vec<(u32, u32, u32)>,
+    blocks: Vec<Block>,
     bmap: Vec<u32>,
     /// Per block: for one over RAM code, the bytes it was built from. RAM can change (code
     /// copied in, overlays), so such a block is checked against memory before every entry
@@ -712,7 +727,7 @@ impl Cpu {
             // (a stretch: a runner's call begins here)
             let at_call = !stretch || n == bound;
             if stretch && n == bound {
-                let (to, all) = len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, pc, self.stop_pc);
+                let (to, all) = self.block_probe_span(id, self.stop_pc);
                 bound = n + to;
                 whole = all;
             }
@@ -769,20 +784,23 @@ impl Cpu {
                         });
                         self.jit_refused = self.jit.is_none();
                     }
-                    // (a block about to be compiled that ends in an if-else block: its then-part)
-                    let mut then = None;
-                    if self.jit.as_ref().is_some_and(|j| j.compiles_next(id)) {
-                        then = self.then_of(bus, id, pc);
-                        if self.blocks.get(id) != Some(&(pc, start, len)) {
-                            continue; // (looking for it rebuilt the block table: look again)
+                    let code = if let Some(cached) = self.jit.as_ref().and_then(|j| j.cached_entry(id, inside)) {
+                        cached
+                    } else if self.jit.is_some() {
+                        // (a block about to be compiled that ends in an if-else block: its then-part)
+                        let mut then = None;
+                        if self.jit.as_ref().is_some_and(|j| j.compiles_next(id)) {
+                            then = self.then_of(bus, id, pc);
+                            if self.blocks.get(id).map(|block| block.location()) != Some((pc, start, len)) {
+                                continue; // (looking for it rebuilt the block table: look again)
+                            }
                         }
-                    }
-                    let code = match self.jit.as_mut() {
-                        Some(j) => {
+                        self.jit.as_mut().and_then(|j| {
                             let table = bus.code_writes().is_some() && !mem.ram_code.is_null();
                             j.entry::<B>(id, &self.bops[start as usize..(start + len) as usize], &self.swaps, then.as_deref(), pc, &mem, table, inside)
-                        }
-                        None => None,
+                        })
+                    } else {
+                        None
                     };
                     let code = code.filter(|p| !inside || self.prefix_inside(pc, p.end));
                     if let Some(jit::Prefix { code, insns, end, whole: compiled_whole, .. }) = code {
@@ -813,15 +831,23 @@ impl Cpu {
                                 self.insn_count += (n - synced) as u64;
                                 return Ok((n, false));
                             }
-                            if let Some(body) = self.jit_body_at(pc, bus.code_writes().is_some() && !mem.ram_code.is_null()) {
-                                if !slot.is_null() {
-                                    // a chainable exit came back: link it once its target is compiled
-                                    // SAFETY: the slot is a chain exit of this JIT's code, body a compiled block
-                                    unsafe { jit::link(slot, body) };
-                                } else if let Some(j) = self.jit.as_mut() {
-                                    // a computed jump (or a stop) landed on a compiled body that
-                                    // is not in the table: the next one goes straight in
-                                    j.relist(pc, body);
+                            // An XIP body already in the indirect table stays valid
+                            // until the JIT resets. Avoid looking it up again on budget
+                            // exits from the short stretches used to run the other core.
+                            let listed_xip = slot.is_null()
+                                && (0x0200_0000..0x0400_0000).contains(&pc)
+                                && self.jit.as_ref().is_some_and(|j| j.lists_pc(pc));
+                            if !listed_xip {
+                                if let Some(body) = self.jit_body_at(pc, bus.code_writes().is_some() && !mem.ram_code.is_null()) {
+                                    if !slot.is_null() {
+                                        // a chainable exit came back: link it once its target is compiled
+                                        // SAFETY: the slot is a chain exit of this JIT's code, body a compiled block
+                                        unsafe { jit::link(slot, body) };
+                                    } else if let Some(j) = self.jit.as_mut() {
+                                        // a computed jump (or a stop) landed on a compiled body that
+                                        // is not in the table: the next one goes straight in
+                                        j.relist(pc, body);
+                                    }
                                 }
                             }
                             if inside && !self.pred_skips.is_empty() {
@@ -1134,8 +1160,19 @@ impl Cpu {
     /// alone, as the careful path does, leaving the pair pending at `stop`. (cpu1's idle probe: it
     /// looks for the way back to where it began, which may lie inside a block.)
     pub fn block_len_to<B: Bus>(&mut self, bus: &mut B, stop: u32) -> u32 {
-        let Ok(Some((_, start, len))) = self.block_at(bus, self.pc) else { return 0 };
-        len_to(&self.bops[start as usize..(start + len) as usize], &self.swaps, self.pc, stop).0
+        let Ok(Some((id, _, _))) = self.block_at(bus, self.pc) else { return 0 };
+        self.block_probe_span(id, stop).0
+    }
+
+    #[inline]
+    fn block_probe_span(&self, id: usize, stop: u32) -> (u32, bool) {
+        let block = self.blocks[id];
+        let offset = stop.wrapping_sub(block.pc);
+        if offset == 0 || offset >= block.bytes as u32 {
+            return (block.instructions as u32, true);
+        }
+        let start = block.start as usize;
+        len_to(&self.bops[start..start + block.ops as usize], &self.swaps, block.pc, stop)
     }
 
     /// The block of micro-ops starting at pc (XIP code, or RAM the bus can show: `ram_code`):
@@ -1151,7 +1188,7 @@ impl Cpu {
         if !self.bmap.is_empty() {
             let id = self.bmap[icache_slot(pc)];
             if id != 0 {
-                let (bpc, start, len) = self.blocks[id as usize - 1];
+                let (bpc, start, len) = self.blocks[id as usize - 1].location();
                 if bpc == pc && (xip || self.ram_block_ok(bus, id as usize - 1)) {
                     // (len 0: remembered that the first instruction here needs `step`)
                     return Ok(if len == 0 { None } else { Some((id as usize - 1, start, len)) });
@@ -1196,7 +1233,7 @@ impl Cpu {
     fn wasm_region<B: Bus>(&mut self, bus: &mut B, id: usize) -> Vec<(usize, u32, Vec<BOp>)> {
         let mut out: Vec<(usize, u32, Vec<BOp>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::from([self.blocks[id].0]);
+        let mut queue = std::collections::VecDeque::from([self.blocks[id].pc]);
         let mut total = 0;
         while let Some(pc) = queue.pop_front() {
             if out.len() >= jit_wasm::REGION_BLOCKS || total >= jit_wasm::REGION_OPS {
@@ -1259,7 +1296,7 @@ impl Cpu {
     #[cfg(native_jit)]
     #[inline(never)]
     fn then_of<B: Bus>(&mut self, bus: &mut B, id: usize, pc: u32) -> Option<Vec<BOp>> {
-        let (_, start, len) = self.blocks[id];
+        let (_, start, len) = self.blocks[id].location();
         let ops = &self.bops[start as usize..(start + len) as usize];
         let last = ops.last()?;
         match last.fast {
@@ -1319,7 +1356,7 @@ impl Cpu {
     /// Is RAM block `id` still built from what memory holds now?
     #[inline]
     fn ram_block_current<B: Bus>(&self, bus: &mut B, id: usize) -> bool {
-        let (pc, ..) = self.blocks[id];
+        let pc = self.blocks[id].pc;
         match (self.bbytes.get(id).and_then(|b| b.as_deref()), ram_code(bus, pc)) {
             (Some(was), Some(now)) => now.len() >= was.len() && same_bytes(&now[..was.len()], was),
             _ => false,
@@ -1334,7 +1371,7 @@ impl Cpu {
             return None;
         }
         let id = self.bmap[icache_slot(pc)];
-        if id == 0 || self.blocks[id as usize - 1].0 != pc {
+        if id == 0 || self.blocks[id as usize - 1].pc != pc {
             return None;
         }
         self.jit.as_ref()?.body(id as usize - 1)
@@ -1369,6 +1406,7 @@ impl Cpu {
         let code = |bus: &mut B, p: u32| if xip { (0x0200_0000..0x0400_0000).contains(&p) } else { ram_code(bus, p).is_some() };
         // (a glued pair's second instruction always joins its head's block)
         let mut glued = false;
+        let mut instructions = 0;
         while ((self.bops.len() as u32 - start) < 32 || glued) && code(bus, p) {
             let slot = self.fetch_at(bus, p)?;
             let l = self.icache[slot];
@@ -1393,6 +1431,7 @@ impl Cpu {
                             let idx = self.swaps.len() as u32 - 1;
                             self.bops.push(BOp { fast: Fast::Swap { idx }, len: l.len + t.len, careful: true, pair_head: true, glue: false });
                             p = q + t.len as u32;
+                            instructions += 2;
                             if tf.may_jump() {
                                 break;
                             }
@@ -1402,6 +1441,7 @@ impl Cpu {
                 }
             }
             self.bops.push(op);
+            instructions += 1;
             p = q;
             if f.may_jump() {
                 break;
@@ -1410,7 +1450,7 @@ impl Cpu {
         // an empty block is kept too: the first instruction needs `step`, and block_at need not
         // look again every time execution gets here
         let len = self.bops.len() as u32 - start;
-        self.blocks.push((pc, start, len));
+        self.blocks.push(Block { pc, start, bytes: (p - pc) as u16, ops: len as u8, instructions });
         // a RAM block keeps its bytes (6 more: an instruction's window reaches past its length)
         let bytes: Option<Box<[u8]>> = if xip { None } else { ram_code(bus, pc).map(|m| m[..((p - pc) as usize + 6).min(m.len())].into()) };
         if let Some(b) = &bytes {
