@@ -348,6 +348,22 @@ impl Jit {
         Some(Jit { cache, state: Vec::new(), guards: Vec::new(), kept: Kept::default(), profile, itab, stops: false })
     }
 
+    /// The dispatch result for a block that no longer needs warmup or compilation.
+    #[inline]
+    pub(crate) fn cached_entry(&self, id: usize, inside: bool) -> Option<Option<Prefix>> {
+        match self.state.get(id)? {
+            Entry::Code(p, q) => Some(if inside { *q } else { Some(*p) }),
+            Entry::No => Some(None),
+            Entry::Cold(_) => None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn lists_pc(&self, pc: u32) -> bool {
+        let entry = &self.itab[itab_slot(pc)];
+        entry.pc == pc && entry.body != 0
+    }
+
     /// Will `entry` compile block `id` on its next call? (Then `Cpu::then_of` looks for the
     /// then-part of an if-else block that ends it.)
     pub(crate) fn compiles_next(&self, id: usize) -> bool {

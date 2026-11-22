@@ -944,45 +944,47 @@ impl Periph {
 
     // ---- registers ------------------------------------------------------
 
+    pub(crate) fn read_t4_count(&mut self) -> u32 {
+        if self.t4_con & 1 == 0 {
+            return 0;
+        }
+        // three reads close together outside ISRs: a polling loop.
+        // (Reads inside an ISR neither count nor trigger: a single
+        // main-loop read right after the tick ISR's own read once
+        // skipped time in ui_input and the notes went silent.)
+        if self.skip_idle && self.core1_load {
+            // a third read in one run of core 1 reads the same count: a poll that gets
+            // nowhere before its next run
+            self.c1_cnt_reads = if self.cycles == self.c1_cnt_at { self.c1_cnt_reads + 1 } else { 0 };
+            self.c1_cnt_at = self.cycles;
+            self.core1_polls |= self.c1_cnt_reads >= 2;
+        } else if self.skip_idle && !self.in_isr {
+            if self.cycles - self.last_cnt_read < 64 {
+                self.cnt_streak += 1;
+            } else {
+                self.cnt_streak = 0;
+            }
+            if self.cnt_streak >= 2 {
+                // never past the next event, and at most 20 us at a
+                // time: the loop re-checks its own deadline (an
+                // uncapped jump once crossed a whole boot delay)
+                let next = self.next_event().min(self.cycles + self.hz / 50_000);
+                if next > self.cycles + 1 {
+                    self.skipped += next - 1 - self.cycles;
+                    self.cycles = next - 1;
+                    self.next_due = 0;
+                }
+            }
+            self.last_cnt_read = self.cycles;
+        }
+        mul_div(self.cycles - self.t4_base, T4_HZ, self.hz)
+    }
+
     /// Reads handled here; `None` = plain SFR storage.
     pub fn read(&mut self, addr: u32) -> Option<u32> {
         Some(match addr {
             0x10800 => self.t4_con,
-            0x10804 => {
-                if self.t4_con & 1 == 0 {
-                    return Some(0);
-                }
-                // three reads close together outside ISRs: a polling loop.
-                // (Reads inside an ISR neither count nor trigger: a single
-                // main-loop read right after the tick ISR's own read once
-                // skipped time in ui_input and the notes went silent.)
-                if self.skip_idle && self.core1_load {
-                    // a third read in one run of core 1 reads the same count: a poll that gets
-                    // nowhere before its next run
-                    self.c1_cnt_reads = if self.cycles == self.c1_cnt_at { self.c1_cnt_reads + 1 } else { 0 };
-                    self.c1_cnt_at = self.cycles;
-                    self.core1_polls |= self.c1_cnt_reads >= 2;
-                } else if self.skip_idle && !self.in_isr {
-                    if self.cycles - self.last_cnt_read < 64 {
-                        self.cnt_streak += 1;
-                    } else {
-                        self.cnt_streak = 0;
-                    }
-                    if self.cnt_streak >= 2 {
-                        // never past the next event, and at most 20 us at a
-                        // time: the loop re-checks its own deadline (an
-                        // uncapped jump once crossed a whole boot delay)
-                        let next = self.next_event().min(self.cycles + self.hz / 50_000);
-                        if next > self.cycles + 1 {
-                            self.skipped += next - 1 - self.cycles;
-                            self.cycles = next - 1;
-                            self.next_due = 0;
-                        }
-                    }
-                    self.last_cnt_read = self.cycles;
-                }
-                mul_div(self.cycles - self.t4_base, T4_HZ, self.hz)
-            }
+            0x10804 => self.read_t4_count(),
             0x10400 | 0x10500 | 0x10600 | 0x10700 => {
                 let t = &self.tmr[((addr - 0x10400) >> 8) as usize];
                 t.con | if t.pending { 0x8000 } else { 0 }
