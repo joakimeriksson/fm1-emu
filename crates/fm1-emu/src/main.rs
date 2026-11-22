@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 
 use fm1_core::{Bus, CoreError, Cpu};
-use fm1_soc::{Soc, XIP_BASE, RAM_BASE};
+use fm1_soc::{machine, Soc, XIP_BASE, RAM_BASE};
 
 mod buildinfo;
 
@@ -392,42 +392,50 @@ fn main() -> ExitCode {
     // pad the XIP window so sparse reads-return-0 behaviour is explicit
     image.resize(image.len().max(1) , 0);
 
-    let mut soc = Soc::new(args.ram, image);
-    // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
-    soc.lcd_timed = fm1_soc::lcd_timed_from_env();
-    soc.cpu1_survives = args.cpu1_survives;
-    soc.set_flash_part(args.flash_part);
-    soc.flaky_core1 = args.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, args.seed.unwrap_or(1)));
-    if let Some(f) = &flash_image {
-        soc.flash.load(f);
-    }
-    if let Some(path) = &args.raw_flash {
-        match std::fs::read(path) {
-            Ok(raw) => soc.flash.load(&raw),
-            Err(e) => {
-                eprintln!("error: cannot read {path}: {e}");
-                return ExitCode::FAILURE;
-            }
+    let raw_flash = match args.raw_flash.as_ref().map(|path| std::fs::read(path).map_err(|e| (path, e))).transpose() {
+        Ok(raw) => raw,
+        Err((path, e)) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::FAILURE;
         }
-    }
-    let mut cpu = Cpu::new(args.entry);
-    // the SPL hands cpu0 over in user mode: crt0s set `sp` and then a different `ssp`
-    // (the stock app's two stacks, Felucca's _ustack/_sstack); cpu1 starts in supervisor mode
-    // (the stock stub leaves it with `rti`). FM1_SUPERVISOR_START: the old single stack.
-    cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
-    // The SPL enters the app with r0 -> its boot-parameter struct, whose
-    // first word points at a chip-info block (boot_hwinfo_save at
-    // 0x020000C6 copies both into 0x01C7FD50). Hand the CRT an all-zero
-    // pair at the top of RAM so those reads stay inside memory.
-    let params = RAM_BASE + 0x7fc00;
-    soc.write32(params, params + 0x40);
-    cpu.regs[0] = params;
-    if let Some(f) = &flash_image {
-        // a whole flash image: the stock firmware, which reads the SPL's boot parameters
-        cpu.regs[0] = fm1_soc::write_boot_info(&mut soc, params, f);
-    }
-    if let Some(st) = &stock {
-        cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
+    };
+    let opts = machine::Options {
+        ram_size: args.ram,
+        // (every instruction is stepped here, to be traced: none is skipped, none compiled)
+        skip_idle: false,
+        // the SPL hands cpu0 over in user mode: crt0s set `sp` and then a different `ssp`
+        // (the stock app's two stacks, Felucca's _ustack/_sstack); cpu1 starts in supervisor mode
+        // (the stock stub leaves it with `rti`). FM1_SUPERVISOR_START: the old single stack.
+        user: std::env::var_os("FM1_SUPERVISOR_START").is_none(),
+        // FM1_LCD_TIMED (or FM1_STRICT): the LCD's transfers take their time, as on an FM-1
+        lcd_timed: fm1_soc::lcd_timed_from_env(),
+        flash_part: args.flash_part,
+        cpu1_survives: args.cpu1_survives,
+        flaky_core1: args.flaky_core1.map(|rate| (rate, args.seed.unwrap_or(1))),
+        sfc: false,
+        ..Default::default()
+    };
+    // The boot is the front ends' one (fm1_soc::machine: r0 -> the SPL's boot-parameter struct, an
+    // all-zero pair near the top of RAM unless a package brings the real ones); the cores and the
+    // SoC are then stepped by this program's own loop.
+    let boots_package = stock.is_some();
+    let machine::Machine { mut cpu, mut soc, .. } = match stock {
+        // (the window and the entry as settled above)
+        Some(st) => machine::Machine::from_stock(fm1_soc::Stock { xip: image, entry: args.entry, ..st }, &opts),
+        None => machine::Machine::from_image(image, args.entry, &opts),
+    };
+    // (a package's flash chip is its own, all of it: with one, these would leave nothing on it)
+    if !boots_package {
+        if let Some(f) = &flash_image {
+            soc.flash.load(f);
+        }
+        if let Some(raw) = &raw_flash {
+            soc.flash.load(raw);
+        }
+        if let Some(f) = &flash_image {
+            // a whole flash image: the stock firmware, which reads the SPL's boot parameters
+            cpu.regs[0] = fm1_soc::write_boot_info(&mut soc, machine::BOOT_PARAMS, f);
+        }
     }
     if let Some(ms) = args.ms {
         args.steps = soc.periph.cycle_of_ms(ms);
@@ -510,29 +518,19 @@ fn main() -> ExitCode {
                 println!("chip reset at step {total_steps} ({} ms)", soc.periph.ms());
             }
         }
-        if !cpu1_started && (std::mem::take(&mut soc.cpu1_release) || soc.read32(0x10008) & 8 != 0) {
-            // Where cpu1 really starts is not settled (docs/isa-notes.md):
-            // the vector at 0x02000098 `rti`s into the middle of an
-            // instruction of cpu_ipc_call_sync. The routine that
-            // acknowledges the boot (b[0x01C1FF08] = 1) is the RAM function
-            // at 0x01C022B6 (flash 0x02086AD6), so enter there with the
-            // stacks the vector would have set.
-            // The release writes core 1's entry into the word at 0x01C7FFF8 and the chip's ROM
-            // jumps there (X0X's fm1_cpu1.h documents the sequence; the stock firmware's stub
-            // at 0x020001B8 sets its own stacks). Older images without it: the RAM render loop.
-            let entry = soc.read32(0x01C7_FFF8);
-            let in_code = (XIP_BASE..XIP_BASE + 0x0100_0000).contains(&entry) || (RAM_BASE..RAM_BASE + 0x0010_0000).contains(&entry);
-            let mut c1 = Cpu::new(if in_code { entry } else { RAM_BASE + 0x22b6 });
-            c1.core_id = 1;
-            c1.usp = RAM_BASE + 0x15eb4;
-            c1.sp = RAM_BASE + 0x16eb4;
-            if !args.quiet {
-                println!("cpu1 entry {:#010x} (word at 0x01C7FFF8: {entry:#010x})", c1.pc);
-            }
-            cpus.push(c1);
-            cpu1_started = true;
-            if !args.quiet {
-                println!("cpu1 released at step {total_steps}");
+        // core 1 as the runners start it (`machine::released_cpu1`): from the entry the release wrote
+        // into the word at 0x01C7FFF8, or an older image's RAM loop, with its stacks
+        if !cpu1_started {
+            let ram_size = soc.ram.len();
+            if let Some(c1) = machine::released_cpu1(&mut soc, ram_size) {
+                if !args.quiet {
+                    println!("cpu1 entry {:#010x} (word at 0x01C7FFF8: {:#010x})", c1.pc, soc.read32(0x01C7_FFF8));
+                }
+                cpus.push(c1);
+                cpu1_started = true;
+                if !args.quiet {
+                    println!("cpu1 released at step {total_steps}");
+                }
             }
         }
         for ci in 0..cpus.len() {
