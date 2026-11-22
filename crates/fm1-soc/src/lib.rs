@@ -1147,6 +1147,12 @@ impl Bus for Soc {
     fn service(&mut self) {
         self.periph.next_due = 0;
     }
+    /// The software latch's bit n (as a write of 1 << n to its set register, `0x1EEF1A0`)
+    fn swi(&mut self, n: u32) -> bool {
+        self.periph.ilat |= 1 << (n & 7);
+        self.periph.next_due = 0;
+        true
+    }
 
     fn idle(&mut self, core: u32) {
         if core == 0 {

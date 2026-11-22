@@ -137,6 +137,11 @@ impl Bus for Core1Bus<'_> {
     fn service(&mut self) {
         self.budget = self.budget.min(1);
     }
+    fn swi(&mut self, n: u32) -> bool {
+        // (pending now: the run ends after the instruction, so the cores' loops look at it)
+        self.budget = self.budget.min(1);
+        self.soc.swi(n)
+    }
     fn idle(&mut self, _core: u32) {
         // the core sleeps: this run ends after the instruction, and `run_cpu1` runs it again
         // only once an interrupt from its bank is pending
@@ -209,6 +214,9 @@ impl Bus for Core1Loads<'_> {
     }
     fn service(&mut self) {
         self.0.service()
+    }
+    fn swi(&mut self, n: u32) -> bool {
+        self.0.swi(n)
     }
     fn code_writes(&self) -> Option<u64> {
         self.0.code_writes()
@@ -428,6 +436,10 @@ impl Bus for ProbeBus<'_> {
     }
     fn service(&mut self) {
         self.bad = true; // (an rti: not a polling round)
+    }
+    fn swi(&mut self, _n: u32) -> bool {
+        self.bad = true; // (a software interrupt raised: not a polling round)
+        true
     }
 }
 

@@ -21,6 +21,7 @@ use fm1_isa::{DecodeError, Instruction};
 /// not silently widen into a word read of a peripheral register.
 #[cfg(native_jit)]
 mod jit;
+mod pi32v2_exec;
 #[cfg(all(native_jit, target_arch = "aarch64"))]
 mod jit_a64;
 #[cfg(all(native_jit, target_arch = "x86_64"))]
@@ -102,6 +103,12 @@ pub trait Bus {
     /// Interrupts may have just been unmasked (`sti`, `icfg = R`): with one pending, the run
     /// loop must look before the next instruction, as it does after a slow-path instruction.
     fn irq_window(&mut self) {}
+    /// `swi n`: software interrupt n (0..7) is requested, IRQ 120 + n, pending in the interrupt
+    /// controller's software latch until it is taken and acknowledged. False: the bus has no
+    /// interrupt controller (the instruction is then unsupported).
+    fn swi(&mut self, _n: u32) -> bool {
+        false
+    }
     /// The run loop must look before the next instruction, as it does after an instruction off
     /// the micro-op paths: `rti` (the SoC keeps "in an ISR" for its idle skipping, updated there).
     fn service(&mut self) {}
@@ -254,6 +261,9 @@ pub struct Cpu {
     /// first instruction's register results are held here, (values, the bits it wrote), and
     /// committed after the second has run: where both write, the first's value stays.
     pub pair_pending: Option<([u32; 16], [u32; 16])>,
+    /// The bits of each register the last pi32v2-isa form wrote (`pi32v2_exec`): its writes for a
+    /// dual-issue pair's rule, also where it wrote a register's old value back.
+    pub pi_wrote: [u32; 16],
     /// Name of the last class with no semantics (halt reason).
     pub stuck_on: Option<&'static str>,
     /// `R = #h` rows not found in the observed-encoding table.
@@ -1651,6 +1661,12 @@ impl Cpu {
             let part = head_part(x.pre.syntax);
             let dest = head_dest(&insn, &x.pre);
             self.pair_hold(before, l.fast, part, dest);
+            // a pi32v2-isa form says what it wrote: that, not what changed
+            if x.pre.route == ROUTE_PI {
+                if let Some((_, wrote)) = self.pair_pending.as_mut() {
+                    *wrote = self.pi_wrote;
+                }
+            }
         }
         res
     }
@@ -3483,6 +3499,18 @@ impl Cpu {
                 }
             }
 
+            ROUTE_PI => {
+                let k = fm1_isa::pi32v2_table::index_of(insn.entry).expect("a pi32v2-isa form");
+                match pi32v2_exec::run(self, bus, k, insn.raw, next_pc) {
+                    Some(Ok(pi32v2_exec::Done::Next)) => {}
+                    Some(Ok(pi32v2_exec::Done::Jump(t))) => jumped = Some(t),
+                    Some(Err(e)) => return Err(e),
+                    None => {
+                        self.stuck_on = Some(name);
+                        return Err(CoreError::Unsupported { name, pc: self.pc, raw: insn.raw });
+                    }
+                }
+            }
             ROUTE_FPU => {
                 let (op, d, a, b) = decode_fpu(insn.raw);
                 let (x, y) = (self.regs[a as usize], self.regs[b as usize]);
@@ -3930,6 +3958,13 @@ static PAIR_OP_PAIR_RAW: fm1_isa::IsaEntry = fm1_isa::IsaEntry {
 /// and `block_end` both decode through here, so a block's size counts the same instructions
 /// the core executes.
 fn decode_any(win: u64, pc: u32) -> Result<fm1_isa::Instruction, fm1_isa::DecodeError> {
+    // a form of pi32v2-isa's table fm1-core runs from it, where the table decodes the word so: the
+    // DSP and other forms fm1-isa's corpus classes do not have (`pi32v2_exec`)
+    if let Some(k) = pi32v2_exec::decode(win) {
+        let entry = &fm1_isa::pi32v2_table::ENTRIES[k];
+        let len_mask = if entry.len >= 8 { u64::MAX } else { (1u64 << (8 * entry.len as u32)) - 1 };
+        return Ok(fm1_isa::Instruction { addr: pc, raw: win & len_mask, entry });
+    }
     // the add / subtract-with-carry family before the table: its corpus classes fit only
     // the registers the corpora used (see carry_op_raw)
     let decoded = match carry_op_raw(win) {
@@ -4884,7 +4919,8 @@ mod tests {
             assert_eq!(st(&ca), st(&cb), "{s} ({raw:#x}): state");
             assert_eq!(a.mem, b.mem, "{s} ({raw:#x}): memory");
         }
-        let shapes = ["[--sp] = {R*2}", "{R*2} = [sp++]", "[--sp] = {R*1}", "{R*1} = [sp++]", "rti", "R = R + R + c", "R = R - R - !c", "flushinv [R]", "iflush [R]", "[R+#i] &= ~R"];
+        // (`[R+#i] &= ~R` is pi32v2-isa's rmw.and.invr now, run by pi32v2_exec)
+        let shapes = ["[--sp] = {R*2}", "{R*2} = [sp++]", "[--sp] = {R*1}", "{R*1} = [sp++]", "rti", "R = R + R + c", "R = R - R - !c", "flushinv [R]", "iflush [R]"];
         let mut seen = std::collections::BTreeMap::<&str, u32>::new();
         let mut x = 0x9e37_79b9_7f4a_7c15u64;
         for e in fm1_isa::ISA {
@@ -4917,8 +4953,7 @@ mod tests {
         for s in shapes {
             assert!(seen.contains_key(s), "{s}: no encoding decoded ({seen:?})");
         }
-        assert!(seen.keys().any(|s| s.starts_with("[--sp] = {psr")), "a special-register push: {seen:?}");
-        assert!(seen.keys().any(|s| s.ends_with("} = [sp++]") && s.contains("reti")), "a special-register pop: {seen:?}");
+        // (the special-register pushes and pops are pi32v2-isa's push.srl / pop.srl now, run by pi32v2_exec)
     }
     struct FlatRam {
         mem: Vec<u8>,
@@ -5083,12 +5118,12 @@ mod tests {
     }
     #[test]
     fn unsupported_class_halts() {
-        // `a0 00` = swi 0 — no semantics yet; must halt, not nop-slide
-        let mut ram = FlatRam::new(vec![0xa0, 0x00, 0, 0, 0, 0, 0, 0]);
+        // `21 00` = syscall — no semantics (pi32v2-isa has no model of it either); must halt, not nop-slide
+        let mut ram = FlatRam::new(vec![0x21, 0x00, 0, 0, 0, 0, 0, 0]);
         let mut cpu = Cpu::new(0);
         match cpu.step(&mut ram) {
             Err(CoreError::Unsupported { name, .. }) => {
-                assert_eq!(name, "swi_i");
+                assert_eq!(name, "syscall");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
@@ -5396,6 +5431,30 @@ mod tests {
         assert!(never.is_empty(), "sets_flags says these write the flags, exec_fast never changed them: {never:#?}");
     }
 
+    /// The same through `gotoss` (a pi32v2-isa form with no micro-op): its target is followed too.
+    #[test]
+    fn flags_read_after_a_gotoss_keep_the_add_careful() {
+        let mut mem = vec![0u8; 0x100];
+        mem[..0x12].copy_from_slice(&[
+            0xb4, 0xe0, 0x00, 0x00, // 0x00 r0 = r0 + r0
+            0x80, 0xff, 0x05, 0x00, 0x00, 0x00, // 0x04 gotoss +4 (0x0e)
+            0xb4, 0xe0, 0x00, 0x00, // 0x0a r0 = r0 + r0
+            0x64, 0xe0, 0x00, 0x15, // 0x0e r1 = psr
+        ]);
+        let mut bus = FlatRam::new(mem);
+        assert!(flags_read_later(&mut bus, 0x04), "the psr read at gotoss's target reads them");
+        let mut cpu = Cpu::new(0);
+        let slot = cpu.fetch(&mut bus).unwrap();
+        assert!(cpu.icache[slot].flags_live && cpu.icache[slot].careful, "the add stays on the careful path");
+        // run: r1 = Z, C and V of 0x80000000 + 0x80000000
+        let mut cpu = Cpu::new(0);
+        cpu.regs[0] = 0x8000_0000;
+        for _ in 0..3 {
+            cpu.step(&mut bus).unwrap();
+        }
+        assert_eq!((cpu.pc, cpu.regs[1] & 15), (0x12, 7));
+    }
+
     #[test]
     fn pair_head_and_not_shifted_runs() {
         // `94 f1 13 13` r1 = r1 & ~(1 << r3) #, then a nop (DUELL 0.2.20, when HOME is pressed):
@@ -5495,7 +5554,8 @@ mod tests {
         for _ in 0..3 {
             cpu.step(&mut ram).unwrap();
         }
-        assert_eq!(cpu.regs[2], 0x0201_2345, "r2 = reti");
+        // (reti keeps bits 26..1 of what is written to it, as an FM-1)
+        assert_eq!(cpu.regs[2], 0x0201_2344, "r2 = reti");
         assert_eq!(cpu.rets, 0x0200_0abc, "rets = r1");
     }
 
@@ -6230,9 +6290,14 @@ mod tests {
         assert_eq!(run_regs(&[0xde, 0xe1, 0x6d, 0x39], &[(7, 0x8000_0000), (6, 0)]).regs[3], i32::MIN as u32);
         // `de e1 01 02` r0 = r1_r0 >> 33 (u)
         assert_eq!(run_regs(&[0xde, 0xe1, 0x01, 0x02], &[(1, 0xffff_fffe), (0, 5)]).regs[0], 0x7fff_ffff);
-        // `d4 f1 05 eb` r15_r14 <c>= #i (a carry rotate, bit 27) is not the plain pair rotate: it halts
+        // `d4 f1 05 eb` r15_r14 <c>= 53 # (a carry rotate, bit 27) is not the plain pair rotate: pi32v2-isa's
+        // cycc.pi.p (pi32v2_exec), the 65-bit (C, r15_r14) rotated right (the value its model gives)
         let mut ram = FlatRam::new([0xd4, 0xf1, 0x05, 0xeb].iter().copied().chain([0; 0x3ffc]).collect());
-        assert!(Cpu::new(0).step(&mut ram).is_err());
+        let mut cpu = Cpu::new(0);
+        (cpu.regs[14], cpu.regs[15], cpu.flags) = (0x41, 0, F_C);
+        cpu.step(&mut ram).unwrap();
+        cpu.step(&mut ram).unwrap();
+        assert_eq!((cpu.regs[14], cpu.regs[15], cpu.flags), (0x0004_1800, 0, 0), "r15_r14 <c>= 53");
         // `39 e4 20 13` r1 = r2 + r3 (ssat), `39 e4 28 13` r1 = r2 - r3 (ssat)
         assert_eq!(run_regs(&[0x39, 0xe4, 0x20, 0x13], &[(2, 0x7fff_fff0), (3, 0x100)]).regs[1], 0x7fff_ffff);
         assert_eq!(run_regs(&[0x39, 0xe4, 0x20, 0x13], &[(2, 5), (3, -7i32 as u32)]).regs[1], -2i32 as u32);
@@ -7143,11 +7208,12 @@ const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 /// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
 /// end a path. A reader that is never reached costs only speed.
 /// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
-/// `ifne` (`flags_read_later`'s readers)?
+/// `ifne`, a pi32v2-isa form that does (`pi32v2_exec::reads_flags`)? (`flags_read_later`'s readers)
 fn reads_psr_flags(i: &Instruction) -> bool {
     let s = i.entry.syntax;
     s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
         || s.starts_with("ifeq") || s.starts_with("ifne")
+        || fm1_isa::pi32v2_table::index_of(i.entry).is_some_and(pi32v2_exec::reads_flags)
 }
 
 /// What an instruction does with the psr flags as the block path runs it (`Cpu::flag_audit`).
@@ -7218,6 +7284,13 @@ fn successors(insn: &Instruction) -> (bool, Option<u32>) {
     let bittest = if insn.entry.name.starts_with("if") { decode_bittest(insn.raw, insn.entry.len) } else { None };
     let route = route_of(insn, &alu4, &bittest);
     let fast = if route == ROUTE_SYNTAX { fast_of(insn, canon_syntax(insn.entry)) } else { fast_raw(route, insn, &alu4, &bittest) };
+    // (a pi32v2-isa jump with no micro-op: `gotoss`'s target)
+    if fast.is_none() && route == ROUTE_PI {
+        let next_pc = insn.addr.wrapping_add(insn.entry.len as u32);
+        if let Some((on, t)) = fm1_isa::pi32v2_table::index_of(insn.entry).and_then(|k| pi32v2_exec::jump(k, insn.raw, next_pc)) {
+            return (on, Some(t));
+        }
+    }
     match fast.map(Fast::specialise) {
         Some(Fast::Goto { target }) => (false, Some(target)),
         Some(Fast::Call { target }) => (true, Some(target)),
@@ -7486,6 +7559,9 @@ pub struct LineX {
 /// Which arm of `Cpu::execute` handles this instruction: the guards in the
 /// same order as there, evaluated once per instruction word and cached.
 fn route_of(insn: &Instruction, alu4: &Option<Alu4>, bittest: &Option<BitTest>) -> u16 {
+    if fm1_isa::pi32v2_table::index_of(insn.entry).is_some() {
+        return ROUTE_PI;
+    }
     let name = insn.entry.name;
     match name {
             // `[++R=R]` / `[R++=R]`, the table's classes too (one executed `h[r9++=r0] = r0.h`
@@ -7613,6 +7689,8 @@ fn sreg_list_mask(list: &str) -> Option<u16> {
 /// The route of the generic, syntax-keyed executor (`exec_syntax`).
 const ROUTE_SYNTAX: u16 = 30;
 const ROUTE_FPU: u16 = 31;
+/// A form of pi32v2-isa's table fm1-core runs from it (`pi32v2_exec`).
+const ROUTE_PI: u16 = 60;
 
 #[derive(Clone, Copy, Debug)]
 enum Base { Reg(u8), Sp }
@@ -8004,6 +8082,9 @@ fn fast_raw(route: u16, insn: &Instruction, alu4: &Option<Alu4>, bittest: &Optio
     let raw = insn.raw;
     let next_pc = insn.addr.wrapping_add(insn.entry.len as u32);
     match route {
+        // the pi32v2-isa forms that are one of the micro-ops (`pi32v2_exec::fast`): the JITs and the
+        // polling-loop skip take them as they took fm1-isa's classes
+        ROUTE_PI => pi32v2_exec::fast(fm1_isa::pi32v2_table::index_of(insn.entry)?, raw, next_pc),
         0 => {
             let t = (*bittest)?;
             let (mk, mv) = rhs_kind(t.mask);
