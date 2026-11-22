@@ -7,20 +7,15 @@
 //! takes each event once it has made that many frames, so notes keep their spacing and the delay
 //! is a constant the plugin reports to the host as its latency.
 
-use fm1_core::{Bus, Cpu};
 use fm1_map::{KeysMode, Mapper, Out, Profile, Target};
-use fm1_soc::{machine, Action, Board, Soc};
+use fm1_soc::{machine, Action, Board};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const RAM_BASE: u32 = 0x01c0_0000;
-const RAM_SIZE: usize = 1 << 20;
 /// The firmware's output rate.
 pub const RATE: f64 = 44_100.0;
-/// Flash sectors, for saving what the firmware wrote (its patches) with the host's project.
-const SECTOR: usize = 4096;
 /// The shortest a panel key stays down or up on the emulated clock: a quick finger's press. A click
 /// can come shorter (both of its events in one frame of the window, or while the machine waits for
 /// the host), too short for the firmware's polling to see.
@@ -268,14 +263,10 @@ pub struct Shared {
     pub quit: AtomicBool,
 }
 
+/// The machine: fm1_soc::machine's (its `soc`, its halt and the flash sectors the firmware has written,
+/// saved with the host's project, are reached through `Deref`), with the panel keys' hold around it.
 struct Machine {
-    cpu: Cpu,
-    cpu1: Option<Cpu>,
-    soc: Soc,
-    pending_tick: bool,
-    halted: bool,
-    /// the flash as booted, to find the sectors the firmware has written since
-    flash0: Vec<u8>,
+    m: machine::Machine,
     /// the cycle each panel key may next change at, one for every `u8` id
     key_free: [u64; 256],
     /// each panel key's state once its queued changes are done
@@ -290,19 +281,12 @@ impl Machine {
         }).collect::<Vec<_>>())?;
         let st = std::panic::catch_unwind(|| fm1_soc::stock_from_package(pkg, None))
             .map_err(|_| "malformed firmware package".to_owned())??;
-        let mut soc = Soc::new(RAM_SIZE, st.xip);
-        soc.periph.hz = mhz * 1_000_000;
-        soc.periph.skip_idle = true;
-        soc.lcd_timed = lcd_timed;
-        let mut cpu = Cpu::new(st.entry);
-        cpu.jit_on = true;
-        cpu.user = true; // the SPL hands cpu0 over in user mode (fm1-core's Cpu::user)
-        let params = RAM_BASE + 0x7fc00;
-        soc.write32(params, params + 0x40);
-        cpu.regs[0] = fm1_soc::stock_boot(&mut soc, &st.flash, params, st.board);
-        let flash0 = soc.flash.mem.clone();
-        restore_flash(&mut soc, sectors);
-        Ok(Machine { cpu, cpu1: None, soc, pending_tick: false, halted: false, flash0, key_free: [0; 256], key_last: [false; 256] })
+        // (no chip key, `Options::sfc`: the XIP window shows the chip as stored)
+        let opts = machine::Options { mhz, jit: true, lcd_timed, sfc: false, ..Default::default() };
+        let mut m = machine::Machine::from_stock(st, &opts);
+        let sectors: Vec<(u32, &[u8])> = sectors.iter().map(|(at, data)| (*at, &data[..])).collect();
+        m.restore_sectors(&sectors)?;
+        Ok(Machine { m, key_free: [0; 256], key_last: [false; 256] })
     }
 
     /// A press that would wait more than two holds is dropped, and its release with it: fast clicks
@@ -331,34 +315,26 @@ impl Machine {
     /// jit.rs), which a panic cannot leave, so a peripheral's model failing on an access made from a
     /// compiled block still aborts the process, the host with it.
     fn run(&mut self, n: u32) -> Result<(), String> {
-        let jit = self.cpu.jit_on;
-        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        let ran = caught(std::panic::AssertUnwindSafe(|| {
-            machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick))
-        }));
-        self.halted |= ran.is_err();
+        let m = &mut self.m;
+        let ran = caught(std::panic::AssertUnwindSafe(|| m.run(n)));
+        // (the machine keeps why it halted; a panic's reason it is told here)
+        if let Err(why) = &ran {
+            self.m.halt(why.clone());
+        }
         ran
-    }
-
-    fn changed_sectors(&self) -> Sectors {
-        let (now, then) = (&self.soc.flash.mem, &self.flash0);
-        (0..now.len().min(then.len()) / SECTOR)
-            .filter(|s| now[s * SECTOR..(s + 1) * SECTOR] != then[s * SECTOR..(s + 1) * SECTOR])
-            .map(|s| ((s * SECTOR) as u32, now[s * SECTOR..(s + 1) * SECTOR].to_vec()))
-            .collect()
     }
 }
 
-fn restore_flash(soc: &mut Soc, sectors: &[(u32, Vec<u8>)]) {
-    for (at, data) in sectors {
-        let at = *at as usize;
-        soc.flash.mem[at..at + data.len()].copy_from_slice(data);
-        let from = at.max(fm1_soc::XIP_FLASH_OFFSET);
-        let end = (at + data.len()).min(fm1_soc::XIP_FLASH_OFFSET + soc.xip.len());
-        if from < end {
-            soc.xip[from - fm1_soc::XIP_FLASH_OFFSET..end - fm1_soc::XIP_FLASH_OFFSET]
-                .copy_from_slice(&data[from - at..end - at]);
-        }
+impl std::ops::Deref for Machine {
+    type Target = machine::Machine;
+    fn deref(&self) -> &machine::Machine {
+        &self.m
+    }
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut machine::Machine {
+        &mut self.m
     }
 }
 
@@ -590,7 +566,7 @@ pub fn run(
         while let Ok(e) = midi_in.pop() {
             due.push_back(e);
         }
-        let Some(mm) = m.as_mut().filter(|m| !m.halted) else {
+        let Some(mm) = m.as_mut().filter(|m| m.halted().is_none()) else {
             // nothing to run: silence, so the host's clock and ours stay together
             while out.slots() > 0 && rtrb_fill(&out) < lead {
                 let _ = out.push([0.0, 0.0]);
@@ -675,7 +651,7 @@ pub fn run(
                 mm.soc.periph.led_shown()
             };
             v.pads = mm.soc.periph.smk.pads;
-            v.halted = mm.halted;
+            v.halted = mm.halted().is_some();
             if speed_t.elapsed() >= Duration::from_secs(1) {
                 let ms = mm.soc.periph.ms();
                 // (the first second is the boot's: it runs flat out to fill the ring)
@@ -737,10 +713,11 @@ fn rtrb_fill(p: &rtrb::Producer<[f32; 2]>) -> usize {
 #[cfg(test)]
 mod portable_tests {
     use super::*;
+    use fm1_core::Bus;
     fn machine() -> Machine {
-        let soc = Soc::new(RAM_SIZE, vec![0x55; 0x80000]);
-        let flash0 = soc.flash.mem.clone();
-        Machine { cpu: Cpu::new(0x02000120), cpu1: None, soc, pending_tick: false, halted: false, flash0, key_free: [0; 256], key_last: [false; 256] }
+        // (a bare image: cpu0 in supervisor mode, no idle skip, as a chip and a core start)
+        let opts = machine::Options { skip_idle: false, user: false, ..Default::default() };
+        Machine { m: machine::Machine::from_image(vec![0x55; 0x80000], 0x02000120, &opts), key_free: [0; 256], key_last: [false; 256] }
     }
     #[test]
     fn a_double_click_stays_two_presses_and_other_keys_do_not_wait() {
@@ -750,7 +727,8 @@ mod portable_tests {
         m.key(3, true);
         assert!(m.soc.periph.keys_down[3]);
         for (at, down) in [(0, true), (hold - 1, true), (hold, false), (2 * hold - 1, false), (2 * hold, true), (3 * hold, false)] {
-            m.soc.periph.advance(at - m.soc.periph.cycles);
+            let now = m.soc.periph.cycles;
+            m.soc.periph.advance(at - now);
             assert_eq!(m.soc.periph.keys_down[2], down, "at cycle {at}");
         }
     }
@@ -766,15 +744,6 @@ mod portable_tests {
         m.soc.periph.advance(3 * hold);
         assert!(m.soc.periph.script.is_empty(), "{} key changes still queued", m.soc.periph.script.len());
         assert!(!m.soc.periph.keys_down[2]);
-    }
-    #[test]
-    fn restored_sectors_update_the_entire_xip_sector() {
-        let mut m = machine();
-        let mut sector = vec![0xff; 4096]; sector[0] = 0x12;
-        restore_flash(&mut m.soc, &[(0x74000, sector)]);
-        assert_eq!(m.soc.read32(0x02070000), 0xffffff12);
-        assert_eq!(m.soc.read32(0x02070010), 0xffffffff);
-        assert_eq!(m.changed_sectors()[0].0, 0x74000);
     }
     #[test]
     fn snapshot_captures_live_spi_writes_and_waits_for_idle() {
@@ -822,7 +791,7 @@ mod portable_tests {
         let mut m = machine();
         m.soc.xip.fill(0xff); // (no instruction)
         let why = m.run(100).unwrap_err();
-        assert!(m.halted && why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
+        assert!(m.halted().is_some() && why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
     }
     #[test]
     fn a_panic_is_an_error_with_its_text() {
@@ -878,6 +847,6 @@ mod portable_tests {
         m.cpu.jit_on = false;
         m.soc.flash.mem.truncate(0x8000);
         let why = (0..100).find_map(|_| m.run(100_000).err()).expect("it ran on");
-        assert!(m.halted && why.starts_with("the emulator failed (index out of bounds"), "{why}");
+        assert!(m.halted() == Some(&why[..]) && why.starts_with("the emulator failed (index out of bounds"), "{why}");
     }
 }
