@@ -25,7 +25,7 @@ Verified locally on 2026-11-23:
 
 The first native run lacked the optional Felucca fixture; the later run used a local ignored fixture link and exercised the upstream firmware-dependent standalone tests. No firmware is tracked. The headless smoke used upstream's shot/record path and did not open audio devices or change session preferences.
 
-Pending manual acceptance: native menu open/cancel and recording shortcuts, actual Finder session reopening, reset/restart inside the app, physical MiniLab User program/relative controls/bank switching, and live controller reconnection. Deterministic tests cover mapper behavior and disconnect cleanup, not the physical controller. Windows/Linux and unchanged upstream browser/plugin hosts were not runtime-tested. This branch does not establish perceptual audio equivalence or a latency guarantee.
+Remaining manual acceptance is narrowed by the interactive checks below: final menu layout/recording shortcut/Shift-click checks, reset/restart inside the app, physical MiniLab User program/relative controls/bank switching, and live controller reconnection. Deterministic tests cover mapper behavior and disconnect cleanup, not the physical controller. Windows/Linux and unchanged upstream browser/plugin hosts were not runtime-tested. This branch does not establish perceptual audio equivalence or a latency guarantee.
 
 Global hotkeys and a persistent status bar item are outside the initial scope. Existing installed applications/plugins and the old master worktree remain unchanged.
 
@@ -37,3 +37,28 @@ The standalone macOS app, complete original icon sources/exports, icon regenerat
 The standalone regression suite passed all 28 tests after restoring the native icon hooks. All local targets were rebuilt with plugin installation disabled. Resource-byte and plist metadata checks, strict/deep native signatures, browser manifest/favicon links, artwork validation and portable archive checks passed. Windows/Linux and mobile presentation and current Finder appearance remain separate manual acceptance; no artwork was regenerated or redesigned in this change.
 
 AGENTS.md and development.md explicitly require rebuilding the standalone macOS app and every other local target after every change or merge, including documentation-only edits, before handoff. The icon workflow is routed through icons.md so future agents retain the editable source and platform distinctions.
+
+
+## Interactive launch acceptance
+
+Live testing on 2026-11-23 found and fixed three host integration problems:
+
+- Saved launch arguments were checked only for file existence. Recall now validates the full launch with the upstream loader; incompatible firmware or state returns to the picker without changing those files. Regression tests cover an existing unsupported input and a compatible local firmware.
+- Finder startup spawned a child instrument while the registered launcher waited. macOS now uses the existing exec-based restart path and retains one registered app process. Windows retains upstream startup behavior.
+- minifb maps MENU_KEY_CTRL to Command on macOS, while MENU_KEY_COMMAND alone produces no modifier. The menu flags are corrected. AppKit attaches the minifb action menus directly to avoid minifb assigning every menu the system Window role.
+
+| Live check | Evidence |
+|---|---|
+| Finder icon | Approved blank-screen preview, full enclosure, no white frame or clipped controls |
+| Finder reopening | User-selected local Felucca 1.8.3 reopened without the picker after the single-process fix |
+| Instrument window | Actual graphite panel and original firmware display inspected |
+| Keyboard and recording | A held A key produced a finalized 44.1 kHz stereo WAV with non-zero audio (peak 6615) |
+| Audio menu | Recording started and stopped using its menu action |
+| Firmware selection | File-menu open/cancel and release-gated F4 observed working |
+| Command shortcuts | Cmd+O opened the picker after correcting the flag; Cmd+W closed the app; final Cmd+Shift+R recording validation remains pending |
+| Clean menu contents | Audio displayed only its recording action after native attachment; final File-menu order needs visual recheck |
+| Regression suite | 30 standalone tests passed with the recall regressions |
+
+The automation connection then returned cgWindowNotFound for both the instrument and Finder, including after resetting the connection. This prevented final visual checks of the last menu-order adjustment and Shift-click holds. The instrument process was still executing its renderer. Do not turn this tool limitation into a successful visual acceptance claim. Real MiniLab controls, audible output judged by the user, firmware-owned save/reset and complete session-state recall remain unverified.
+
+Plain .area input, including the user's previous SLOOP session, is rejected by this upstream baseline. Support from the earlier fork has not been ported and remains a migration blocker for that workflow before merging. The previous launch arguments were copied to ignored target/app-acceptance/ before selecting test firmware; original firmware and SLOOP flash were not changed.

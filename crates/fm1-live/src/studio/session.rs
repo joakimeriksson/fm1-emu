@@ -19,16 +19,24 @@ pub fn last() -> io::Result<Vec<String>> {
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 pub fn recalled() -> Option<Vec<String>> {
-    let args = last().ok()?;
+    validate_recall(last().ok()?)
+}
+fn validate_recall(args: Vec<String>) -> Option<Vec<String>> {
     let opts = crate::parse_args(
         std::iter::once("fm1-live".into())
             .chain(args.clone())
             .collect(),
     )?;
-    (opts.bench.is_none()
-        && opts.shot.is_none()
-        && opts.fwsc.as_ref().is_some_and(|p| Path::new(p).is_file()))
-    .then_some(args)
+    if opts.bench.is_some() || opts.shot.is_some() || opts.fwsc.is_none() {
+        return None;
+    }
+    // An existing file can still be incompatible with this upstream loader.
+    // Validate the complete saved launch before hiding the firmware picker.
+    if let Err(error) = crate::Machine::new(&opts) {
+        eprintln!("Previous session unavailable: {error}");
+        return None;
+    }
+    Some(args)
 }
 pub fn remember(args: &[String], firmware: &str) -> io::Result<()> {
     let mut args = args.to_vec();
@@ -77,6 +85,40 @@ pub fn archive(path: &Path) -> io::Result<()> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn existing_unsupported_firmware_returns_to_picker_without_changing_files() {
+        let dir = std::env::temp_dir().join(format!("fm1-recall-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let firmware = dir.join("unsupported.area");
+        let memory = dir.join("state.bin");
+        std::fs::write(&firmware, b"not an update package").unwrap();
+        std::fs::write(&memory, b"preserved session memory").unwrap();
+        let args = vec![
+            "--fwsc".into(),
+            firmware.to_string_lossy().into_owned(),
+            "--flash".into(),
+            memory.to_string_lossy().into_owned(),
+        ];
+        assert!(super::validate_recall(args).is_none());
+        assert_eq!(std::fs::read(&firmware).unwrap(), b"not an update package");
+        assert_eq!(std::fs::read(&memory).unwrap(), b"preserved session memory");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn compatible_firmware_keeps_its_saved_launch_options() {
+        let firmware = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../reference/firmwares/felucca.fwsc");
+        if !firmware.is_file() {
+            return;
+        }
+        let args = vec![
+            "--fwsc".into(),
+            firmware.to_string_lossy().into_owned(),
+            "--midi".into(),
+            "none".into(),
+        ];
+        assert_eq!(super::validate_recall(args.clone()), Some(args));
+    }
     #[test]
     fn reset_keeps_original_flash() {
         let dir = std::env::temp_dir().join(format!("fm1-lean-reset-{}", std::process::id()));

@@ -1629,17 +1629,22 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         let recalled: Option<Vec<String>> = None;
         if let Some(args) = recalled.or_else(|| pick_firmware().map(|p| vec!["--fwsc".into(),p.to_string_lossy().into_owned()])) {
-            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
-            // a firmware that would not load: its error stays readable, not gone with the console
-            let failed = match run {
-                Ok(st) if st.success() => None,
-                Ok(st) => Some(format!("fm1-live stopped ({st})")),
-                Err(e) => Some(format!("cannot start fm1-live: {e}")),
-            };
-            if let Some(why) = failed {
-                eprintln!("\n{why}. Press Enter to close.");
-                let _ = std::io::stdin().read_line(&mut String::new());
-                std::process::exit(1);
+            #[cfg(target_os = "macos")]
+            restart(&args);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
+                // a firmware that would not load: its error stays readable, not gone with the console
+                let failed = match run {
+                    Ok(st) if st.success() => None,
+                    Ok(st) => Some(format!("fm1-live stopped ({st})")),
+                    Err(e) => Some(format!("cannot start fm1-live: {e}")),
+                };
+                if let Some(why) = failed {
+                    eprintln!("\n{why}. Press Enter to close.");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                    std::process::exit(1);
+                }
             }
         }
         return;
@@ -1929,7 +1934,7 @@ fn main() {
 
     let mut firmware_shortcut = studio::shortcuts::ReleaseShortcut::default();
     #[cfg(target_os = "macos")]
-    let _menus = studio::menus::install(&mut win).unwrap_or_else(|e| {
+    let _menus = studio::menus::install().unwrap_or_else(|e| {
         eprintln!("Menus unavailable: {e}");
         Vec::new()
     });

@@ -38,6 +38,8 @@ No npm install is needed. The app is target/apps/FM-1 Studio.app, ad-hoc signed 
 target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3 MIDI" --map "MiniLab FM-1 User"
 ```
 
+This upstream baseline accepts update packages (.fwsc), not the previous fork's plain .area inputs. SLOOP .area compatibility remains a migration gap; do not treat the retained app bundle as evidence that the old loader extensions survived. Failed saved-session validation returns to the firmware picker.
+
 Firmware stays ignored under reference/. Tests with optional upstream fixtures can skip internally when files are missing; report actual firmware smoke runs separately. Default native audio remains upstream's implementation and latency policy. The previous fork's audio refactor is not ported without a separate comparison against this newer engine. This branch makes no new audio-latency guarantee.
 
 ## Updating upstream

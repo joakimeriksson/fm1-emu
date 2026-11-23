@@ -653,6 +653,8 @@ dependencies = [
  "fm1-soc",
  "midir",
  "minifb",
+ "objc2",
+ "objc2-app-kit",
  "rfd",
  "serde_json",
  "sha2",
