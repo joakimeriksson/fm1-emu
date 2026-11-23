@@ -1525,6 +1525,8 @@ fn open_another(now: &[String]) -> Option<Vec<String>> {
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(path) = pick_firmware() {
         let mut args = carried_over(now);
+        #[cfg(target_os = "macos")]
+        { args = ctl::controller_args(&args, "auto"); }
         args.push("--fwsc".into());
         args.push(path.to_string_lossy().into_owned());
         return Some(args);

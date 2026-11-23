@@ -22,6 +22,7 @@ pub fn recalled() -> Option<Vec<String>> {
     validate_recall(last().ok()?)
 }
 fn validate_recall(args: Vec<String>) -> Option<Vec<String>> {
+    let args = crate::ctl::controller_args(&args, "auto");
     let opts = crate::parse_args(
         std::iter::once("fm1-live".into())
             .chain(args.clone())
@@ -117,7 +118,9 @@ mod tests {
             "--midi".into(),
             "none".into(),
         ];
-        assert_eq!(super::validate_recall(args.clone()), Some(args));
+        let mut stale = args.clone();
+        stale.extend(["--map".into(), "none".into()]);
+        assert_eq!(super::validate_recall(stale), Some(crate::ctl::controller_args(&args, "auto")));
     }
     #[test]
     fn reset_keeps_original_flash() {

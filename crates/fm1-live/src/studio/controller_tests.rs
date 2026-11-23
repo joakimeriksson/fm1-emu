@@ -302,3 +302,34 @@ fn minilab_keyboard_uses_panel_keys_with_velocity_and_release() {
         assert!(rx.try_recv().is_err());
     }
 }
+
+#[test]
+fn automatic_launch_replaces_stale_selection_without_losing_session() {
+    let args: Vec<String> = [
+        "--fwsc",
+        "instrument.fwsc",
+        "--flash",
+        "saved.bin",
+        "--map",
+        "none",
+        "--midi",
+        "Minilab3 MIDI",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    let automatic = crate::ctl::controller_args(&args, "auto");
+    let opts = crate::parse_args(
+        std::iter::once("fm1-live".into())
+            .chain(automatic.clone())
+            .collect(),
+    )
+    .unwrap();
+    assert_eq!(opts.map, "auto");
+    assert_eq!(opts.fwsc.as_deref(), Some("instrument.fwsc"));
+    assert_eq!(opts.flash.as_deref(), Some("saved.bin"));
+    assert_eq!(
+        automatic.iter().filter(|a| a.as_str() == "--map").count(),
+        1
+    );
+}

@@ -76,3 +76,7 @@ Moved Master from knob 8 to knob 5, followed by Select, Presets and Algorithm on
 ## MiniLab keyboard routing
 
 Both bundled MiniLab profiles now route channel-1 notes through upstream panel-key mapping instead of firmware MIDI IN, matching on-screen key actions. A host-routing regression checks C4 pitch position, velocity, note-off and zero-velocity release without duplicate MIDI delivery. Audible crackle resolution still needs confirmation on the rebuilt app with the physical controller. No synthesis or upstream mapper code changed.
+
+## Automatic controller default
+
+Finder session recall and opening another firmware now replace the previous controller selection with Automatic. Manual selection remains live for the current run; explicit command-line profile selection remains supported. Firmware and saved flash arguments are preserved.

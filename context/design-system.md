@@ -20,4 +20,4 @@ Inter Tight is bundled with its SIL OFL license; there is no font download. The 
 
 The canvas retains upstream accessibility limits. Do not claim full keyboard or screen-reader accessibility from rendering tests. Real macOS menu, display scaling and physical-controller acceptance must be recorded separately.
 
-Controller menu: Automatic, MiniLab FM-1 User and Raw MIDI. A checkmark shows the configured selection. Switching releases old mapped holds and applies live without restarting firmware; launch preferences retain the choice. Automatic uses factory-compatible MiniLab bindings on its standard performance port.
+Controller menu: Automatic, MiniLab FM-1 User and Raw MIDI. A checkmark shows the configured selection. Switching releases old mapped holds and applies live without restarting firmware; opening firmware and Finder recall select Automatic. Automatic uses factory-compatible MiniLab bindings on its standard performance port.
