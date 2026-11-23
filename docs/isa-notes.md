@@ -561,6 +561,7 @@ Where they disagree with notes above, these win.
   pair loads and stores (words the current vendor objdump does not decode).
 - **Undecoded words**: `iff (rA_rB op rC_rD) goto` (the vendor objdump shows it only with `-mcpu=r4`) raises
   the illegal-instruction exception (EMU_MSG bit 1); words such as `45 00`..`48 00`, which the `R = #i` class
-  takes, do nothing.
+  takes, do nothing. (The emulator's decoder still takes both, the first as a float compare-branch
+  and the second as `R = #i`: narrowing it is #201.)
 - **Boot**: there is a mask ROM (7056 bytes at 0x01E00000); the app is entered with r0 = 0x01C7FE08 (the boot
   object), r1 = the entry, icfg = 0x02050500, at 360 MHz, by both M-VAVE's loader and m-bootloader.

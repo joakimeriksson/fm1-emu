@@ -1573,8 +1573,9 @@ impl Cpu {
         let sets = line.fast.is_some_and(|f| f.sets_flags());
         let s = x.pre.syntax;
         Some(FlagUse {
-            reads: reads_psr_flags(&insn),
+            reads: flags_read(insn.entry.syntax),
             writes: sets || (line.fast.is_none() && writes_psr_flags(s)),
+            all: writes_psr_flags(s),
             dropped: sets && !line.careful && line.fast.is_some_and(jit_drops_flags),
             psr_push: s.starts_with("[--sp] = {psr"),
             psr_pop: s.starts_with("{psr") && s.ends_with("= [sp++]"),
@@ -7127,38 +7128,49 @@ fn is_flag_producer(s: &str) -> bool {
         && (!s.contains('(') || s.ends_with("(brev)"))
 }
 
-/// How far past a flag producer `flags_read_later` looks for a reader.
+/// How far past a flag producer `flags_read_later` looks for a reader. Eight is enough for the catalog's
+/// firmwares as its check plays them: stepped under fm1-live's FM1_FLAG_AUDIT, no carry add or subtract
+/// and no `ifeq` / `ifne` of theirs takes a flag from a writer that compiled code runs without its
+/// flags. The reads that do are `R = psr` in an application's entry sequence, which keeps the psr it was
+/// entered with (flags from 9 to 1100 instructions back, holding nothing the application uses).
 const FLAG_SCAN: usize = 8;
 
 /// How many instructions `flags_read_later` looks at in all, over every path it follows.
 const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 
-/// Does an instruction from pc on read the flags (`+ c`, `- !c`, a `psr` read) before another
-/// add / subtract replaces them? A producer whose flags are read stays off the JITs (which do
-/// not model the flags) on the careful path. The reader need not be the next instruction:
-/// clang schedules other work between a 64-bit add's halves (FM-106's chorus interpolation
-/// stores a field between `r4 = r14 + r0` and `r5 = r15 + r1 + c`; compiled, the high half
-/// took a stale carry). Nor on the fall-through path: a direct jump, call or branch on the way is
-/// followed to its target too (a `[--sp] = {psr, ...}` there pushes the flags: compiled, stale
-/// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
-/// end a path. A reader that is never reached costs only speed.
 /// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
 /// `ifne` (`flags_read_later`'s readers)?
 fn reads_psr_flags(i: &Instruction) -> bool {
-    let s = i.entry.syntax;
-    s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
-        || s.starts_with("ifeq") || s.starts_with("ifne")
+    flags_read(i.entry.syntax) != 0
+}
+
+/// The psr flags an instruction of this form reads: a carry add or subtract C, `ifeq` / `ifne` Z, a
+/// psr read or push all four; 0: none.
+fn flags_read(s: &str) -> u32 {
+    if s.contains("+ c") || s.contains("- !c") {
+        F_C
+    } else if s.starts_with("ifeq") || s.starts_with("ifne") {
+        F_Z
+    } else if s.contains("= psr") || s.contains("psr,") || s.contains("{psr") {
+        F_N | F_Z | F_C | F_V
+    } else {
+        0
+    }
 }
 
 /// What an instruction does with the psr flags as the block path runs it (`Cpu::flag_audit`).
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
 pub struct FlagUse {
-    /// it reads them (`flags_read_later`'s readers)
-    pub reads: bool,
+    /// the ones it reads, as psr bits (`flags_read`); 0: none
+    pub reads: u32,
     /// it writes them: a micro-op that `Fast::sets_flags`, or an instruction without one that does
     /// (`writes_psr_flags`)
     pub writes: bool,
+    /// it writes all four whatever they were (`writes_psr_flags`: an add or subtract, `testset`, a
+    /// write of psr). The other writers leave some as they were: the logic forms C and V, a shift V,
+    /// and C too when its count is 0.
+    pub all: bool,
     /// it is a micro-op that writes them, off the careful path (no `flags_live`), and one a JIT
     /// compiles inline without them (`jit_drops_flags`): compiled code leaves the flags as they were
     pub dropped: bool,
@@ -7184,6 +7196,15 @@ fn jit_drops_flags(f: Fast) -> bool {
         | Fast::BitIns { .. } | Fast::Un { .. } | Fast::Div { .. } | Fast::Raw { route: 22, .. })
 }
 
+/// Does an instruction from pc on read the flags (`+ c`, `- !c`, a `psr` read) before another
+/// add / subtract replaces them? A producer whose flags are read stays off the JITs (which do
+/// not model the flags) on the careful path. The reader need not be the next instruction:
+/// clang schedules other work between a 64-bit add's halves (FM-106's chorus interpolation
+/// stores a field between `r4 = r14 + r0` and `r5 = r15 + r1 + c`; compiled, the high half
+/// took a stale carry). Nor on the fall-through path: a direct jump, call or branch on the way is
+/// followed to its target too (a `[--sp] = {psr, ...}` there pushes the flags: compiled, stale
+/// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
+/// end a path. A reader that is never reached costs only speed.
 fn flags_read_later<B: Bus>(bus: &mut B, pc: u32) -> bool {
     let (mut todo, mut visits) = (vec![(pc, FLAG_SCAN)], 0);
     while let Some((mut pc, mut left)) = todo.pop() {
