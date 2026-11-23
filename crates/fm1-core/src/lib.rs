@@ -7133,15 +7133,6 @@ const FLAG_SCAN: usize = 8;
 /// How many instructions `flags_read_later` looks at in all, over every path it follows.
 const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 
-/// Does an instruction from pc on read the flags (`+ c`, `- !c`, a `psr` read) before another
-/// add / subtract replaces them? A producer whose flags are read stays off the JITs (which do
-/// not model the flags) on the careful path. The reader need not be the next instruction:
-/// clang schedules other work between a 64-bit add's halves (FM-106's chorus interpolation
-/// stores a field between `r4 = r14 + r0` and `r5 = r15 + r1 + c`; compiled, the high half
-/// took a stale carry). Nor on the fall-through path: a direct jump, call or branch on the way is
-/// followed to its target too (a `[--sp] = {psr, ...}` there pushes the flags: compiled, stale
-/// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
-/// end a path. A reader that is never reached costs only speed.
 /// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
 /// `ifne` (`flags_read_later`'s readers)?
 fn reads_psr_flags(i: &Instruction) -> bool {
@@ -7184,6 +7175,15 @@ fn jit_drops_flags(f: Fast) -> bool {
         | Fast::BitIns { .. } | Fast::Un { .. } | Fast::Div { .. } | Fast::Raw { route: 22, .. })
 }
 
+/// Does an instruction from pc on read the flags (`+ c`, `- !c`, a `psr` read) before another
+/// add / subtract replaces them? A producer whose flags are read stays off the JITs (which do
+/// not model the flags) on the careful path. The reader need not be the next instruction:
+/// clang schedules other work between a 64-bit add's halves (FM-106's chorus interpolation
+/// stores a field between `r4 = r14 + r0` and `r5 = r15 + r1 + c`; compiled, the high half
+/// took a stale carry). Nor on the fall-through path: a direct jump, call or branch on the way is
+/// followed to its target too (a `[--sp] = {psr, ...}` there pushes the flags: compiled, stale
+/// ones), up to FLAG_SCAN instructions a path and FLAG_VISITS in all. Returns and computed jumps
+/// end a path. A reader that is never reached costs only speed.
 fn flags_read_later<B: Bus>(bus: &mut B, pc: u32) -> bool {
     let (mut todo, mut visits) = (vec![(pc, FLAG_SCAN)], 0);
     while let Some((mut pc, mut left)) = todo.pop() {
