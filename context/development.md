@@ -10,6 +10,7 @@ source_refs:
   - tools/package-studio.mjs
   - tools/serve-studio.mjs
   - tools/build_plugin.sh
+  - tools/package_macos_app.sh
   - Cargo.toml
   - tools/check_firmware_alignment.sh
   - crates/fm1-host/src/lib.rs
@@ -23,6 +24,28 @@ The canonical fork is under the selected account’s GitHub directory. Follow th
 Build native targets with locked dependencies. Build plugin bundles with NO_INSTALL=1 so a local development build cannot overwrite an existing installation. The script ad-hoc signs local bundles; this does not establish public distribution or DAW compatibility.
 
 Studio requires only Node built-ins; npm install is unnecessary. npm run build:web first invokes the upstream WASM build, then packages Studio and creates a content-derived offline cache manifest. It does not download firmware. npm run serve binds to 127.0.0.1 and serves only real files inside web/dist, with explicit WASM/JS MIME types and traversal checks.
+
+## Rebuild after changes
+
+After every change, including merges, rebuild all local targets before handing the project back for testing. Incremental builds are sufficient; do not delete build caches. Run from the repository root and stop on a failed command:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+set -e
+tools/package_macos_app.sh
+NO_INSTALL=1 tools/build_plugin.sh
+npm run build:web
+cargo build --release --locked -p fm1-live -p fm1-emu
+```
+
+| Target | Local output |
+|---|---|
+| macOS app | `target/apps/FM-1 Studio.app` |
+| CLAP, AU and VST3 | `target/plugin/FM-1.clap`, `target/plugin/FM-1.component`, `target/plugin/FM-1.vst3` |
+| Browser and offline Studio | `web/dist/`, `web/dist/studio/` |
+| Native CLI | `target/release/fm1-live`, `target/release/fm1-emu` |
+
+Verify native bundle signatures with `codesign --verify --deep --strict` for each app/plugin bundle. Report any failed or unavailable target explicitly. Builds do not replace the tests required for the change or establish interactive app, browser, DAW or hardware acceptance. Relaunch the rebuilt app for testing; close old browser service-worker tabs before checking the new web build. Plugin installation remains a separate, intentional action.
 
 ## Verification ladder
 
