@@ -7128,7 +7128,11 @@ fn is_flag_producer(s: &str) -> bool {
         && (!s.contains('(') || s.ends_with("(brev)"))
 }
 
-/// How far past a flag producer `flags_read_later` looks for a reader.
+/// How far past a flag producer `flags_read_later` looks for a reader. Eight is enough for the catalog's
+/// firmwares as its check plays them: stepped under fm1-live's FM1_FLAG_AUDIT, no carry add or subtract
+/// and no `ifeq` / `ifne` of theirs takes a flag from a writer that compiled code runs without its
+/// flags. The reads that do are `R = psr` in an application's entry sequence, which keeps the psr it was
+/// entered with (flags from 9 to 1100 instructions back, holding nothing the application uses).
 const FLAG_SCAN: usize = 8;
 
 /// How many instructions `flags_read_later` looks at in all, over every path it follows.
