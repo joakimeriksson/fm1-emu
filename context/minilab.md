@@ -14,6 +14,18 @@ Use Controller → Automatic for factory settings, Controller → MiniLab FM-1 U
 
 The dedicated program maps physical FM-1 controls, so each firmware keeps its own page meanings and button combinations. It requires a MiniLab User program and explicit selection in the emulator. The factory profile remains available with its previous assignments; do not select FM-1 User while sending factory absolute knob values.
 
+## Factory knob layout
+
+| MiniLab knob | CC | FM-1 action |
+|---|---|---|
+| 1–4 | 74, 71, 76, 77 | K1–K4 |
+| 5 | 93 | Master |
+| 6 | 18 | Select |
+| 7 | 19 | Presets |
+| 8 | 16 | Algorithm |
+
+The main encoder and master fader retain their assignments. This changes Automatic/factory mapping only; the separately configured relative User program below keeps its own layout.
+
 ## Configure the controller
 
 Use current Arturia MIDI Control Center and MiniLab firmware supporting relative encoders (1.1 or later). Recall/back up an existing User memory before replacing it. Create a local template named FM-1 and configure it as below, then store it to an unused User memory. Enable that memory and select it on MiniLab using Shift + Prog (pad 3). This software does not upload a template or change controller settings automatically.

@@ -241,3 +241,26 @@ fn changing_profile_keeps_firmware_memory_and_input_settings_in_launch_arguments
         changed
     );
 }
+
+#[test]
+fn factory_knobs_put_master_before_navigation() {
+    let mut m = Mapper::new(factory());
+    for (cc, enc) in [
+        (74, 2),
+        (71, 3),
+        (76, 4),
+        (77, 5),
+        (18, 0),
+        (19, 6),
+        (16, 1),
+    ] {
+        assert!(feed(&mut m, &[0xb0, cc, 64]).is_empty());
+        assert!(
+            matches!(feed(&mut m,&[0xb0,cc,65]).as_slice(),[Out::Enc{enc:e,clicks:1}] if *e==enc)
+        );
+    }
+    assert!(matches!(
+        feed(&mut m, &[0xb0, 93, 127]).as_slice(),
+        [Out::Adc { ch: 4, value: 1023 }]
+    ));
+}

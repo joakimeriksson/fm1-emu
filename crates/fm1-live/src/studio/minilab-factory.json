@@ -42,7 +42,7 @@
         "ch": 1,
         "cc": 93
       },
-      "to": "SELECT",
+      "to": "MASTER",
       "mode": "absolute"
     },
     {
@@ -50,7 +50,7 @@
         "ch": 1,
         "cc": 18
       },
-      "to": "PRESETS",
+      "to": "SELECT",
       "mode": "absolute"
     },
     {
@@ -58,7 +58,7 @@
         "ch": 1,
         "cc": 19
       },
-      "to": "ALGORITHM",
+      "to": "PRESETS",
       "mode": "absolute"
     },
     {
@@ -82,7 +82,7 @@
         "ch": 1,
         "cc": 16
       },
-      "to": "MASTER",
+      "to": "ALGORITHM",
       "mode": "absolute"
     },
     {

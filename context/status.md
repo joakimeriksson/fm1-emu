@@ -68,3 +68,7 @@ Plain .area input, including the user's previous SLOOP session, is rejected by t
 Physical input monitoring captured absolute CC74 and channel-10 note 36 from the standard MiniLab port, confirming factory-style output. Automatic mode now selects factory-compatible profile data; the relative User program remains explicitly selectable in the native Controller menu. Profile changes apply live through upstream Mapper::set_profile, release holds and persist without restarting firmware. Five new regressions cover captured messages, both factory pad banks, late connection/port exclusion, live switching and launch preference preservation. All 35 standalone tests pass. Full physical bank/program acceptance remains pending after relaunch.
 
 AGENTS.md now requires the fork policy before edits. The existing CI gate checks the full delta and untracked files against a finite allowlist, rejects upstream-file deletion and preserves the upstream README. The shared runtime remains upstream-identical.
+
+## Factory knob order
+
+Moved Master from knob 8 to knob 5, followed by Select, Presets and Algorithm on knobs 6–8. Knobs 1–4, the main encoder, fader and pad bindings retain their assignments. The change is profile data only; the relative User program is unchanged. A routing regression covers every factory knob.
