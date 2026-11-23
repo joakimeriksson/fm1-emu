@@ -19,6 +19,7 @@ Verified locally on 2026-11-23:
 | Real Felucca fixture | Original package booted for 3000 emulated ms; active LCD and audio peak 2806 over the last half second |
 | Panel rendering | Inspected the actual 1300×950 Felucca output, including firmware display, labels and pressed keys |
 | Standalone app | Release build and packaging passed; strict/deep ad-hoc signature verification passed |
+| Required full rebuild | Native CLI, upstream browser and CLAP/AU/VST3 bundles built; all four native bundles passed strict/deep signature verification; no plugin installation |
 | Shared upstream boundary | Protected sources match UPSTREAM_REVISION exactly |
 | Documentation | Context metadata, references, routing and links passed |
 
