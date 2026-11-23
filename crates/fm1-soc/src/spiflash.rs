@@ -81,6 +81,12 @@ pub struct SpiFlash {
     pub cut_at: Option<u32>,
 }
 
+impl Default for SpiFlash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpiFlash {
     pub fn new() -> Self {
         Self {
@@ -177,7 +183,12 @@ impl SpiFlash {
                 } else if self.cmd == 0x0b && k == 3 {
                     0xff // fast-read dummy byte
                 } else if self.cmd == 0x02 {
-                    self.pending_prog.push(out);
+                    // (every byte is programmed, onwards from the address: `set_cs`. One command
+                    // can reach the whole chip once; what it sends past that is not kept, so the
+                    // bytes held for it are the chip's size at most)
+                    if self.pending_prog.len() < FLASH_SIZE {
+                        self.pending_prog.push(out);
+                    }
                     0xff
                 } else if self.cmd == 0x03 || self.cmd == 0x0b {
                     let off = if self.cmd == 0x0b { k - 4 } else { k - 3 };
@@ -278,5 +289,51 @@ mod part_tests {
         assert_eq!(soc.flash.jedec, [0xb3, 0x60, 0x14], "a boot keeps the part");
         soc.set_board(Board::Smk37);
         assert_eq!(soc.flash.jedec, [0xeb, 0x60, 0x14], "the SMK-37 Pro's own part");
+    }
+
+    /// A page program programs every byte it is sent, onwards from its address: past the end of
+    /// its 256-byte page into the next (the chip itself wraps within the page and keeps the last
+    /// 256 it was sent: not modelled), and past the end of the chip on from its start. The bytes
+    /// held for a command are the chip's size at most: what it sends past that is not kept.
+    #[test]
+    fn a_page_program_programs_every_byte_up_to_the_chips_size() {
+        use super::{SpiFlash, FLASH_SIZE, SPI0_BASE};
+        let cmd = |f: &mut SpiFlash, head: &[u8], data: &[u8]| {
+            f.set_cs(true);
+            for &b in head.iter().chain(data) {
+                f.write(SPI0_BASE + 8, b as u32);
+            }
+            f.set_cs(false);
+        };
+        let program = |f: &mut SpiFlash, at: u32, data: &[u8]| {
+            cmd(f, &[0x06], &[]);
+            cmd(f, &[0x02, (at >> 16) as u8, (at >> 8) as u8, at as u8], data);
+        };
+        let mut f = SpiFlash::new();
+        f.cut_at = None;
+        // a whole page, as firmwares send it
+        let page: Vec<u8> = (0..=255).collect();
+        program(&mut f, 0xf1000, &page);
+        assert_eq!(&f.mem[0xf1000..0xf1100], &page[..]);
+        // 300 bytes from 16 below a page's end: on into the next page and the one after, in order
+        let long: Vec<u8> = (0..300u32).map(|i| (i * 7 + 1) as u8).collect();
+        program(&mut f, 0xf00f0, &long);
+        assert_eq!(&f.mem[0xf00f0..0xf00f0 + 300], &long[..]);
+        assert!(f.mem[0xf0000..0xf00f0].iter().all(|&b| b == 0xff), "nothing wrapped to the page's start");
+        assert_eq!(f.changed, Some((0xf00f0, 0xf00f0 + 300)));
+        // 32 bytes from 16 below the chip's end: the last 16 on from its start (the range the XIP
+        // window is told of stops at the chip's end)
+        program(&mut f, 0xffff0, &long[..32]);
+        assert_eq!((&f.mem[0xffff0..], &f.mem[..16]), (&long[..16], &long[16..32]));
+        assert_eq!(f.changed, Some((0xffff0, FLASH_SIZE)));
+        // more than the chip holds, from its start: the chip's size of 0xF0 is programmed, over
+        // what is there (bits only go to 0); the 5000 bytes of 0x0F after them are not kept, which
+        // would have gone on from the start again and cleared its first 5000 bytes
+        let mut f = SpiFlash::new();
+        f.cut_at = None;
+        program(&mut f, 0, &[vec![0xf0; FLASH_SIZE], vec![0x0f; 5000]].concat());
+        assert!(f.mem.iter().all(|&b| b == 0xf0));
+        assert!(f.pending_prog.capacity() <= 2 * FLASH_SIZE, "nor held");
+        assert_eq!((f.ops, f.revision), (1, 1));
     }
 }

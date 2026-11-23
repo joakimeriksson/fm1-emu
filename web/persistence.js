@@ -1,7 +1,7 @@
 // Firmware identity, sparse flash saves and browser storage. No audio-thread work here.
 export const FLASH_SIZE = 1 << 20;
 export const SECTOR_SIZE = 4096;
-const MAX_PACKAGE = 8 << 20;
+export const MAX_PACKAGE = 8 << 20;
 export const FORMAT = 'fm1-emulator-save';
 
 export async function packageHash(bytes) {
@@ -80,7 +80,7 @@ export async function importSave(text, resolvePackage = async () => null) {
   if (typeof r.hash !== 'string' || !/^[a-f0-9]{64}$/.test(r.hash)) throw new Error('invalid firmware hash');
   const byo = r.package == null;
   const pkg = byo ? await resolvePackage(r.hash) : decode(r.package, MAX_PACKAGE);
-  if (!pkg) throw new Error('open the matching .fwsc or .area firmware first, then import this save again');
+  if (!pkg) throw new Error('open the matching .fwsc firmware first, then import this save again');
   if (!(pkg instanceof Uint8Array) || pkg.length < 20 * 0x30 || pkg.length > MAX_PACKAGE || await packageHash(pkg) !== r.hash) throw new Error('firmware hash mismatch');
   const sectors = r.sectors.map(s => ({ at: s.at, data: decode(s.data, SECTOR_SIZE) }));
   validateSectors(sectors);
@@ -88,15 +88,11 @@ export async function importSave(text, resolvePackage = async () => null) {
 }
 
 export class SaveStore {
-  constructor(factory = globalThis.indexedDB, namespace = "") {
-    if (!/^[a-zA-Z0-9:_-]{0,180}$/.test(namespace)) throw new Error("invalid instance namespace");
-    this.factory = factory;
-    this.database = "fm1-emulator" + (namespace ? ":" + namespace : "");
-  }
+  constructor(factory = globalThis.indexedDB) { this.factory = factory; }
   async open() {
     if (!this.connection) this.connection = new Promise((resolve, reject) => {
       if (!this.factory) { reject(new Error('browser storage unavailable')); return; }
-      const request = this.factory.open(this.database, 2);
+      const request = this.factory.open('fm1-emulator', 2);
       let blocked = false;
       request.onupgradeneeded = () => {
         for (const name of ['packages', 'states', 'entries']) {

@@ -12,32 +12,40 @@
 //! imports `env.fm1_jit_compile`, which compiles a block's module and installs it in the exported
 //! function table (web/jit.js; a host without it passes a stub that returns 0).
 
-use fm1_core::{Bus, Cpu};
-use fm1_soc::{machine, Action, Soc};
+use fm1_soc::{machine, Action};
 use std::collections::VecDeque;
 
 #[path = "../../fm1-live/src/panel.rs"]
+#[allow(dead_code)] // (the native window's file: the page has no key velocity from it, and picks themes by number)
 mod panel;
 #[path = "../../fm1-live/src/panel_smk.rs"]
 mod panel_smk;
 
-const RAM_BASE: u32 = 0x01c0_0000;
-const RAM_SIZE: usize = 1 << 20;
-
+/// The machine: fm1_soc::machine's (its `cpu`, `cpu1`, `soc`, its run, halt and flash are reached
+/// through `Deref`), with what is the page's own.
 struct Machine {
-    cpu: Cpu,
-    /// the second core once the firmware releases it (fm1_soc::machine)
-    cpu1: Option<Cpu>,
-    soc: Soc,
-    pending_tick: bool,
+    m: machine::Machine,
     /// interleaved L/R i16 not yet handed out
     audio: VecDeque<i16>,
-    halted: bool,
-    flash0: Vec<u8>,
-    usr: Option<usize>,
-    usr_layout: fm1_soc::fwsc::UsrLayout,
+    /// `fm1_render` has run: saved sectors and banks are taken only before
     started: bool,
     pace: Pace,
+}
+
+// (its `cpu`, `cpu1` and `soc` are read through this. Saved sectors and a bank go through `restore`
+// and `load_syx` below, which take them only before the first render: the shared machine's
+// `restore_sectors` and `load_syx`, reached past them, have no such gate.)
+impl std::ops::Deref for Machine {
+    type Target = machine::Machine;
+    fn deref(&self) -> &machine::Machine {
+        &self.m
+    }
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut machine::Machine {
+        &mut self.m
+    }
 }
 
 /// The audio rate the page plays at (the AudioContext's, and the firmwares' I2S): a quantum of
@@ -114,76 +122,37 @@ impl Pace {
 }
 
 impl Machine {
-    /// `stock`: a package's flash (its chip and boot parameters come along) and board.
-    fn new(image: Vec<u8>, entry: u32, mhz: u32, stock: Option<(&[u8], fm1_soc::Board)>) -> Self {
-        let mut soc = Soc::new(RAM_SIZE, image);
-        soc.periph.hz = mhz as u64 * 1_000_000;
-        soc.periph.skip_idle = true;
-        soc.lcd_timed = unsafe { LCD_TIMED };
-        soc.cpu1_survives = unsafe { CPU1_SURVIVES };
-        // (before the boot: the board sets the flash chip's id from it)
-        soc.set_flash_part(flash_part(unsafe { FLASH_PART }));
-        let mut cpu = Cpu::new(entry);
-        // (cpu1 follows cpu0's setting: run_dual)
-        cpu.jit_on = unsafe { JIT };
-        cpu.user = true; // the SPL hands cpu0 over in user mode (fm1-core's Cpu::user)
-        let params = RAM_BASE + 0x7fc00;
-        soc.write32(params, params + 0x40);
-        cpu.regs[0] = params;
-        if let Some((f, board)) = stock {
-            cpu.regs[0] = fm1_soc::stock_boot(&mut soc, f, params, board);
+    /// A booted machine as the page takes it over.
+    fn new(m: machine::Machine) -> Self {
+        Machine { m, audio: VecDeque::new(), started: false, pace: Pace::default() }
+    }
+
+    /// What a boot takes from the page's settings (`fm1_jit`, `fm1_lcd_timed`, `fm1_flash_part`,
+    /// `fm1_cpu1_survives`). No chip key (`Options::sfc`): the XIP window shows the chip as stored.
+    fn options(mhz: u32) -> machine::Options {
+        machine::Options {
+            mhz: mhz as u64,
+            jit: unsafe { JIT },
+            lcd_timed: unsafe { LCD_TIMED },
+            flash_part: flash_part(unsafe { FLASH_PART }),
+            cpu1_survives: unsafe { CPU1_SURVIVES },
+            sfc: false,
+            ..Default::default()
         }
-        let flash0 = soc.flash.mem.clone();
-        Machine { cpu, cpu1: None, soc, pending_tick: false, audio: VecDeque::new(), halted: false,
-            flash0, usr: None, usr_layout: fm1_soc::fwsc::UsrLayout::FM1, started: false, pace: Pace::default() }
     }
 
-    // Runtime SPI writes replace complete ranges in XIP, including bytes that happen
-    // to equal the encrypted package. Restore must reproduce that same memory view.
-    fn replace_flash(&mut self, at: usize, data: &[u8]) {
-        let mut image = self.soc.flash.mem.clone();
-        image[at..at + data.len()].copy_from_slice(data);
-        self.soc.restore_flash(&image);
-    }
-
+    /// Saved sectors as the page keeps them: records of a little-endian flash offset and its 4 KiB
+    /// (`machine::Machine::restore_sectors`: all of them or none).
     fn restore(&mut self, bytes: &[u8]) -> bool {
         const RECORD: usize = 4096 + 4;
         if self.started || bytes.len() % RECORD != 0 || bytes.len() > RECORD * 256 { return false; }
-        let mut seen = [false; 256];
-        for record in bytes.chunks_exact(RECORD) {
-            let at = u32::from_le_bytes(record[..4].try_into().unwrap()) as usize;
-            if at % 4096 != 0 || at >= fm1_soc::FLASH_SIZE || seen[at / 4096] { return false; }
-            seen[at / 4096] = true;
-        }
-        for record in bytes.chunks_exact(RECORD) {
-            let at = u32::from_le_bytes(record[..4].try_into().unwrap()) as usize;
-            self.replace_flash(at, &record[4..]);
-        }
-        true
+        let sectors: Vec<(u32, &[u8])> =
+            bytes.chunks_exact(RECORD).map(|record| (u32::from_le_bytes(record[..4].try_into().unwrap()), &record[4..])).collect();
+        self.m.restore_sectors(&sectors).is_ok()
     }
 
     fn load_syx(&mut self, bank: &[u8]) -> bool {
-        if self.started { return false; }
-        let Some(usr) = self.usr else { return false };
-        let mut flash = self.soc.flash.mem.clone();
-        if fm1_soc::fwsc::usr_load_syx(&mut flash, usr, self.usr_layout, bank, 0).is_err() { return false; }
-        // Only bank sectors were written; preserve decrypted code elsewhere.
-        for at in (0..flash.len()).step_by(4096) {
-            if flash[at..at + 4096] != self.soc.flash.mem[at..at + 4096] {
-                self.replace_flash(at, &flash[at..at + 4096]);
-            }
-        }
-        true
-    }
-
-    /// fm1-live's loop: cpu0's blocks (interrupts exact at block granularity), cpu1 beside.
-    fn run(&mut self, n: u32) {
-        let jit = self.cpu.jit_on;
-        if let Some(c1) = self.cpu1.as_mut() { c1.profile = self.cpu.profile; }
-        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        if machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick)).is_err() {
-            self.halted = true;
-        }
+        !self.started && self.m.load_syx(bank).is_ok()
     }
 }
 
@@ -219,28 +188,30 @@ pub extern "C" fn fm1_alloc(len: u32) -> *mut u8 {
 }
 
 /// Boot the image at `ptr` (from fm1_alloc). `entry` 0x02000120 for Felucca.
+///
+/// # Safety
+/// `ptr` is what `fm1_alloc(len)` returned, and is given here once: this takes the bytes over.
 #[no_mangle]
-pub extern "C" fn fm1_boot(ptr: *mut u8, len: u32, entry: u32, mhz: u32) {
+pub unsafe extern "C" fn fm1_boot(ptr: *mut u8, len: u32, entry: u32, mhz: u32) {
     // SAFETY: ptr/len come from fm1_alloc and JS filled them.
     let image = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
-    unsafe { M = Some(Machine::new(image, entry, mhz, None)) };
+    unsafe { M = Some(Machine::new(machine::Machine::from_image(image, entry, &Machine::options(mhz)))) };
 }
 
 /// Boot M-VAVE's stock firmware from its whole update package (.fwsc) at `ptr`, with a DX7
 /// 32-voice bank (.syx) for patch slots 1-32 at `syx` when `syx_len` is not 0 (both from
 /// fm1_alloc). Returns 0, or 1 when the package does not unpack (the machine is not booted).
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len` and (when `syx_len` is not 0) for `syx` / `syx_len`.
 #[no_mangle]
-pub extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u32, mhz: u32) -> u32 {
+pub unsafe extern "C" fn fm1_boot_fwsc(ptr: *mut u8, len: u32, syx: *mut u8, syx_len: u32, mhz: u32) -> u32 {
     // SAFETY: as fm1_boot.
     let pkg = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     let bank = (syx_len != 0).then(|| unsafe { Vec::from_raw_parts(syx, syx_len as usize, syx_len as usize) });
-    match fm1_soc::firmware_from_bytes(&pkg, None) {
-        Ok(st) => {
-            let mut m = Machine::new(st.xip.clone(), st.entry, mhz, None);
-            fm1_soc::boot_firmware(&mut m.soc, &mut m.cpu, &st);
-            m.flash0 = m.soc.flash.mem.clone();
-            m.usr = st.usr;
-            m.usr_layout = st.usr_layout;
+    match machine::Machine::from_package(&pkg, None, &Machine::options(mhz)) {
+        Ok(m) => {
+            let mut m = Machine::new(m);
             if bank.as_deref().is_some_and(|b| !m.load_syx(b)) { return 1; }
             unsafe { M = Some(m) };
             0
@@ -264,7 +235,7 @@ pub extern "C" fn fm1_xip() -> *const u8 {
 pub extern "C" fn fm1_xip_len() -> u32 { machine().map_or(0, |m| m.soc.xip.len() as u32) }
 #[no_mangle]
 pub extern "C" fn fm1_flash_base() -> *const u8 {
-    machine().map_or(std::ptr::null(), |m| m.flash0.as_ptr())
+    machine().map_or(std::ptr::null(), |m| m.flash_base().as_ptr())
 }
 #[no_mangle]
 pub extern "C" fn fm1_flash_len() -> u32 { fm1_soc::FLASH_SIZE as u32 }
@@ -272,13 +243,23 @@ pub extern "C" fn fm1_flash_len() -> u32 { fm1_soc::FLASH_SIZE as u32 }
 pub extern "C" fn fm1_flash_revision() -> u32 { machine().map_or(0, |m| m.soc.flash.revision) }
 #[no_mangle]
 pub extern "C" fn fm1_flash_busy() -> u32 { machine().is_some_and(|m| m.soc.flash.busy()) as u32 }
+/// Saved sectors (records of a little-endian flash offset and its 4 KiB) over the booted flash.
+/// Returns 0, or 1 when they are not valid, the machine has rendered, or none is booted.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_flash_restore(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_flash_restore(ptr: *mut u8, len: u32) -> u32 {
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     (!machine().is_some_and(|m| m.restore(&bytes))) as u32
 }
+/// A DX7 32-voice bank into the booted firmware's patch area. Returns 0, 1 when the bank is not
+/// one (or the machine has rendered, or none is booted), 2 when this firmware has no patch area.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_load_syx(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_load_syx(ptr: *mut u8, len: u32) -> u32 {
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     match machine() {
         Some(m) if m.usr.is_none() => 2, // unsupported: keep booting without a bank
@@ -362,8 +343,11 @@ pub extern "C" fn fm1_jit_selftest_detail() -> *const u8 {
 }
 
 /// Install the same timestamped input script used by the native benchmark.
+///
+/// # Safety
+/// As `fm1_boot`, for `ptr` / `len`.
 #[no_mangle]
-pub extern "C" fn fm1_bench_script(ptr: *mut u8, len: u32) -> u32 {
+pub unsafe extern "C" fn fm1_bench_script(ptr: *mut u8, len: u32) -> u32 {
     // SAFETY: owned allocation returned by fm1_alloc, consumed exactly once.
     let bytes = unsafe { Vec::from_raw_parts(ptr, len as usize, len as usize) };
     let Ok(script) = std::str::from_utf8(&bytes) else { return 1 };
@@ -391,12 +375,13 @@ pub extern "C" fn fm1_render(frames: u32, max_insns: u32) -> u32 {
     m.pace.begin(frames, m.soc.periph.hz);
     // a cap below what the pace needs would drop out where running for the frames alone did not
     let max_insns = max_insns.max(m.pace.least(frames, m.soc.periph.hz, ahead).min(u32::MAX as u64) as u32);
-    while spent < max_insns && !m.halted && m.pace.more(m.audio.len() / 2, frames, ahead) {
+    while spent < max_insns && m.halted().is_none() && m.pace.more(m.audio.len() / 2, frames, ahead) {
         let (c0, h0) = (m.soc.periph.cycles, m.soc.periph.audio_halves);
-        m.run(20_000);
+        // (a halt is the machine's to keep: `fm1_halted`)
+        let _ = m.run(20_000);
         spent += 20_000;
         m.pace.ran(m.soc.periph.cycles - c0, m.soc.periph.audio.len() / 2, m.soc.periph.audio_halves - h0);
-        m.audio.extend(m.soc.periph.audio.drain(..));
+        m.audio.extend(m.m.soc.periph.audio.drain(..));
     }
     m.pace.end();
     unsafe { INSNS += spent as u64 };
@@ -424,9 +409,7 @@ pub extern "C" fn fm1_ahead(frames: u32) {
     unsafe { AHEAD = frames };
 }
 
-/// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
-/// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
-/// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
+/// `fm1_flash_part`'s number as the part.
 fn flash_part(n: u32) -> fm1_soc::FlashPart {
     if n == 1 { fm1_soc::FlashPart::Uc25hq80 } else { fm1_soc::FlashPart::P25q80 }
 }
@@ -440,6 +423,9 @@ pub extern "C" fn fm1_flash_part(part: u32) {
     if let Some(m) = machine() { m.soc.set_flash_part(flash_part(part)); }
 }
 
+/// A fault on core 1 stops that core alone and cpu0 goes on, as the chip's would (`on` = 1;
+/// `Soc::cpu1_survives`), for a firmware whose core 1 fails on the chip too (COSMOS 0.23).
+/// Off, the default, the machine halts there: most such faults are the emulator's own gaps.
 /// Before the boot, or for the machine running.
 #[no_mangle]
 pub extern "C" fn fm1_cpu1_survives(on: u32) {
@@ -471,7 +457,8 @@ pub extern "C" fn fm1_lcd_revision() -> u32 {
     machine().map_or(0, |m| m.soc.lcd.revision)
 }
 
-/// The LEDs' on-fractions since the last call (41 floats; SMK-37: its 19 button LEDs first).
+/// The LEDs as an eye sees them (41 floats, fm1_soc's `led_shown`). SMK-37: its 19 button LEDs
+/// first, each its on-fraction since the last call.
 #[no_mangle]
 pub extern "C" fn fm1_leds() -> *const f32 {
     #[allow(static_mut_refs)]
@@ -481,7 +468,7 @@ pub extern "C" fn fm1_leds() -> *const f32 {
                 LEDS = [0.0; 41];
                 LEDS[..fm1_soc::smk::NLED].copy_from_slice(&m.soc.periph.smk.led_take());
             } else {
-                LEDS = m.soc.periph.led_take();
+                LEDS = m.soc.periph.led_shown();
             }
         }
         LEDS.as_ptr()
@@ -570,6 +557,13 @@ pub extern "C" fn fm1_idle_ms() -> u32 {
     machine().map_or(0, |m| (m.soc.periph.skipped * 1000 / m.soc.periph.hz) as u32)
 }
 
+/// The audio halves the firmware did not refill in time since boot (fm1_soc's `refill`): its own
+/// sound breaks up at this clock, on any device.
+#[no_mangle]
+pub extern "C" fn fm1_starved() -> u32 {
+    machine().map_or(0, |m| m.soc.refill.starved as u32)
+}
+
 /// cpu0's run budget handed out so far, in millions (not instructions executed: idle skipping
 /// and a short chunk count whole; the page's speed readout is fm1_ms per wall time instead).
 #[no_mangle]
@@ -579,7 +573,7 @@ pub extern "C" fn fm1_minsns() -> u32 {
 
 #[no_mangle]
 pub extern "C" fn fm1_halted() -> u32 {
-    machine().map_or(1, |m| m.halted as u32)
+    machine().map_or(1, |m| m.halted().is_some() as u32)
 }
 
 /// 1 once core 1 stopped on an instruction it could not run (`Soc::cpu1_fault`): the chip's
@@ -592,15 +586,12 @@ pub extern "C" fn fm1_cpu1_fault() -> u32 {
 // ---------------------------------------------------------------- the front panel (page side)
 
 static mut PANEL_THEME_ID: u32 = 0;
-/// How the FM-1's panel is drawn: layout, key labels, resolution (`panel_look`).
-static mut PANEL_LOOK: panel::Look = panel::Look { layout: panel::Layout::Large, labels: false, scale: 1.0 };
 static mut PANEL_BASE: Vec<u32> = Vec::new();
 static mut PANEL_BUF: Vec<u32> = Vec::new();
 static mut PANEL_LCD: Vec<u16> = Vec::new();
 static mut PANEL_LEDS: [f32; 41] = [0.0; 41];
 static mut PANEL_DOWN: [bool; 64] = [false; 64];
 static mut PANEL_ENC: [i32; 8] = [0; 8];
-static mut PANEL_POS: [f32; 7] = [0.0; 7];
 static mut PANEL_TURN: [u32; 9] = [0; 9];
 static mut PANEL_POT: u16 = 900;
 /// Which panel the page draws: 0 the FM-1's, 1 the SMK-37's.
@@ -639,25 +630,6 @@ pub extern "C" fn panel_theme(id: u32) {
     }
 }
 
-/// The FM-1 panel's look: `layout` 0 large screen, 1 true to life, 2 display only; `labels` the
-/// stock firmware's labels on the top keys; `scale` the resolution (1.0: the large layout's LCD at
-/// 2x; in the display layout, the LCD's whole multiple). The canvas then takes panel_width x
-/// panel_height. Forces a base rebuild.
-#[no_mangle]
-pub extern "C" fn panel_look(layout: u32, labels: u32, scale: f32) {
-    let look = panel::Look {
-        layout: panel::Layout::ALL[(layout as usize).min(2)],
-        labels: labels != 0,
-        scale: if scale.is_finite() { scale.clamp(0.5, 16.0) } else { 1.0 },
-    };
-    unsafe {
-        if PANEL_LOOK != look {
-            PANEL_LOOK = look;
-            PANEL_BASE = Vec::new();
-        }
-    }
-}
-
 #[no_mangle]
 pub extern "C" fn panel_theme_count() -> u32 {
     panel::THEMES.len() as u32
@@ -681,12 +653,12 @@ pub extern "C" fn panel_theme_name(id: u32) -> *const u8 {
 
 #[no_mangle]
 pub extern "C" fn panel_width() -> u32 {
-    if unsafe { PANEL_BOARD } == 1 { panel_smk::W as u32 } else { panel::size(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }).0 as u32 }
+    if unsafe { PANEL_BOARD } == 1 { panel_smk::W as u32 } else { panel::W as u32 }
 }
 
 #[no_mangle]
 pub extern "C" fn panel_height() -> u32 {
-    if unsafe { PANEL_BOARD } == 1 { panel_smk::H as u32 } else { panel::size(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }).1 as u32 }
+    if unsafe { PANEL_BOARD } == 1 { panel_smk::H as u32 } else { panel::H as u32 }
 }
 
 /// Where the page writes the LCD frame (240*240 RGB565) before `panel_draw`.
@@ -709,11 +681,6 @@ pub extern "C" fn panel_leds() -> *mut f32 {
 }
 
 /// UI state for the drawing: a key held, an encoder's clicks, the pot, a knob's glow.
-#[no_mangle]
-pub extern "C" fn panel_position(i: u32, value: f32) {
-    if i < 7 && value.is_finite() { unsafe { PANEL_POS[i as usize] = value; } }
-}
-
 #[no_mangle]
 pub extern "C" fn panel_set(kind: u32, i: u32, v: i32) {
     unsafe {
@@ -738,7 +705,7 @@ pub extern "C" fn panel_draw() -> *const u8 {
         let smk = PANEL_BOARD == 1;
         let theme = &panel::THEMES[PANEL_THEME_ID.min(panel::THEMES.len() as u32 - 1) as usize].2;
         if PANEL_BASE.is_empty() {
-            PANEL_BASE = if smk { panel_smk::base() } else { panel::base(theme, &*std::ptr::addr_of!(PANEL_LOOK)) };
+            PANEL_BASE = if smk { panel_smk::base() } else { panel::base(theme) };
             PANEL_BUF = vec![0; PANEL_BASE.len()];
         }
         if PANEL_LCD.is_empty() {
@@ -763,13 +730,12 @@ pub extern "C" fn panel_draw() -> *const u8 {
             let st = panel::State {
                 lcd: &PANEL_LCD,
                 enc_clicks: &std::array::from_fn(|i| PANEL_ENC[i]),
-                positions: Some(&PANEL_POS),
                 pot: PANEL_POT,
                 down: &std::array::from_fn(|i| PANEL_DOWN[i]),
                 leds: &PANEL_LEDS,
                 turning: &std::array::from_fn(|i| PANEL_TURN[i]),
             };
-            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st, theme, &*std::ptr::addr_of!(PANEL_LOOK));
+            panel::draw(&mut PANEL_BUF, &PANEL_BASE, &st, theme);
         }
         // 0RGB -> RGBA bytes in place (little endian: R G B A)
         for p in PANEL_BUF.iter_mut() {
@@ -801,7 +767,7 @@ pub extern "C" fn panel_hit(x: f32, y: f32) -> i32 {
             None => -1,
         };
     }
-    match panel::hit(unsafe { &*std::ptr::addr_of!(PANEL_LOOK) }, x, y) {
+    match panel::hit(x, y) {
         Some(panel::Ctl::Enc(i)) => i as i32,
         Some(panel::Ctl::Pot) => 7,
         Some(panel::Ctl::Btn(id)) | Some(panel::Ctl::Key(id)) => 100 + id as i32,
@@ -838,51 +804,31 @@ pub extern "C" fn panel_slide(i: u32, y: f32) -> u32 {
 #[cfg(test)]
 mod persistence_tests {
     use super::*;
+    use fm1_core::Bus;
     fn blank() -> Machine {
         // Raw flash and its decrypted XIP view deliberately differ.
-        let raw = vec![0xaa; fm1_soc::FLASH_SIZE];
-        Machine::new(vec![0x55; 0x80000], 0x02000120, 100, Some((&raw, fm1_soc::Board::Fm1)))
+        let st = fm1_soc::Stock { xip: vec![0x55; 0x80000], flash: vec![0xaa; fm1_soc::FLASH_SIZE], entry: 0x02000120,
+            board: fm1_soc::Board::Fm1, identity: String::new(), key: 0, app_end: 0, usr: None, usr_layout: fm1_soc::fwsc::UsrLayout::FM1 };
+        Machine::new(machine::Machine::from_stock(st, &Machine::options(100)))
     }
     fn record(at: u32, value: u8) -> Vec<u8> {
         let mut bytes = at.to_le_bytes().to_vec();
         bytes.extend(vec![value; 4096]);
         bytes
     }
+    // (what a restored sector and an imported bank do to the chip and the window: fm1-soc's
+    // machine tests; here the page's records and when it takes them)
     #[test]
-    fn restore_replaces_complete_xip_sectors_including_raw_equal_bytes() {
+    fn saved_records_are_restored_as_their_sectors() {
         let mut m = blank();
         let mut bytes = record(0x74000, 0xaa);
         bytes[4] = 0x12;
+        bytes.extend(record(0x75000, 0xff));
         assert!(m.restore(&bytes));
         assert_eq!(m.soc.read32(0x02070000), 0xaaaaaa12);
-        assert_eq!(m.soc.flash.mem[0x74000], 0x12);
-        assert_eq!(m.flash0[0x74000], 0xaa);
-        assert_eq!(m.soc.flash.revision, 1);
-        assert!(m.restore(&record(0x75000, 0xff)));
         assert_eq!(m.soc.read32(0x02071000), 0xffffffff);
-    }
-    #[test]
-    fn restored_xip_matches_live_spi_erase_and_program() {
-        let mut live = blank();
-        let mut restored = blank();
-        // The erased byte at +0x10 already equals raw flash, but not decrypted XIP.
-        live.soc.flash.mem[0x74010] = 0xff;
-        restored.soc.flash.mem[0x74010] = 0xff;
-        for cmd in [&[0x06][..], &[0x20, 0x07, 0x40, 0x00], &[0x06],
-            &[0x02, 0x07, 0x40, 0x00, 0x12, 0x34]] {
-            live.soc.write32(0x500c0, 0);
-            for &b in cmd { live.soc.write32(0x11c08, b as u32); }
-            live.soc.write32(0x500c0, 1);
-        }
-        let mut bytes = 0x74000u32.to_le_bytes().to_vec();
-        bytes.extend_from_slice(&live.soc.flash.mem[0x74000..0x75000]);
-        assert!(restored.restore(&bytes));
-        assert_eq!(live.soc.read32(0x02070010), 0xffffffff);
-        for at in (0..4096).step_by(4) {
-            let address = 0x02070000 + at as u32;
-            assert_eq!(restored.soc.read32(address), live.soc.read32(address), "XIP at {address:x}");
-        }
-        assert_eq!(restored.soc.read32(0x02071000), 0x55555555);
+        assert_eq!(m.soc.read32(0x02072000), 0x55555555);
+        assert_eq!((m.soc.flash.mem[0x74000], m.flash_base()[0x74000], m.soc.flash.revision), (0x12, 0xaa, 2));
     }
     #[test]
     fn invalid_restore_is_atomic_and_restore_is_boot_only() {
@@ -890,7 +836,7 @@ mod persistence_tests {
         for bytes in [record(1, 0), record(1 << 20, 0), vec![0; 10],
             [record(0, 0), record(0, 1)].concat(), [record(0, 0), record(7, 0)].concat()] {
             assert!(!m.restore(&bytes));
-            assert_eq!(m.soc.flash.mem, m.flash0);
+            assert_eq!(m.soc.flash.mem, m.flash_base());
         }
         m.started = true;
         assert!(!m.restore(&record(0, 0)));
@@ -898,20 +844,17 @@ mod persistence_tests {
     }
 
     #[test]
-    fn imported_bank_overlays_restored_flash_and_keeps_the_pristine_baseline() {
+    fn a_bank_is_imported_before_the_first_render_into_a_patch_area() {
         let mut m = blank();
+        let bank = vec![0x23; 4096];
+        assert!(!m.load_syx(&bank), "this package has no patch area");
         m.usr = Some(0xe0000);
         assert!(m.restore(&record(0x74000, 0x17)));
-        let bank = vec![0x23; 4096];
-        let mut expected = m.soc.flash.mem.clone();
-        fm1_soc::fwsc::usr_load_syx(&mut expected, 0xe0000, fm1_soc::fwsc::UsrLayout::FM1, &bank, 0).unwrap();
         assert!(m.load_syx(&bank));
-        assert_eq!(m.soc.flash.mem, expected);
-        assert_eq!(m.soc.read32(0x02000000), 0x55555555, "bank imports preserve decrypted code");
-        assert_eq!(m.soc.flash.mem[0x74000], 0x17);
-        assert!(m.flash0.iter().all(|&b| b == 0xaa));
+        assert!(m.soc.flash.mem[0xe0000..] != m.flash_base()[0xe0000..] && m.soc.flash.mem[0x74000] == 0x17);
         assert!(!m.load_syx(&[1, 2, 3]));
-        assert_eq!(m.soc.flash.mem, expected, "invalid banks cannot modify saved patches");
+        m.started = true;
+        assert!(!m.load_syx(&bank));
     }
 }
 

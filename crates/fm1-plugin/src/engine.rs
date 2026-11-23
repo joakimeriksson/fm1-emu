@@ -7,19 +7,19 @@
 //! takes each event once it has made that many frames, so notes keep their spacing and the delay
 //! is a constant the plugin reports to the host as its latency.
 
-use fm1_core::{Bus, Cpu};
-use fm1_soc::{machine, Action, Board, Soc};
+use fm1_map::{KeysMode, Mapper, Out, Profile, Target};
+use fm1_soc::{machine, Action, Board};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const RAM_BASE: u32 = 0x01c0_0000;
-const RAM_SIZE: usize = 1 << 20;
 /// The firmware's output rate.
 pub const RATE: f64 = 44_100.0;
-/// Flash sectors, for saving what the firmware wrote (its patches) with the host's project.
-const SECTOR: usize = 4096;
+/// The shortest a panel key stays down or up on the emulated clock: a quick finger's press. A click
+/// can come shorter (both of its events in one frame of the window, or while the machine waits for
+/// the host), too short for the firmware's polling to see.
+const KEY_MIN_MS: u64 = 100;
 
 /// A MIDI message for the machine, with the frame (of its 44.1 kHz output) it is due at.
 #[derive(Clone, Copy, Default)]
@@ -31,8 +31,13 @@ pub struct Midi {
 
 /// What the editor and the plugin ask of the machine.
 pub enum Cmd {
-    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it.
+    /// Boot a package (.fwsc), with flash sectors saved from an earlier run written over it. A
+    /// machine that runs this package with these sectors runs on.
     Boot { pkg: Arc<Vec<u8>>, sectors: Vec<(u32, Vec<u8>)> },
+    /// The host initialized the plugin: `Boot` of the project's state (`Fm1Params::firmware` and
+    /// `flash`) as it is when the machine's thread gets here, with every command before this one
+    /// done. What the host's thread read would be the state from before a `Load` still in the queue.
+    Init,
     /// Validate and replace a shared setup, including a different save of the same package.
     Load { firmware: crate::Firmware, sectors: Vec<crate::Sector>, reply: mpsc::Sender<Result<(), String>> },
     /// Capture live flash, rather than the host-state copy refreshed every two seconds.
@@ -44,9 +49,194 @@ pub enum Cmd {
     Vel(u32),
     /// The host's block in the machine's frames: the ring's lead is that plus the Lead parameter.
     Block(usize),
+    /// A controller profile for the host's MIDI (none: to the MIDI IN jack as it comes).
+    Map(Option<Profile>),
+    /// The next note or CC binds to this target (none: stop learning).
+    Learn(Option<Target>),
+    /// Remove what is bound to a target.
+    Unbind(Target),
+    KeysMode(KeysMode),
     /// Start a WAV of the output, or finish the one being written.
     Record,
 }
+
+/// The controller's side of the machine's thread: the profile at work and what it holds.
+struct Ctl {
+    mapper: Option<Mapper>,
+    outs: Vec<Out>,
+    /// a control bound to Record was pressed: the run loop starts or stops the recorder
+    record: bool,
+    down: [bool; 41],
+    enc: [i32; 7],
+    labels: u32,
+    msg: Option<String>,
+    /// the profile changed: to the window
+    changed: bool,
+    /// it was learned in (or unbound): to the project and the user's profiles too
+    learned: bool,
+}
+
+impl Ctl {
+    fn new() -> Ctl {
+        Ctl { mapper: None, outs: Vec::with_capacity(32), record: false, down: [false; 41], enc: [0; 7],
+              labels: 0, msg: None, changed: true, learned: false }
+    }
+
+    /// A MIDI message that is due, through the profile (or straight to the jack, its channel
+    /// moved by the parameter). A profile is the FM-1's panel: an SMK-37 firmware takes the
+    /// host's MIDI as it comes, as in fm1-live.
+    fn feed(&mut self, bytes: &[u8], m: &mut Machine, params: &crate::Fm1Params) {
+        let fm1 = m.soc.board == Board::Fm1;
+        let Some(mp) = self.mapper.as_mut().filter(|_| fm1) else {
+            let ch = params.channel.value() as u8;
+            for (i, &b) in bytes.iter().enumerate() {
+                let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
+                m.soc.periph.apply(&Action::Midi { b });
+            }
+            return;
+        };
+        let outs = &mut self.outs;
+        mp.feed(bytes, &mut |o| outs.push(o));
+        self.run(Some(m), params);
+    }
+
+    /// What the profile asked for: to the machine (if one runs, and is an FM-1), the window, the
+    /// recorder.
+    fn run(&mut self, m: Option<&mut Machine>, params: &crate::Fm1Params) {
+        let mut m = m.filter(|m| m.soc.board == Board::Fm1);
+        let ch = params.channel.value() as u8;
+        let outs = std::mem::take(&mut self.outs);
+        for o in &outs {
+            match *o {
+                Out::Key { id, down, vel } => {
+                    if let Some(m) = m.as_deref_mut() {
+                        if down && id >= fm1_map::KEY0 {
+                            m.soc.periph.apply(&Action::KeyVel { vel: vel.clamp(1, 127) });
+                        }
+                        m.soc.periph.apply(&Action::Key { id, down });
+                    }
+                    if let Some(d) = self.down.get_mut(id as usize) {
+                        *d = down;
+                    }
+                }
+                Out::Enc { enc, clicks } => {
+                    if let Some(m) = m.as_deref_mut() {
+                        m.soc.periph.apply(&Action::Enc { enc, clicks });
+                    }
+                    if let Some(i) = crate::panel::ENCS.iter().position(|e| e.1 == enc) {
+                        self.enc[i] += clicks;
+                    }
+                }
+                // MASTER is the host's Master parameter: in the plugin it moves only through that
+                // (automation, the host's own MIDI learn), never from the profile directly
+                Out::Adc { .. } => {}
+                Out::Midi { mut bytes, len } => {
+                    if ch != 0 && (0x80..0xf0).contains(&bytes[0]) {
+                        bytes[0] = (bytes[0] & 0xf0) | (ch - 1);
+                    }
+                    if let Some(m) = m.as_deref_mut() {
+                        for &b in &bytes[..len as usize] {
+                            m.soc.periph.apply(&Action::Midi { b });
+                        }
+                    }
+                }
+                Out::Record => self.record = true,
+                Out::Labels => self.labels += 1,
+                Out::KeysMode(k) => self.msg = Some(format!("Keys: {}", k.name())),
+                Out::Learned => {
+                    self.changed = true;
+                    self.learned = true;
+                    self.msg = Some("Learned".into());
+                }
+            }
+        }
+        self.outs = outs;
+        self.outs.clear();
+    }
+
+    /// A new machine (a firmware loaded, booted again on another clock): what the profile held is
+    /// let go of (in the window; the new machine holds nothing) and latched buttons are off.
+    fn reset(&mut self, params: &crate::Fm1Params) {
+        let outs = &mut self.outs;
+        if let Some(mp) = self.mapper.as_mut() {
+            mp.release_all(&mut |o| outs.push(o));
+        }
+        self.run(None, params);
+        self.down = [false; 41];
+        self.publish(params);
+    }
+
+    fn command(&mut self, c: Cmd, m: Option<&mut Machine>, params: &crate::Fm1Params) {
+        match c {
+            Cmd::Map(p) => {
+                let outs = &mut self.outs;
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.release_all(&mut |o| outs.push(o));
+                }
+                self.run(m, params);
+                self.mapper = p.map(Mapper::new);
+                self.changed = true;
+            }
+            Cmd::Learn(t) => {
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.learn(t);
+                }
+            }
+            Cmd::Unbind(t) => {
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.learn(None);
+                    mp.unbind(t);
+                    (self.changed, self.learned) = (true, true);
+                    self.msg = Some(format!("{t}: unbound"));
+                }
+            }
+            Cmd::KeysMode(k) => {
+                let outs = &mut self.outs;
+                if let Some(mp) = self.mapper.as_mut() {
+                    mp.set_keys_mode(k, &mut |o| outs.push(o));
+                }
+                self.run(m, params);
+            }
+            _ => {}
+        }
+    }
+
+    /// To the window (and, for a learned profile, the project and the user's profiles).
+    fn publish(&mut self, params: &crate::Fm1Params) {
+        // a learned profile: to the project, and to a file, with no lock the window takes held
+        let mut save = None;
+        if std::mem::take(&mut self.learned) {
+            if let Some(p) = self.mapper.as_ref().map(|mp| mp.profile().clone()) {
+                let mut c = params.controller.lock().unwrap();
+                c.chosen = true;
+                c.profile = Some(p.clone());
+                save = Some(p);
+            }
+        }
+        let mut v = params.map.lock().unwrap();
+        if save.is_some() {
+            v.save = save;
+        }
+        if self.changed {
+            self.changed = false;
+            v.rev += 1;
+            v.profile = self.mapper.as_ref().map(|mp| mp.profile().clone());
+        }
+        if let Some(mp) = self.mapper.as_ref() {
+            v.keys_mode = mp.keys_mode();
+            v.learning = mp.learning();
+        } else {
+            v.learning = None;
+        }
+        v.down = self.down;
+        v.enc = self.enc;
+        v.labels = self.labels;
+        if let Some(msg) = self.msg.take() {
+            v.msg = Some(msg);
+        }
+    }
+}
+
 
 /// What the editor shows: the screen, the LEDs and how the machine is doing.
 pub struct View {
@@ -60,7 +250,7 @@ pub struct View {
     /// emulated time over the time spent emulating it, over the last second: how much faster
     /// than real time the machine could run (it runs at the host's pace)
     pub speed: f32,
-    /// Output underrun episodes: all, and in the last second
+    /// frames the host found missing (the machine fell behind): all, and in the last second
     pub starved: u64,
     pub late: u64,
 }
@@ -71,17 +261,16 @@ type Sectors = Vec<(u32, Vec<u8>)>;
 pub struct Shared {
     pub view: Mutex<View>,
     pub quit: AtomicBool,
-    pub underruns: AtomicU64,
 }
 
+/// The machine: fm1_soc::machine's (its `soc`, its halt and the flash sectors the firmware has written,
+/// saved with the host's project, are reached through `Deref`), with the panel keys' hold around it.
 struct Machine {
-    cpu: Cpu,
-    cpu1: Option<Cpu>,
-    soc: Soc,
-    pending_tick: bool,
-    halted: bool,
-    /// the flash as booted, to find the sectors the firmware has written since
-    flash0: Vec<u8>,
+    m: machine::Machine,
+    /// the cycle each panel key may next change at, one for every `u8` id
+    key_free: [u64; 256],
+    /// each panel key's state once its queued changes are done
+    key_last: [bool; 256],
 }
 
 impl Machine {
@@ -90,47 +279,65 @@ impl Machine {
         crate::savefile::validate_sectors(&sectors.iter().map(|(at, data)| crate::Sector {
             at: *at, data: Arc::new(data.clone()),
         }).collect::<Vec<_>>())?;
-        let st = std::panic::catch_unwind(|| fm1_soc::firmware_from_bytes(pkg, None))
+        let st = std::panic::catch_unwind(|| fm1_soc::stock_from_package(pkg, None))
             .map_err(|_| "malformed firmware package".to_owned())??;
-        let mut soc = Soc::new(RAM_SIZE, st.xip.clone());
-        soc.periph.hz = mhz * 1_000_000;
-        soc.periph.skip_idle = true;
-        soc.lcd_timed = lcd_timed;
-        let mut cpu = Cpu::new(st.entry);
-        cpu.jit_on = true;
-        cpu.user = true; // the SPL hands cpu0 over in user mode (fm1-core's Cpu::user)
-        let params = RAM_BASE + 0x7fc00;
-        soc.write32(params, params + 0x40);
-        fm1_soc::boot_firmware(&mut soc, &mut cpu, &st);
-        let flash0 = soc.flash.mem.clone();
-        restore_flash(&mut soc, sectors);
-        Ok(Machine { cpu, cpu1: None, soc, pending_tick: false, halted: false, flash0 })
+        // (no chip key, `Options::sfc`: the XIP window shows the chip as stored)
+        let opts = machine::Options { mhz, jit: true, lcd_timed, sfc: false, ..Default::default() };
+        let mut m = machine::Machine::from_stock(st, &opts);
+        let sectors: Vec<(u32, &[u8])> = sectors.iter().map(|(at, data)| (*at, &data[..])).collect();
+        m.restore_sectors(&sectors)?;
+        Ok(Machine { m, key_free: [0; 256], key_last: [false; 256] })
     }
 
-    /// fm1-live's loop: cpu0's blocks, cpu1 beside once the firmware releases it.
-    fn run(&mut self, n: u32) {
-        let jit = self.cpu.jit_on;
-        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        if machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick)).is_err() {
-            self.halted = true;
+    /// A press that would wait more than two holds is dropped, and its release with it: fast clicks
+    /// end at most three holds after the last one.
+    fn key(&mut self, id: u8, down: bool) {
+        let (i, now, hold) = (id as usize, self.soc.periph.cycles, self.soc.periph.cycle_of_ms(KEY_MIN_MS));
+        let at = self.key_free[i].max(now);
+        if down == self.key_last[i] || (down && at - now > 2 * hold) {
+            return;
+        }
+        self.key_last[i] = down;
+        self.key_free[i] = at + hold;
+        if at > now {
+            self.soc.periph.schedule(at, Action::Key { id, down });
+        } else {
+            self.soc.periph.apply(&Action::Key { id, down });
         }
     }
 
-    fn changed_sectors(&self) -> Sectors {
-        let (now, then) = (&self.soc.flash.mem, &self.flash0);
-        (0..now.len().min(then.len()) / SECTOR)
-            .filter(|s| now[s * SECTOR..(s + 1) * SECTOR] != then[s * SECTOR..(s + 1) * SECTOR])
-            .map(|s| ((s * SECTOR) as u32, now[s * SECTOR..(s + 1) * SECTOR].to_vec()))
-            .collect()
+    /// fm1-live's loop: cpu0's blocks, cpu1 beside once the firmware releases it.
+    /// An error is why it halted, for good: an instruction the emulator cannot run, or a panic in the
+    /// emulator's own code on what the firmware did, where it unwinds to here: in the interpreter and
+    /// what it calls (a step, code not compiled yet, the peripherals' clock between blocks, the loop
+    /// probe, core 1 outside compiled code), which would otherwise end the thread. Not under compiled
+    /// code: that calls the bus and the interpreter's executor through `extern "C"` helpers (fm1-core's
+    /// jit.rs), which a panic cannot leave, so a peripheral's model failing on an access made from a
+    /// compiled block still aborts the process, the host with it.
+    fn run(&mut self, n: u32) -> Result<(), String> {
+        let m = &mut self.m;
+        let ran = caught(std::panic::AssertUnwindSafe(|| m.run(n)));
+        // (the machine keeps why it halted; a panic's reason it is told here)
+        if let Err(why) = &ran {
+            self.m.halt(why.clone());
+        }
+        ran
     }
 }
 
-fn restore_flash(soc: &mut Soc, sectors: &[(u32, Vec<u8>)]) {
-    let mut image = soc.flash.mem.clone();
-    for (at, data) in sectors {
-        image[*at as usize..*at as usize + data.len()].copy_from_slice(data);
+// (its `cpu`, `cpu1` and `soc` are read through this. It is run through `run` above, which turns a
+// panic into a halt: the shared machine's own `run`, reached past it as `self.m.run`, does not.)
+impl std::ops::Deref for Machine {
+    type Target = machine::Machine;
+    fn deref(&self) -> &machine::Machine {
+        &self.m
     }
-    soc.restore_flash(&image);
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut machine::Machine {
+        &mut self.m
+    }
 }
 
 struct Snapshot {
@@ -162,27 +369,44 @@ fn snapshots(pending: &mut Vec<Snapshot>, machine: Option<&Machine>, params: &cr
             let _ = request.reply.send(Err("no firmware is running".into()));
             return false;
         };
-        if now.duration_since(request.polled) >= Duration::from_millis(20) {
-            request.polled = now;
-            if request.flash != m.soc.flash.mem {
-                request.flash.copy_from_slice(&m.soc.flash.mem);
-                request.quiet_since = now;
-            }
-        }
-        // A firmware save may span several SPI commands and render batches.
-        if m.soc.flash.busy() || now.duration_since(request.quiet_since) < Duration::from_millis(250) { return true; }
-        // Recheck after the sampled quiet period: never export between commands of a new save.
+        if now.duration_since(request.polled) < Duration::from_millis(20) { return true; }
+        request.polled = now;
         if request.flash != m.soc.flash.mem {
             request.flash.copy_from_slice(&m.soc.flash.mem);
             request.quiet_since = now;
-            return true;
         }
+        // A firmware save may span several SPI commands and render batches.
+        if m.soc.flash.busy() || now.duration_since(request.quiet_since) < Duration::from_millis(250) { return true; }
         let sectors = project_sectors(&m.changed_sectors());
         let fw = params.firmware.lock().unwrap();
         if *fw.pkg == *request.pkg { *params.flash.lock().unwrap() = sectors.clone(); }
         let _ = request.reply.send(Ok(sectors));
         false
     });
+}
+
+/// `f`, a panic in it as its error: the emulator's own code failing on a firmware or a package must
+/// not end the machine's thread, which every later firmware needs. (A panic that unwinds to here:
+/// one under compiled code does not, see `Machine::run`.)
+fn caught<T>(f: impl FnOnce() -> Result<T, String> + std::panic::UnwindSafe) -> Result<T, String> {
+    std::panic::catch_unwind(f).unwrap_or_else(|p| {
+        let said = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned());
+        Err(format!("the emulator failed ({})", said.as_deref().unwrap_or("a panic")))
+    })
+}
+
+/// `Machine::boot`, with a panic anywhere in it as its error.
+fn boot(pkg: &[u8], sectors: &[(u32, Vec<u8>)], mhz: u64, lcd_timed: bool) -> Result<Machine, String> {
+    caught(|| Machine::boot(pkg, sectors, mhz, lcd_timed))
+}
+
+/// What the firmware has written to its flash, to the project's state when that changed.
+fn save_sectors(m: &Machine, saved: &mut Sectors, params: &crate::Fm1Params) {
+    let now = m.changed_sectors();
+    if now != *saved {
+        *params.flash.lock().unwrap() = project_sectors(&now);
+        *saved = now;
+    }
 }
 
 /// The thread: commands in, MIDI in (stamped), frames out.
@@ -193,47 +417,71 @@ pub fn run(
     mut midi_in: rtrb::Consumer<Midi>,
     mut out: rtrb::Producer<[f32; 2]>,
 ) {
-    fm1_host::audio::prioritize_producer();
     let mut m: Option<Machine> = None;
     // the instant LCD unless the host's environment asks for the timed one (FM1_LCD_TIMED)
     let lcd_timed = fm1_soc::lcd_timed_from_env();
     let mut block = 1024usize;
+    let mut ctl = Ctl::new();
     let mut made: u64 = 0; // frames pushed since boot
     let mut due: VecDeque<Midi> = VecDeque::new();
     let mut pot = u16::MAX;
-    let mut controller = fm1_soc::controller::MiniLab3::fm1();
-    let mut controller_mode = params.controller.value();
-    let mut host_master = params.master.value();
     // the sectors last put in the project's state
     let mut saved: Sectors = Vec::new();
     let mut last_view = Instant::now();
-    // when the host last took frames, and the free run's start (wall time, emulated ms)
+    // when the host last took frames, and the free run's start (wall time, the machine's ms: none
+    // again when another machine is booted, whose clock starts at 0)
     let mut last_take = Instant::now();
     let mut free: Option<(Instant, u64)> = None;
     let mut last_flash = Instant::now();
     let mut active_pkg: Option<Arc<Vec<u8>>> = None;
     let mut pending = Vec::new();
     let (mut speed_t, mut speed_ms, mut busy, mut starved0) = (Instant::now(), 0u64, Duration::ZERO, 0u64);
-    let mut rec: Option<crate::wav::AsyncWav> = None;
+    let mut rec: Option<crate::wav::Wav> = None;
+    // a run that ended in a halt: why, for the window
+    let halt = |ran: Result<(), String>| {
+        if let Err(e) = ran {
+            *params.halt.lock().unwrap() = Some(format!("The firmware stopped: {e}"));
+        }
+    };
     while !shared.quit.load(Ordering::Relaxed) {
         while let Ok(c) = cmds.try_recv() {
             let (c, prepared, loaded) = match c {
                 Cmd::Load { firmware, sectors, reply } => {
                     let sectors: Sectors = sectors.iter().map(|s| (s.at, s.data.to_vec())).collect();
-                    match Machine::boot(&firmware.pkg, &sectors, params.clock.value().mhz(), lcd_timed) {
+                    match boot(&firmware.pkg, &sectors, params.clock.value().mhz(), lcd_timed) {
                         Ok(next) => (Cmd::Boot { pkg: firmware.pkg.clone(), sectors }, Some(next), Some((firmware, reply))),
                         Err(error) => { let _ = reply.send(Err(error)); continue; }
                     }
+                }
+                Cmd::Init => {
+                    let pkg = params.firmware.lock().unwrap().pkg.clone();
+                    if pkg.is_empty() {
+                        continue;
+                    }
+                    let sectors = params.flash.lock().unwrap().iter().map(|s| (s.at, s.data.to_vec())).collect();
+                    (Cmd::Boot { pkg, sectors }, None, None)
                 }
                 other => (other, None, None),
             };
             match c {
                 Cmd::Boot { pkg, sectors } => {
+                    // the host initializing again (a new sample rate) finds the package that runs with
+                    // the sectors the project has from this machine, as last saved or as its flash is
+                    // now: nothing to do. Other sectors are a state the host loaded (a preset, an
+                    // undo), booted as another package is, so the project's flash and the machine's
+                    // are the same again and what the firmware writes later is saved on top of that.
+                    let runs = prepared.is_none() && active_pkg.as_ref().is_some_and(|a| Arc::ptr_eq(a, &pkg) || **a == *pkg);
+                    if runs && m.as_ref().is_some_and(|mm| sectors == saved || sectors == mm.changed_sectors()) {
+                        saved = sectors;
+                        continue;
+                    }
                     cancel_snapshots(&mut pending);
-                    m = prepared.or_else(|| Machine::boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed).ok());
+                    // (a project's package that does not boot: the window says why, as for a halt)
+                    let booted = prepared.map_or_else(|| boot(&pkg, &sectors, params.clock.value().mhz(), lcd_timed), Ok);
+                    *params.halt.lock().unwrap() = booted.as_ref().err().map(|e| format!("The firmware did not start: {e}"));
+                    m = booted.ok();
                     active_pkg = m.as_ref().map(|_| pkg);
                     pot = u16::MAX;
-                    controller = fm1_soc::controller::MiniLab3::fm1();
                     let mut v = shared.view.lock().unwrap();
                     v.booted = m.is_some();
                     v.halted = false;
@@ -244,8 +492,12 @@ pub fn run(
                     speed_ms = 0;
                     busy = Duration::ZERO;
                     v.board = m.as_ref().map_or(Board::Fm1, |m| m.soc.board);
+                    drop(v);
+                    ctl.reset(&params);
                     saved = sectors;
                     due.clear();
+                    // (a free run is one machine's: its start is on that machine's clock)
+                    free = None;
                     if let Some((firmware, reply)) = loaded {
                         *params.firmware.lock().unwrap() = firmware;
                         *params.flash.lock().unwrap() = project_sectors(&saved);
@@ -253,6 +505,7 @@ pub fn run(
                     }
                     // (the frame count goes on: the host's stamps are against it)
                 }
+                Cmd::Init => unreachable!(), // (a Boot of what the project holds, above)
                 Cmd::Snapshot { pkg, reply } => {
                     if active_pkg.as_ref().is_some_and(|active| **active == *pkg) {
                         if let Some(machine) = &m {
@@ -263,7 +516,11 @@ pub fn run(
                     } else { let _ = reply.send(Err("firmware changed before export; try again".into())); }
                 }
                 Cmd::Load { .. } => unreachable!(), // normalized above, after validation
-                Cmd::Key { id, down } => apply(&mut m, Action::Key { id, down }),
+                Cmd::Key { id, down } => {
+                    if let Some(m) = m.as_mut() {
+                        m.key(id, down);
+                    }
+                }
                 Cmd::Enc { enc, clicks } => apply(&mut m, Action::Enc { enc, clicks }),
                 Cmd::Analog { idx, value } => apply(&mut m, Action::Adc { ch: idx, value: value.min(1023) }),
                 Cmd::Vel(us) => {
@@ -273,6 +530,10 @@ pub fn run(
                 }
                 Cmd::Block(b) => block = b,
                 Cmd::Record => record(&mut rec, &params),
+                c @ (Cmd::Map(_) | Cmd::Learn(_) | Cmd::Unbind(_) | Cmd::KeysMode(_)) => {
+                    ctl.command(c, m.as_mut(), &params);
+                    ctl.publish(&params);
+                }
             }
         }
         // the ring's lead: the host's block and the Lead parameter, as the window sets it
@@ -283,11 +544,13 @@ pub fn run(
         if let (Some(mm), Some(pkg)) = (m.as_ref(), active_pkg.as_ref()) {
             if mm.soc.periph.hz != mhz * 1_000_000 && pending.is_empty() {
                 let sectors = mm.changed_sectors();
-                if let Ok(next) = Machine::boot(pkg, &sectors, mhz, lcd_timed) {
+                if let Ok(next) = boot(pkg, &sectors, mhz, lcd_timed) {
                     m = Some(next);
-                    controller = fm1_soc::controller::MiniLab3::fm1();
+                    *params.halt.lock().unwrap() = None;
                     pot = u16::MAX;
                     due.clear();
+                    free = None;
+                    ctl.reset(&params);
                     let mut v = shared.view.lock().unwrap();
                     (v.halted, v.speed) = (false, 0.0);
                     starved0 = v.starved;
@@ -296,19 +559,8 @@ pub fn run(
             }
         }
         snapshots(&mut pending, m.as_ref(), &params, Instant::now());
-        let mode = params.controller.value();
-        if mode != controller_mode {
-            controller.release(|a| apply(&mut m, a));
-            controller_mode = mode;
-            *params.controller_master.lock().unwrap() = None;
-        }
-        // Host automation takes over from the last controller volume movement.
-        if host_master != params.master.value() {
-            host_master = params.master.value();
-            *params.controller_master.lock().unwrap() = None;
-        }
-        let p = params.controller_master.lock().unwrap().unwrap_or(
-            (host_master * 1023.0).round().clamp(0.0, 1023.0) as u16);
+        // the MASTER pot, a host parameter
+        let p = (params.master.value() * 1023.0).round().clamp(0.0, 1023.0) as u16;
         if p != pot && m.as_ref().is_some_and(|m| m.soc.board == Board::Fm1) {
             pot = p;
             apply(&mut m, Action::Adc { ch: 4, value: p });
@@ -316,16 +568,34 @@ pub fn run(
         while let Ok(e) = midi_in.pop() {
             due.push_back(e);
         }
-        let Some(mm) = m.as_mut().filter(|m| !m.halted) else {
+        let Some(mm) = m.as_mut().filter(|m| m.halted().is_none()) else {
             // nothing to run: silence, so the host's clock and ours stay together
             while out.slots() > 0 && rtrb_fill(&out) < lead {
                 let _ = out.push([0.0, 0.0]);
                 made += 1;
             }
             due.retain(|e| e.frame > made);
+            // a machine that halted: the window is told, with the screen it stopped at, and what it
+            // wrote to its flash before goes to the project (nothing changes after: the first look saves it)
+            if let Some(mm) = m.as_ref() {
+                if last_view.elapsed() >= Duration::from_millis(30) {
+                    last_view = Instant::now();
+                    let mut v = shared.view.lock().unwrap();
+                    v.lcd.copy_from_slice(&mm.soc.lcd.fb);
+                    v.halted = true;
+                }
+                if last_flash.elapsed() >= Duration::from_secs(2) {
+                    last_flash = Instant::now();
+                    save_sectors(mm, &mut saved, &params);
+                }
+            }
             std::thread::sleep(Duration::from_millis(2));
             continue;
         };
+        // a control bound to Record (the profile's), as the button does
+        if std::mem::take(&mut ctl.record) {
+            record(&mut rec, &params);
+        }
         let fill = rtrb_fill(&out);
         if fill < lead {
             last_take = Instant::now();
@@ -338,7 +608,7 @@ pub fn run(
             let (t0, ms0) = *free.get_or_insert((Instant::now(), mm.soc.periph.ms()));
             if mm.soc.periph.ms() - ms0 < t0.elapsed().as_millis() as u64 {
                 let t1 = Instant::now();
-                mm.run(20_000);
+                halt(mm.run(20_000));
                 busy += t1.elapsed();
                 mm.soc.periph.audio.clear();
             } else {
@@ -349,17 +619,10 @@ pub fn run(
         } else {
             while due.front().is_some_and(|e| e.frame <= made) {
                 let e = due.pop_front().unwrap();
-                route_input(&mut controller, controller_mode, mm.soc.board,
-                    params.channel.value() as u8, &e.bytes[..e.len as usize], |a| {
-                        if let Action::Adc { ch: 4, value } = a {
-                            *params.controller_master.lock().unwrap() = Some(value);
-                            pot = value;
-                        }
-                        mm.soc.periph.apply(&a);
-                    });
+                ctl.feed(&e.bytes[..e.len as usize], mm, &params);
             }
             let t0 = Instant::now();
-            mm.run(20_000);
+            halt(mm.run(20_000));
             busy += t0.elapsed();
             let a = std::mem::take(&mut mm.soc.periph.audio);
             if let Some(w) = rec.as_mut() {
@@ -378,6 +641,7 @@ pub fn run(
         }
         if last_view.elapsed() >= Duration::from_millis(30) {
             last_view = Instant::now();
+            ctl.publish(&params);
             params.rec.lock().unwrap().file = rec.as_ref().map(|w| (w.path.clone(), w.frames));
             let mut v = shared.view.lock().unwrap();
             v.lcd.copy_from_slice(&mm.soc.lcd.fb);
@@ -386,11 +650,10 @@ pub fn run(
                 l[..fm1_soc::smk::NLED].copy_from_slice(&mm.soc.periph.smk.led_take());
                 l
             } else {
-                mm.soc.periph.led_take()
+                mm.soc.periph.led_shown()
             };
             v.pads = mm.soc.periph.smk.pads;
-            v.halted = mm.halted;
-            v.starved = shared.underruns.load(Ordering::Relaxed);
+            v.halted = mm.halted().is_some();
             if speed_t.elapsed() >= Duration::from_secs(1) {
                 let ms = mm.soc.periph.ms();
                 // (the first second is the boot's: it runs flat out to fill the ring)
@@ -404,12 +667,7 @@ pub fn run(
         }
         if last_flash.elapsed() >= Duration::from_secs(2) {
             last_flash = Instant::now();
-            let now = mm.changed_sectors();
-            if now != saved {
-                *params.flash.lock().unwrap() =
-                    now.iter().map(|(at, d)| crate::Sector { at: *at, data: Arc::new(d.clone()) }).collect();
-                saved = now;
-            }
+            save_sectors(mm, &mut saved, &params);
         }
     }
     // the plugin closed while recording: the file keeps what was played, with its length
@@ -420,27 +678,23 @@ pub fn run(
 
 /// Start a WAV of the output (in the Music folder's fm1-emu, named after the firmware), or
 /// finish the one being written; what happened goes to the window.
-fn record(rec: &mut Option<crate::wav::AsyncWav>, params: &Arc<crate::Fm1Params>) {
-    if let Some(w) = rec.take() {
-        { let mut status = params.rec.lock().unwrap(); status.file = None; status.msg = Some("Finishing recording".into()); }
-        let params = params.clone();
-        std::thread::spawn(move || {
-            let message = match w.finish() {
-                Ok(p) => format!("Recorded {}", p.display()),
+fn record(rec: &mut Option<crate::wav::Wav>, params: &crate::Fm1Params) {
+    let msg = match rec.take() {
+        Some(w) => match w.finish() {
+            Ok(p) => format!("Recorded {}", p.display()),
+            Err(e) => format!("Recording: {e}"),
+        },
+        None => {
+            let name = params.firmware.lock().unwrap().name.clone();
+            match crate::wav::Wav::create(if name.is_empty() { "fm1" } else { &name }) {
+                Ok(w) => {
+                    let m = format!("Recording to {}", w.path.display());
+                    *rec = Some(w);
+                    m
+                }
                 Err(e) => format!("Recording: {e}"),
-            };
-            params.rec.lock().unwrap().msg = Some(message);
-        });
-        return;
-    }
-    let name = params.firmware.lock().unwrap().name.clone();
-    let msg = match crate::wav::AsyncWav::create(if name.is_empty() { "fm1" } else { &name }) {
-        Ok(w) => {
-            let message = format!("Recording to {}", w.path.display());
-            *rec = Some(w);
-            message
+            }
         }
-        Err(e) => format!("Recording: {e}"),
     };
     let mut r = params.rec.lock().unwrap();
     r.file = rec.as_ref().map(|w| (w.path.clone(), w.frames));
@@ -453,15 +707,6 @@ fn apply(m: &mut Option<Machine>, a: Action) {
     }
 }
 
-// Decode the command channel before remapping performance MIDI to a firmware part.
-fn route_input(controller: &mut fm1_soc::controller::MiniLab3, mode: crate::Controller,
-    board: Board, channel: u8, bytes: &[u8], mut emit: impl FnMut(Action)) {
-    if board == Board::Fm1 && mode == crate::Controller::MiniLab && controller.route(bytes, &mut emit) { return; }
-    for (i, &b) in bytes.iter().enumerate() {
-        emit(Action::Midi { b: if i == 0 && channel != 0 { (b & 0xf0) | (channel - 1) } else { b } });
-    }
-}
-
 /// Frames waiting in the ring.
 fn rtrb_fill(p: &rtrb::Producer<[f32; 2]>) -> usize {
     p.buffer().capacity() - p.slots()
@@ -470,31 +715,37 @@ fn rtrb_fill(p: &rtrb::Producer<[f32; 2]>) -> usize {
 #[cfg(test)]
 mod portable_tests {
     use super::*;
-    #[test]
-    fn area_firmware_boots_and_restores_via_shared_loader() {
-        let Ok(path) = std::env::var("FM1_TEST_AREA") else { return };
-        let bytes = std::fs::read(path).unwrap();
-        let mut m = Machine::boot(&bytes, &[], 240, false).unwrap();
-        while m.soc.periph.ms() < 12_000 && !m.halted { m.run(100_000); }
-        assert!(!m.halted);
-        assert!(m.soc.lcd.fb.iter().any(|&p| p != 0));
-        let sectors = m.changed_sectors();
-        let copy = Machine::boot(&bytes, &sectors, 240, false).unwrap();
-        assert_eq!(copy.soc.flash.mem, m.soc.flash.mem);
-    }
+    use fm1_core::Bus;
     fn machine() -> Machine {
-        let soc = Soc::new(RAM_SIZE, vec![0x55; 0x80000]);
-        let flash0 = soc.flash.mem.clone();
-        Machine { cpu: Cpu::new(0x02000120), cpu1: None, soc, pending_tick: false, halted: false, flash0 }
+        // (a bare image: cpu0 in supervisor mode, no idle skip, as a chip and a core start)
+        let opts = machine::Options { skip_idle: false, user: false, ..Default::default() };
+        Machine { m: machine::Machine::from_image(vec![0x55; 0x80000], 0x02000120, &opts), key_free: [0; 256], key_last: [false; 256] }
     }
     #[test]
-    fn restored_sectors_update_the_entire_xip_sector() {
+    fn a_double_click_stays_two_presses_and_other_keys_do_not_wait() {
         let mut m = machine();
-        let mut sector = vec![0xff; 4096]; sector[0] = 0x12;
-        restore_flash(&mut m.soc, &[(0x74000, sector)]);
-        assert_eq!(m.soc.read32(0x02070000), 0xffffff12);
-        assert_eq!(m.soc.read32(0x02070010), 0xffffffff);
-        assert_eq!(m.changed_sectors()[0].0, 0x74000);
+        let hold = m.soc.periph.cycle_of_ms(KEY_MIN_MS);
+        for down in [true, false, true, false] { m.key(2, down); }
+        m.key(3, true);
+        assert!(m.soc.periph.keys_down[3]);
+        for (at, down) in [(0, true), (hold - 1, true), (hold, false), (2 * hold - 1, false), (2 * hold, true), (3 * hold, false)] {
+            let now = m.soc.periph.cycles;
+            m.soc.periph.advance(at - now);
+            assert_eq!(m.soc.periph.keys_down[2], down, "at cycle {at}");
+        }
+    }
+    #[test]
+    fn fast_clicks_stop_soon_after_the_last_one() {
+        let mut m = machine();
+        let hold = m.soc.periph.cycle_of_ms(KEY_MIN_MS);
+        for _ in 0..50 {
+            m.soc.periph.advance(hold / 2);
+            m.key(2, true);
+            m.key(2, false);
+        }
+        m.soc.periph.advance(3 * hold);
+        assert!(m.soc.periph.script.is_empty(), "{} key changes still queued", m.soc.periph.script.len());
+        assert!(!m.soc.periph.keys_down[2]);
     }
     #[test]
     fn snapshot_captures_live_spi_writes_and_waits_for_idle() {
@@ -518,7 +769,7 @@ mod portable_tests {
         snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(600));
         assert!(rx.try_recv().is_err());
         m.soc.write32(0x500c0, 1);
-        snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(605));
+        snapshots(&mut pending, Some(&m), &params, start + Duration::from_millis(650));
         let sectors = rx.try_recv().unwrap().unwrap();
         assert_eq!(sectors[0].at, 0xf9000);
         assert_eq!(sectors[0].data[0], 0x12);
@@ -537,38 +788,67 @@ mod portable_tests {
         assert!(rx.try_recv().unwrap().is_err());
         assert!(pending.is_empty());
     }
-}
-
-#[cfg(test)]
-mod controller_tests {
-    use super::*;
     #[test]
-    fn explicit_profile_precedes_channel_remap_and_raw_preserves_ccs() {
-        let mut p = fm1_soc::controller::MiniLab3::fm1();
-        let mut out = vec![];
-        route_input(&mut p, crate::Controller::MiniLab, Board::Fm1, 2, &[0xbf,21,127], |a|out.push(a));
-        assert!(matches!(out.as_slice(), [Action::Key{id:2,down:true}]));
-        out.clear();
-        route_input(&mut p, crate::Controller::Raw, Board::Fm1, 2, &[0xbf,21,0], |a|out.push(a));
-        assert!(matches!(out.as_slice(),[Action::Midi{b:0xb1},Action::Midi{b:21},Action::Midi{b:0}]));
-        out.clear();
-        route_input(&mut p, crate::Controller::MiniLab, Board::Fm1, 3, &[0x90,60,100], |a|out.push(a));
-        assert!(matches!(out.as_slice(),[Action::Midi{b:0x92},Action::Midi{b:60},Action::Midi{b:100}]));
-        out.clear();
-        route_input(&mut p, crate::Controller::MiniLab, Board::Smk37, 0, &[0xbf,21,127], |a|out.push(a));
-        assert!(matches!(out.first(),Some(Action::Midi{b:0xbf})));
+    fn a_run_that_cannot_go_on_halts_with_its_reason() {
+        let mut m = machine();
+        m.soc.xip.fill(0xff); // (no instruction)
+        let why = m.run(100).unwrap_err();
+        assert!(m.halted().is_some() && why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
     }
     #[test]
-    fn old_projects_default_to_raw_and_profile_state_has_stable_ids() {
-        use nih_plug::prelude::Enum;
-        let params=crate::Fm1Params::default();
-        assert_eq!(params.controller.value(),crate::Controller::Raw);
-        assert_eq!(crate::Controller::ids().unwrap(), &["raw", "fm1"]);
-        assert_eq!(*params.controller_master.lock().unwrap(), None);
-        *params.controller_master.lock().unwrap()=Some(321);
-        let saved=nih_plug::prelude::Params::serialize_fields(&params);
-        let recalled=crate::Fm1Params::default();
-        nih_plug::prelude::Params::deserialize_fields(&recalled, &saved);
-        assert_eq!(*recalled.controller_master.lock().unwrap(),Some(321));
+    fn a_panic_is_an_error_with_its_text() {
+        let said = caught(|| -> Result<(), String> { panic!("sector {} of 3", 7) });
+        let other = caught(|| -> Result<(), String> { std::panic::panic_any(7u8) });
+        assert_eq!(said.unwrap_err(), "the emulator failed (sector 7 of 3)");
+        assert_eq!(other.unwrap_err(), "the emulator failed (a panic)");
+        assert_eq!(caught(|| Ok::<_, String>(3)), Ok(3));
+    }
+    /// Felucca played as tools/catalog_check.py plays it in fm1-live (its script, 8 s at 240 MHz): the plugin's
+    /// machine makes the audio tests/catalog.json has the hash of, where the package is the build that was
+    /// hashed (a newer one of its author's is played, and its audio not compared). Needs
+    /// reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs): skipped without it, but not in CI, which
+    /// fetches it and must not pass on nothing.
+    #[test]
+    fn felucca_sounds_as_the_catalog_has_it() {
+        use sha2::{Digest, Sha256};
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc");
+        let pkg = match std::fs::read(path) {
+            Ok(p) => p,
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no reference/firmwares/felucca.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
+        };
+        let hex = |b: &[u8]| format!("{:x}", Sha256::digest(b))[..16].to_owned();
+        let catalog = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/catalog.json")).unwrap();
+        let catalog: serde_json::Value = serde_json::from_slice(&catalog).unwrap();
+        let want = &catalog["felucca"];
+        let mut m = boot(&pkg, &[], 240, false).unwrap();
+        fm1_soc::script::queue(&mut m.soc, "2000:C4,2000:m903c64,3500:C4^,3500:m803c00,5000:PLAY");
+        while m.soc.periph.ms() < 8000 {
+            m.run(20_000).unwrap();
+        }
+        let audio: Vec<u8> = m.soc.periph.audio.iter().flat_map(|s| s.to_le_bytes()).collect();
+        assert!(audio.len() > 5 * 44_100 * 4, "{} bytes of audio in 8 s", audio.len());
+        if want["package"] != hex(&pkg) {
+            return eprintln!("felucca.fwsc is not the build tests/catalog.json hashed: played, its audio not compared");
+        }
+        let bytes = want["bytes"].as_u64().unwrap() as usize;
+        assert!(audio.len() >= bytes, "the audio ends at byte {}, the catalog's at {bytes}", audio.len());
+        assert_eq!(hex(&audio[..bytes]), want["audio"], "the audio of the first {bytes} bytes");
+    }
+
+    /// Needs reference/firmwares/felucca.fwsc (tools/fetch_firmwares.mjs).
+    #[test]
+    fn a_panic_under_the_interpreter_is_the_runs_halt() {
+        let pkg = match std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../reference/firmwares/felucca.fwsc")) {
+            Ok(p) => p,
+            Err(_) => return eprintln!("no reference/firmwares/felucca.fwsc: skipped"),
+        };
+        let mut m = boot(&pkg, &[], 240, false).unwrap();
+        // the interpreter alone (a panic under compiled code cannot be caught), and a flash chip cut
+        // short: its model indexes past the end at the firmware's first read up there
+        m.cpu.jit_on = false;
+        m.soc.flash.mem.truncate(0x8000);
+        let why = (0..100).find_map(|_| m.run(100_000).err()).expect("it ran on");
+        assert!(m.halted() == Some(&why[..]) && why.starts_with("the emulator failed (index out of bounds"), "{why}");
     }
 }

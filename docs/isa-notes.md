@@ -158,12 +158,14 @@ stub hacks were removed.
   b = bit3 | bits(7,8)<<1 (`93 1c` r3 = r1 + r2, `29 1d` r1 = r2 + r5).
 - `rep N rR {` (`03 xx`): reg = bits(0,3), N = block length in bytes =
   2*(bits(4,7)+1). `rep N #k {` (`8x xx`): same N, k = bits(8,12)+1.
-  The block is the N bytes after the rep; it runs k / rR times, rR
-  decremented in place. Count 0 skips the block (assumed: the CRT runs
-  `r2 = 0; rep 2 r2 {…}` unguarded for the empty overlay) — needs a
-  hardware probe. The compiler still emits `if (rR != 0) goto rep` after
-  every register-count rep, which hints at a hardware iteration cap; the
-  emulator loops until the register hits 0 either way.
+  The block is the N bytes after the rep; it runs k / rR times. Count 0
+  skips the block (the CRT runs `r2 = 0; rep 2 r2 {…}` unguarded for the
+  empty overlay). **Measured on an FM-1 ("Hardware facts" below):
+  a count of 0 does skip the body, and one `rep` runs at most 32 times**: a
+  count c of 32 or more runs (c & 31) + 1 times and leaves c minus that in
+  rR, and the compiler's `if (rR != 0) goto rep` after every register-count
+  rep makes up the rest. The emulator latches the count at the rep (rR holds
+  what will be left while the body runs: the stock memmove tail reuses it).
 
 ### 4-byte families fitted 2026-10-09 (0 mismatches over all V13 samples)
 
@@ -260,7 +262,9 @@ offset; the register-pair store used base = bits(24,27)).
   (00/20 eb): base bits(0,3), 16-bit register mask at bits(16,31), lowest
   register at the lowest address; `[rN++]` also advances the base.
 - Shift counts: a zero field prints as 32. `testset b[R]`: cc = (old != 0)
-  and byte |= 0x80 (SDK spins `testset; ifeq goto retry`). `tbb/tbh [R]`:
+  and byte |= 0x80 (SDK spins `testset; ifeq goto retry`). **Wrong on an FM-1
+  (below): the byte becomes 0xFF and psr bits 3..0 take the old byte's
+  bits 3..0**, so a held lock (0xFF) sets Z and `ifeq` retries. `tbb/tbh [R]`:
   pc = next_pc + 2*table[R] with the table right after the instruction
   (tbh entries are halfwords, R pre-scaled). `cnum` = core id.
 
@@ -338,7 +342,8 @@ Felucca's I2S words hold a 24-bit sample in the **low** bits (Q15 << 7,
 
 Fifteen community firmwares (web/firmwares.json, `tools/fetch_firmwares.mjs`) were added as
 corpora: the ISA is mined from 25 listings now (`isa/corpora.txt`, newest versions included; the app listings come from
-`tools/disasm_app.sh`, which wraps a raw app in an ELF for JieLi's objdump). 2765 classes;
+`tools/disasm_app.sh`, which wraps a raw app in an ELF for JieLi's objdump;
+`node tools/fwsc_extract.mjs PACKAGE.fwsc OUT.bin` takes the raw app out of an update package). 2765 classes;
 `tools/isa_stable_names.py` keeps the previous class names (the core keys some decoders on
 them); `tools/gen_isa.py` lets a class the solver could not finish borrow a twin's slot only
 when it reproduces every (raw, value) example the solver kept for it.
@@ -377,7 +382,8 @@ coefficients did. Probes `probes/softfloat/*.c` (`run.sh`; 64-bit add / sub / co
 shift / multiply, soft double) compare the emulator with the host.
 
 - **Flags** (`Cpu::flags`, psr bits 0..3): N, C (set = no borrow, as on ARM), Z (assumed),
-  V. clang's 64-bit code reads them right after the low-word add / subtract: `R = R + R + c`,
+  V. **Measured on an FM-1 (below): bit 3 is N, bit 2 Z, bit 1 C, bit 0 V; this note
+  had N and V the other way round, and most ALU forms, not only add / subtract, write N and Z.** clang's 64-bit code reads them right after the low-word add / subtract: `R = R + R + c`,
   `R = R - R - !c`, and `rX = psr` then `slt` = N ^ V (bits 0, 3) / `ult` = !C (bit 1).
   psr used to read 0 and the carry forms assumed C clear, so every 64-bit add lost its
   carry and every 64-bit subtract borrowed. Every add / subtract form now sets the flags
@@ -472,7 +478,8 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
 - **Pair extract** `de e1`: rD = rQ >> n (s|u); d = bits(28,31), q = bits(21,23), n = bits(16,19) |
   bits(24,25) << 4, signed = bit27. `df e1` by a register (bits 24-27; signed = bit16). Saturated
   into 32 bits (assumed: clang uses it only for `__builtin_pi32v2_shfms64` / `shfmu64`, never for
-  a plain `(int)(x >> n)`, which it does with a pair shift).
+  a plain `(int)(x >> n)`, which it does with a pair shift). **Measured on an FM-1 (below): saturated, and
+  the register count is its low 8 bits (64..255 shift everything out).**
 - **`<<<` saturates** (`qasl`): the 2-byte `xx a0` / `SD 1a` with bit 3, `c0 e1` op 2 (bits 25-27),
   `c8 e1` sub-op 1. Plain C shifts compile to `<<`; it used to run as one.
 - **Shift counts are 1..32**: 32 encoded as 0 in the 4-byte `c0 e1` forms too (the assembler's
@@ -483,6 +490,8 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
   rD = rA & ~(1 << rB) on all registers.
 - Assumed, no C equivalent: `80 e1 01` cls = leading bits equal to the sign, sign not counted;
   `b0 e0` rD += rS (brev), a bit-reversed add. `80 e1 02` zcmp is left undecoded (unknown).
+  **Measured on an FM-1 (below): cls counts the sign bit too (cls(0) = 32); the brev add is
+  rev(rev(a) + rev(b)) and writes all four flags; zcmp is the sign, -1 / 0 / 1.**
   The six 64-bit multiply builtins do not compile (the backend cannot select them).
 - These decode before the table: its classes fit only corpus registers or had no semantics
   (`r_add_r_brev`, `r_b2_mov_i`), and they caught the dual-issue `f0` / `f1` heads.
@@ -497,3 +506,61 @@ the probes, ~175000 distinct instructions, agree except four shapes only data de
 - `&=`/`^=` register masks, `R += R`-with-saturate variants, `d[..]`
   DPRAM pairs, fpu/acc classes — all still Unsupported (halt with class
   name, which is the intended discovery path).
+
+## Hardware facts (an FM-1)
+
+Measured on an M-VAVE FM-1 (AC791N). The runs, their method and their raw records are in
+[pi32v2-isa](https://github.com/jvitkauskas/pi32v2-isa)'s `hw/`:
+- `hw/fm1-2026-10-24*` and `hw/fm1-2026-11-14-bit12`: about 14000 single instructions run from RAM, with
+  every register, the psr flags, sp and a scratch area set, and everything read back.
+  `tools/hw_replay.py --isa PATH` replays them through this core.
+- `hw/fm1-2026-11-15-excprobe`: a RAM app with its own exception handler. It covers misaligned accesses,
+  divide by zero and the FPU traps, `rep` counts and interrupts, the PC limits, cycle costs, and words
+  only this decoder took (`45 00`..`48 00`, the `iff` gotos).
+- `hw/fm1-2026-11-14-bootprobe`: the application's entry state under M-VAVE's loader and m-bootloader.
+
+Where they disagree with notes above, these win.
+
+- **psr**: bit 3 N, bit 2 Z, bit 1 C (1 = no borrow), bit 0 V. Reading psr keeps the flags; pushing it
+  (`[--sp] = {psr}`) clears them. Signed less-than is still N ^ V.
+- **Which forms write flags**: add / subtract (also with carry, and the brev add) write all four. The logic
+  forms (`&`, `|`, `^`, `~`, `& ~`, the bit forms), extensions (`.b0`, `.l`), 32-bit multiplies and divides
+  (for a divide bit 2 = the quotient is 0, bit 3 = its bit 31), `clz`, `cls`, `rev8` / `rev16` / `revs`,
+  `insert`, `u/sextra`, `sat16`, `zcmp` and 32-bit rotates write N and Z and keep C and V. 32-bit shifts
+  (`<<`, `>>`, `>>>`, `<<<`) write N, Z and C (the last bit shifted out; kept for a count of 0) and keep V;
+  64-bit pair shifts write only C; 64-bit rotates, 64-bit products and divides, moves, constants, loads,
+  `abs`, `min` / `max` and the FPU arithmetic write none. The 64-bit multiply-accumulates write only C (the
+  carry out of the 64-bit add). `cc = 0/1` is psr bit 1.
+- **Shift counts in a register** are its low 8 bits: 32..255 shift everything out (0, or the sign for `>>>`);
+  a pair shift by 64 or more likewise. `<<<` saturates (signed), with the same count rule.
+- **Parallel pairs**: B reads the registers as they were before A, as above; when A and B write the same
+  register, A's value is the one that stays.
+- **`rep`**: a count of 0 skips the body. One `rep` runs at most 32 times: below 32 it runs `count` times,
+  from 32 up `(count & 31) + 1` times and leaves the register with its low five bits at 31. Interrupts wait
+  until the `rep` has finished.
+- **`if (...) {` lengths** count units: one instruction or one parallel pair.
+- **`testset b[R]`**: the byte becomes 0xFF; psr bits 3..0 = bits 3..0 of the old byte.
+- **Bit operations**: `popcnt rD = rS` is a nop on this chip (instruction revision 3 is not implemented as
+  such), and the pair form copies the low halfword (`rD.l = rS_even.l`). `cls` counts the sign bit
+  (cls(0) = 32). `insert` with l:0 changes nothing; `sextra` / `uextra` with l:0 give 0. `abs` saturates
+  0x80000000 to 0x7fffffff. `sat16 (u)` treats its source as unsigned.
+- **FPU**: a NaN operand, 0/0, inf/inf and inf - inf give 0x7f800001 (sign and payload dropped).
+  `ftof` of a NaN is 0x7fc00000. `ftoi` / `ftou` clamp to their range; NaN and +inf give the maximum,
+  -inf the minimum. `fmin` / `fmax` set psr as a compare (less 8, equal 6, greater 2, unordered 3) and
+  prefer the number to a NaN.
+- **Multiply / divide**: a zero divisor gives 0 (32- and 64-bit) without a trap unless EMU_CON
+  (0x01EEF0D0) bit 2 is set; then integer and float division by zero raise the CPU exception with EMU_MSG
+  bit 2. EMU_CON bits 16..20 enable FPU traps (inexact, overflow, underflow, divide by zero, invalid).
+- **Memory**: a misaligned 16- or 32-bit access to RAM raises the CPU exception (EMU_MSG bit 0) always
+  (EMU_CON bits 0 and 1 read 1 and cannot be cleared); the access itself still happens, at the aligned-down
+  address. Pair accesses (`d[...]`) need only 4-byte alignment. The exception is taken about 7 instructions
+  late; `reti` is the next instruction not yet run. A post-increment load into its own base register keeps the
+  loaded value; a pre-increment store of the base register stores its value before the increment.
+  `d[rB+rI<<3]` scales the index by 8. `h[...] = rX.h` stores the high half.
+- **Second-word bit 12** is ignored by the `mul2` / `madd.mul2` / `msub.mul2` x2 forms and by the `d[...]`
+  pair loads and stores (words the current vendor objdump does not decode).
+- **Undecoded words**: `iff (rA_rB op rC_rD) goto` (the vendor objdump shows it only with `-mcpu=r4`) raises
+  the illegal-instruction exception (EMU_MSG bit 1); words such as `45 00`..`48 00`, which the `R = #i` class
+  takes, do nothing.
+- **Boot**: there is a mask ROM (7056 bytes at 0x01E00000); the app is entered with r0 = 0x01C7FE08 (the boot
+  object), r1 = the entry, icfg = 0x02050500, at 360 MHz, by both M-VAVE's loader and m-bootloader.

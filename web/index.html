@@ -14,34 +14,43 @@
 <meta property="og:image:height" content="640">
 <meta property="og:image:alt" content="Screens of six FM-1 firmwares running in the emulator: X0X, FM1 Quest, AMB-1, FM-1 SID, ORBIT and FiMba-1">
 <meta name="twitter:card" content="summary_large_image">
-<link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48">
-<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png">
-<link rel="icon" type="image/png" sizes="16x16" href="./icons/favicon-16.png">
-<link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon-180.png">
-<link rel="manifest" href="./site.webmanifest">
-<meta name="theme-color" content="#111214">
-<link rel="preload" href="InterTight.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="style.css">
 <script>if (new URLSearchParams(location.search).get("embed") === "1") document.documentElement.setAttribute("data-embed", "");</script>
 </head>
 <body>
 <header class="site">
   <div class="wrap">
-    <a class="brand" href="./"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span>FM-1 Emulator</a>
+    <a class="brand" href="./"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span><span class="wordmark"><b>fm1-emu</b><small>the M-VAVE FM-1 and SMK-37, emulated</small></span></a>
     <!-- release:pill --><a class="ver" href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1" title="Release notes and downloads for 0.5.1">v0.5.1</a><!-- /release:pill -->
     <nav class="devices" aria-label="Device"><span aria-current="page">FM-1</span><a href="smk37/">SMK-37</a></nav>
     <nav class="sitenav" aria-label="Site">
-      <a href="#firmwares">Firmwares</a><a href="#guide">Guide</a><a href="#plugin">DAW plugin</a><a href="https://github.com/joakimeriksson/fm1-emu#readme">Docs</a>
+      <a href="#firmwares">Firmwares</a><a href="#guide">Guide</a><a href="#plugin">DAW plugin</a><a href="dev/">Developers</a>
     </nav>
     <a class="gh" href="https://github.com/joakimeriksson/fm1-emu" aria-label="Source code on GitHub"><svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span><span class="arrow" aria-hidden="true">↗</span></a>
     <a class="embed-only" id="fullpage" href="./" target="_blank" rel="noopener">FM-1 emulator, full page ↗</a>
   </div>
 </header>
+<!-- the opening: what this is, and a wall of the catalog's screens (main.js fills it from shots/shots.json) -->
+<section class="hero" aria-labelledby="hero-h">
+  <div class="wrap hero-grid">
+    <div class="hero-text">
+      <p class="kicker">M-VAVE FM-1 · emulated</p>
+      <h1 id="hero-h"><span id="hero-count">203</span> FM-1 firmwares, <em>in your browser.</em></h1>
+      <p class="lead"><span id="hero-community">201</span> community firmwares and M-VAVE's own run here unchanged, on an
+        emulation of the synth's own chip: grooveboxes, drum machines, trackers, ambient generators and FM synths. Play
+        them from your computer's keyboard, a MIDI keyboard or a touch screen.</p>
+      <div class="ctas"><a class="cta primary" id="hero-play" href="#play">Play</a><a class="cta" href="#firmwares">Browse the firmwares</a></div>
+      <p class="facts"><span><b>The real firmware</b>, not a copy of its sound</span><span><b>No install</b>, free and open source</span></p>
+    </div>
+    <div class="wall" id="wall" aria-hidden="true"></div>
+  </div>
+</section>
 <main>
-  <div class="player">
+  <div class="player" id="play">
     <div class="deck">
       <div class="deck-head">
-        <h1 id="title">M-VAVE FM-1 (emulated)</h1>
+        <h2 id="title">M-VAVE FM-1 (emulated)</h2>
         <span id="status">click Start to boot</span>
       </div>
       <div id="perfwarn" role="alert" hidden>
@@ -53,10 +62,14 @@
           <button type="button" id="perfwarn-close" aria-label="Dismiss">✕</button>
         </div>
       </div>
+      <div class="view" role="group" aria-label="The screen">
+        <button type="button" id="bigscreen" aria-pressed="false" title="The synth's screen again, large, above the panel">Big screen</button>
+        <label>Screen colours <select id="colours"></select></label>
+      </div>
+      <canvas id="big" width="240" height="240" hidden aria-label="The synth's screen, large"></canvas>
       <div class="stage">
         <canvas id="panel" aria-label="FM-1 front panel"></canvas>
         <button id="start">Start</button>
-        <button type="button" id="exitview" title="Back to the whole synth (Esc)">Show the synth</button>
       </div>
       <p class="rotate">Turn the phone sideways for a bigger synth.</p>
       <p class="hint">
@@ -76,12 +89,8 @@
         <label id="fwlabel">Firmware <select id="fw" aria-label="Firmware"></select></label>
         <label>Clock <select id="mhz" aria-label="Emulated clock"></select></label>
         <label>Theme <select id="theme" aria-label="Panel color theme"></select></label>
-        <label title="Large screen: the real layout with a bigger screen. True to life: the real FM-1's proportions. Display only: the screen alone, as large as the window allows (Esc returns)">View
-          <select id="view" aria-label="Panel layout"><option value="large">Large screen</option><option value="real">True to life</option><option value="display">Display only</option></select></label>
-        <label class="check" title="OP1–OP6, PIT, GLO, MONO and POLY, as printed on the real FM-1 for M-VAVE's own firmware">Key labels
-          <input type="checkbox" id="keylabels"></label>
         <div class="row">
-          <label class="file">Open firmware… <input type="file" id="open"></label>
+          <label class="file">Open .fwsc… <input type="file" id="open"></label>
           <label class="file" title="A DX7 32-voice bank for M-VAVE's firmware">DX7 bank… <input type="file" id="bank"></label>
           <span id="bankname" class="dim"></span>
         </div>
@@ -102,7 +111,7 @@
             <select id="saved-versions" aria-label="Saved firmware versions"></select>
             <button type="button" id="open-saved-version">Open saved firmware</button>
             <button type="button" id="update-firmware">Check for firmware updates</button>
-            <button type="button" id="reset-save">Reset Firmware State…</button>
+            <button type="button" id="reset-save">Reset saved flash…</button>
           </div>
           <p>Settings and patches written to flash are saved automatically. Use the firmware’s own save
             command for patch edits. Backups contain saved flash and community firmware. For M-VAVE firmware, the
@@ -114,7 +123,6 @@
       <section class="box" aria-labelledby="h-play-from">
         <h2 class="eyebrow" id="h-play-from">Play from</h2>
         <label id="midiin">MIDI in <span class="sel"><span id="midiact" aria-hidden="true"></span><select id="midi" aria-label="MIDI input"><option value="">off</option><option value="*">all inputs</option></select></span></label>
-        <label title="Choose FM-1 User after configuring the dedicated MiniLab program. Factory uses the original absolute mapping.">Controller <select id="controller-profile" aria-label="Controller profile"><option value="auto">Factory · MiniLab 3</option><option value="fm1">FM-1 User · MiniLab 3</option><option value="raw">Raw MIDI</option></select></label>
         <label id="midichl" title="Played notes and controllers go to this channel (M-VAVE's firmware listens on 2, Felucca's parts on 1–4)">Channel
           <select id="midich" aria-label="MIDI channel"><option value="0">as sent</option></select></label>
       </section>
@@ -199,6 +207,11 @@ Thanks to bask209, eubide and pcace.</textarea>
       start it. Each card links its source; the Hub has the full story of each firmware and installs it on your
       own FM-1. Firmwares the Hub has that nobody has run here yet come last, marked so: they may not work
       yet, and the next refresh of the list moves them up or says why not.</p>
+    <div class="finder">
+      <label class="search"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" fill="none" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+        <input type="search" id="fwsearch" placeholder="Search name, author or sound" aria-label="Search the firmwares"></label>
+      <span id="fwcount" class="dim" role="status"></span>
+    </div>
     <ul class="cards" id="fwlist"></ul>
   </section>
 
@@ -228,7 +241,7 @@ Thanks to bask209, eubide and pcace.</textarea>
             reboots the synth.</li>
           <li><b>Play</b>Use the computer keyboard, the mouse or a touch screen, or a MIDI keyboard
             (<a href="#midi-in">MIDI in</a>). The status line shows the clock, how much faster than real time the
-            emulator runs the firmware on this device, and the render-worker load.</li>
+            emulator runs the firmware on this device, and the load on the audio thread.</li>
         </ol>
       </section>
 
@@ -256,7 +269,7 @@ Thanks to bask209, eubide and pcace.</textarea>
           <span class="w" style="grid-column-start:21">'<i>F5</i></span>
         </div>
         <ul class="map" aria-label="Buttons and encoders">
-          <li><kbd>Z</kbd> OCT−</li><li><kbd>X</kbd> OCT+</li><li><kbd>Space</kbd> PLAY</li><li><kbd>R</kbd> REC</li>
+          <li><kbd>Z</kbd> OCT−</li><li><kbd>X</kbd> OCT+</li><li><kbd>Space</kbd> PLAY</li><li><kbd>Shift</kbd>+<kbd>Space</kbd> REC</li>
           <li><kbd>1</kbd> FX</li><li><kbd>2</kbd> SCL</li><li><kbd>3</kbd> ENV</li><li><kbd>4</kbd> LFO</li>
           <li><kbd>5</kbd> EDIT</li><li><kbd>6</kbd> GLO</li><li><kbd>7</kbd> HOME</li><li><kbd>8</kbd> SAVE</li>
           <li><kbd>9</kbd> ARP</li><li><kbd>0</kbd> SEQ</li>
@@ -267,17 +280,10 @@ Thanks to bask209, eubide and pcace.</textarea>
         <h3>Mouse and touch</h3>
         <ul>
           <li>Click a key or button, or drag across the keys for a glissando.</li>
-          <li>Drag a knob up or down, or scroll over it. Hold Shift while dragging for fine adjustments. MASTER is the volume.</li>
+          <li>Drag a knob up or down, or scroll over it. MASTER is the volume.</li>
           <li>On a touch screen every finger counts: play chords, or hold a key while you turn a knob.</li>
           <li>On a phone, turn it sideways: the synth fills the screen.</li>
         </ul>
-        <h3>View</h3>
-        <p><b>View</b> beside the synth picks how it is drawn: <b>Large screen</b> (the real FM-1's layout with a
-          bigger screen), <b>True to life</b> (the real unit's proportions) or <b>Display only</b> (the screen alone,
-          pixel for pixel and as large as the window allows; Esc brings the synth back). <b>Key labels</b> prints
-          OP1–OP6, PIT, GLO, MONO and POLY on the top keys, as on the real unit for M-VAVE's firmware. Links keep
-          it: <code>?layout=real</code>, <code>?layout=display</code>, <code>&amp;labels=1</code>. In fm1-live, F2
-          switches the view and F5 the labels (or <code>--layout</code> and <code>--key-labels</code>).</p>
       </section>
 
       <section id="midi-in" aria-labelledby="h-midi">
@@ -311,7 +317,7 @@ Thanks to bask209, eubide and pcace.</textarea>
           Live, Cubase, FL Studio, Reaper, Bitwig and Studio One, and <b>CLAP</b>. Load a firmware in its window
           and play it from the DAW's MIDI or with the mouse on its panel. The song keeps the firmware and the
           patches it saves.</p>
-        <p>Download the plugin for Macs with Apple silicon or Intel (AU, VST3, CLAP) or for Windows (VST3, CLAP) from
+        <p>Download the plugin for Macs with Apple silicon (AU, VST3, CLAP) or for Windows (VST3, CLAP) from
           <a href="#release">the latest release</a>. The zip's <code>INSTALL.txt</code> says where each file goes.
           Building it from source:
           <a href="https://github.com/joakimeriksson/fm1-emu/tree/master/crates/fm1-plugin">crates/fm1-plugin</a>.</p>
@@ -320,12 +326,19 @@ Thanks to bask209, eubide and pcace.</textarea>
       <section id="stock" aria-labelledby="h-stock">
         <h2 id="h-stock">M-VAVE's own firmware</h2>
         <p>The firmware the FM-1 ships with: a DX7-style FM synth (a port of msfa, the Dexed engine), with both cores
-          running. Versions V13 and V15 have been tested here.</p>
-        <p class="note">This page hosts no firmware, and it cannot download M-VAVE's: their server does not let other
-          pages fetch it. Bring your own copy.</p>
+          running. Versions V13, V15 and V16 have been tested here.</p>
+        <h3>V15: plays from its card</h3>
+        <p>M-VAVE publishes V15 under the Apache License 2.0, as the recovery image of its
+          <a href="https://github.com/m-vave/fm1_open">FM1 Open</a> SDK
+          (<a href="https://github.com/m-vave/fm1_open/blob/main/THIRD_PARTY.md">its terms</a>). The page plays the
+          FM-1 Firmware Hub's unchanged copy of it, like the community firmwares: choose “M-VAVE stock firmware V15” and
+          press Start.</p>
+        <h3>V16, the current version: bring your own</h3>
+        <p class="note">This page hosts no firmware, and it cannot download M-VAVE's current one: their server does not
+          let other pages fetch it.</p>
         <ol>
           <li>Download <code>FM-1.fwsc</code> from <a href="https://yms-file-store.oss-cn-hongkong.aliyuncs.com/software/firmware/FM-1.fwsc">M-VAVE</a>.</li>
-          <li>Choose “M-VAVE stock firmware”, then click <b>Open .fwsc…</b>, or drop the file on the synth.</li>
+          <li>Choose “M-VAVE stock firmware (your copy)”, then click <b>Open .fwsc…</b>, or drop the file on the synth.</li>
           <li>Press Start. This browser keeps the copy for your next visit; open another one to replace it.</li>
         </ol>
         <h3>Patches</h3>
@@ -341,9 +354,9 @@ Thanks to bask209, eubide and pcace.</textarea>
       <section id="limits" aria-labelledby="h-limits">
         <h2 id="h-limits">Known limits</h2>
         <ul>
-          <li><b>Speed.</b> The real FM-1 runs at 240 MHz. The page starts at 240 MHz, which keeps slower machines in
+          <li><b>Speed.</b> The real FM-1 runs at 240 MHz. The page starts at 100 MHz, which keeps slower machines in
             real time. The status line shows the speed (emulated time per time spent emulating: below 1× the sound
-            breaks up) and the load: render time relative to audio duration. When a device can't keep
+            breaks up) and the load: the share of the audio thread's time the emulator takes. When a device can't keep
             up and the sound breaks up, the page says so and offers a lower clock where one helps, or a larger audio
             buffer when the emulator has time to spare. A lower clock does not help M-VAVE's firmware: it idles most
             of the time, the emulator skips that, and so it costs about the same at any clock. The browser's
@@ -360,18 +373,19 @@ Thanks to bask209, eubide and pcace.</textarea>
 
       <section id="how" aria-labelledby="h-how">
         <h2 id="h-how">How it works</h2>
-        <p>The emulator is written in Rust and runs as WebAssembly in a dedicated browser worker. It executes the
+        <p>The emulator is written in Rust and runs as WebAssembly in the browser's audio thread. It executes the
           pi32v2 instruction set and models the parts of the chip the firmwares use: timers, interrupts, the flash,
           the 240×240 screen, the key matrix and encoders, the MASTER knob, the audio output and the MIDI IN port.
           Hot code is compiled to WebAssembly while it runs (a JIT); hover over the status line to see how many
           regions it has compiled.</p>
-        <p>Each firmware boots from its original update package (<code>.fwsc</code>) or supported plain application area (<code>.area</code>), downloaded from the author’s site
+        <p>Each firmware boots from its whole update package (<code>.fwsc</code>), downloaded from the author’s site
           on first use and kept with its saved flash. “Check for firmware updates” fetches a new copy; a changed
-          package starts a separate save so an update cannot overwrite an older version’s patches. Firmware is validated and booted by the shared Rust loader; Felucca's GPL
+          package starts a separate save so an update cannot overwrite an older version’s patches. Packages are unpacked by the page's own unpacker, <code>fwsc.js</code>; Felucca's GPL
           package code (<code>fm1pkg.js</code>) stays out of the page.</p>
         <p>The whole story, from recovering an undocumented CPU from its firmware to the two JITs and how each
           step was checked, is in a technical report:
-          <a href="fm1-emu-report.pdf">Emulating a Synthesizer Before It Arrives</a> (PDF, 8 pages).</p>
+          <a href="fm1-emu-report.pdf">Emulating a Synthesizer Before It Arrives</a> (PDF, 12 pages). Testing your own
+          firmware here, headless runs and building the emulator: <a href="dev/">the developer page</a>.</p>
         <details>
           <summary>More for the curious</summary>
           <ul>
@@ -421,6 +435,7 @@ Thanks to bask209, eubide and pcace.</textarea>
     </div>
     <div class="col">
       <b>Code</b>
+      <a href="dev/">For developers</a>
       <a href="https://github.com/joakimeriksson/fm1-emu">Source on GitHub ↗</a>
       <a href="#release">Downloads: plugin and fm1-live</a>
       <a href="https://github.com/joakimeriksson/fm1-emu/releases">All releases ↗</a>

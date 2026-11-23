@@ -1,6 +1,6 @@
 // The built page's own files under one build's name: every reference from a page or a script to
 // another file of the page (the scripts, the stylesheet, the wasm module, the worklet, the
-// catalogs) gets ?v=<build>. GitHub Pages lets a browser keep each file 10 minutes, each on its
+// catalogs, the list of the firmwares' pictures) gets ?v=<build>. GitHub Pages lets a browser keep each file 10 minutes, each on its
 // own, so right after a deploy one visit could run a new worklet.js against the old fm1_web.wasm
 // (the WebAssembly JIT then fails on every block, #142); with the build in every URL a page only
 // ever loads files of one build. web/build.sh runs it over the built output:
@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 // a file of the page: a plain relative name (no scheme, no leading slash, no query yet)
-const OWN = String.raw`((?:\./)?(?:smk37/)?[\w.-]+\.(?:js|mjs|css|wasm|json))`;
+const OWN = String.raw`((?:\./)?(?:smk37/)?(?:shots/)?[\w.-]+\.(?:js|mjs|css|wasm|json))`;
 const RULES = [
   // module imports: import ... from "./x.js", import("./x.js")
   new RegExp(String.raw`(\bfrom\s*|\bimport\s*\(\s*)(["'])${OWN}\2`, "g"),
   // fetch("x.wasm"), addModule("worklet.js")
-  new RegExp(String.raw`(\bfetch\(\s*|\baddModule\(\s*|\bnew\s+Worker\(\s*)(["'])${OWN}\2`, "g"),
+  new RegExp(String.raw`(\bfetch\(\s*|\baddModule\(\s*)(["'])${OWN}\2`, "g"),
   // <script src="main.js">, <link rel="stylesheet" href="style.css">
   new RegExp(String.raw`(<script\b[^>]*\bsrc=|<link\b[^>]*\brel="stylesheet"[^>]*\bhref=)(["'])${OWN}\2`, "g"),
 ];

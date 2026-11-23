@@ -919,27 +919,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "fm1-host"
-version = "0.1.0"
-dependencies = [
- "rtrb",
- "serde_json",
- "sha2",
-]
-
-[[package]]
 name = "fm1-isa"
 version = "0.5.1"
+
+[[package]]
+name = "fm1-map"
+version = "0.5.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "fm1-plugin"
 version = "0.5.1"
 dependencies = [
- "ab_glyph",
  "base64",
  "dispatch2",
  "fm1-core",
- "fm1-host",
+ "fm1-map",
  "fm1-soc",
  "nih_plug",
  "nih_plug_egui",

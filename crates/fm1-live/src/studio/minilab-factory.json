@@ -1,0 +1,243 @@
+{
+  "name": "MiniLab factory",
+  "device": "Minilab3 MIDI",
+  "pass_unmapped": true,
+  "keys_mode": "panel",
+  "notes": "Factory Arturia program: absolute sound/navigation knobs and channel-10 note pads. See context/minilab.md.",
+  "bindings": [
+    {
+      "src": {
+        "ch": 1,
+        "notes": [
+          0,
+          127
+        ]
+      },
+      "to": "keys"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 74
+      },
+      "to": "KNOB1",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 71
+      },
+      "to": "KNOB2",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 76
+      },
+      "to": "KNOB3",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 77
+      },
+      "to": "KNOB4",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 93
+      },
+      "to": "MASTER",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 18
+      },
+      "to": "SELECT",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 19
+      },
+      "to": "PRESETS",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 114
+      },
+      "to": "SELECT",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 112
+      },
+      "to": "PRESETS",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 16
+      },
+      "to": "ALGORITHM",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 17
+      },
+      "to": "MASTER",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 115
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 36
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 37
+      },
+      "to": "FX",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 38
+      },
+      "to": "EDIT",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 39
+      },
+      "to": "SEQ",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 40
+      },
+      "to": "SCL",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 41
+      },
+      "to": "PLAY",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 42
+      },
+      "to": "REC",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 43
+      },
+      "to": "GLO",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 44
+      },
+      "to": "ENV",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 45
+      },
+      "to": "LFO",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 46
+      },
+      "to": "ARP",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 47
+      },
+      "to": "SAVE",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 48
+      },
+      "to": "OCT-",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 49
+      },
+      "to": "OCT+",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 50
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 10,
+        "note": 51
+      },
+      "to": "SCL",
+      "mode": "momentary"
+    }
+  ]
+}

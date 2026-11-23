@@ -1,6 +1,9 @@
-//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) op for op, with the
-//! System V calling convention (Linux, and Windows too: jit.rs declares the entry and the helpers
-//! `extern "sysv64"`).
+//! x86-64 code for a block prefix: the AArch64 compiler's plan (jit.rs) for prefixes, chains,
+//! RAM guards and a runner's stops, with the System V calling convention (Linux, and Windows too:
+//! jit.rs declares the entry and the helpers `extern "sysv64"`). Not op for op: a guest register
+//! is read and written in the Cpu at each use (jit.rs keeps them in host registers within a
+//! block, its `RegCache`), and `Un`, `Div`, the pair loads and stores, `sti` / `cli` and the
+//! byte reversals, which jit.rs has code for, go through the interpreter's executor here.
 //!
 //! Register plan (callee-saved, so helpers may be called freely):
 //!   rbx = &Cpu, rbp = &Ctx, r12 = RAM host base, r13 = XIP host base, r14d = instructions done
@@ -14,7 +17,7 @@
 //! host (the interpreter); conversions to integers saturate as Rust's `as` does (cvttss2si alone
 //! gives 0x8000_0000 for NaN and out of range); min / max through the interpreter's executor.
 
-use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_probe, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
+use super::{h_pair, h_ram_ok, h_read, h_write, insns, off_hold, off_pc, off_probe, off_reg, off_rets, off_sp, off_stop_io, off_stop_pc, off_stop_rest, op_helper, JitMem, Kept, RamGuard, ITAB_BITS, OFF_BRK, OFF_PRED, OFF_SLOT, OFF_VER};
 use crate::jit_x64::{m, mx, Alu, Asm, Cc, Fop, Label, Mem, Reg, Sh, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, R10, R11, R12, R13, R14, R15, R8, R9};
 use crate::{Base, Bus, Cond, Fast, Op, RmwOp};
 
@@ -41,6 +44,7 @@ struct Gen<'a> {
     h_pair: u64,
     /// `Jit::itab`'s address
     itab: u64,
+    kept: &'a mut Kept,
     /// the runner's stop checks are compiled (`Jit::stops`)
     stops: bool,
     /// emitting a probe copy (`emit_ops`): the block's instructions
@@ -82,7 +86,7 @@ impl Gen<'_> {
             self.a.alu_ri(Alu::Add, r, imm);
         }
     }
-    /// eax = op(eax, ecx) (ecx may be clobbered)
+    /// eax = op(eax, ecx) (ecx and edx may be clobbered)
     fn alu(&mut self, op: Op) {
         let a = &mut self.a;
         match op {
@@ -100,10 +104,23 @@ impl Gen<'_> {
             Op::Or => a.alu_rr(Alu::Or, RAX, RCX),
             Op::Xor => a.alu_rr(Alu::Xor, RAX, RCX),
             Op::Mul => a.imul(RAX, RCX),
-            // (x86 takes a 32-bit shift count mod 32, as the interpreter does)
-            Op::Shl => a.sh_cl(Sh::Shl, RAX),
-            Op::Shr => a.sh_cl(Sh::Shr, RAX),
-            Op::Sar => a.sh_cl(Sh::Sar, RAX),
+            // the count is ecx's low 8 bits, and 32 and up shift everything out (`shift32`); x86
+            // takes a 32-bit count mod 32, so a larger count gives 0, or for >>> shifts by 31
+            // (edx clobbered)
+            Op::Shl | Op::Shr => {
+                a.alu_ri(Alu::And, RCX, 0xff);
+                a.sh_cl(if matches!(op, Op::Shl) { Sh::Shl } else { Sh::Shr }, RAX);
+                a.alu_rr(Alu::Xor, RDX, RDX);
+                a.alu_ri(Alu::Cmp, RCX, 31);
+                a.cmov(Cc::A, RAX, RDX);
+            }
+            Op::Sar => {
+                a.alu_ri(Alu::And, RCX, 0xff);
+                a.mov_ri(RDX, 31);
+                a.alu_ri(Alu::Cmp, RCX, 31);
+                a.cmov(Cc::A, RCX, RDX);
+                a.sh_cl(Sh::Sar, RAX);
+            }
         }
     }
     /// ecx = an A4/BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg` (edx clobbered)
@@ -165,10 +182,10 @@ impl Gen<'_> {
     /// Continue at a fixed pc: straight into its compiled body when the slot holds one,
     /// else back to Rust, which fills the slot once that block is compiled.
     fn chain(&mut self, pc: u32, count: u32) {
-        let slot: &'static mut u64 = Box::leak(Box::new(0u64));
+        let slot = self.kept.slot();
         let back = self.a.label();
         self.add_imm(DONE, count);
-        self.a.mov_ri64(R10, slot as *mut u64 as u64);
+        self.a.mov_ri64(R10, slot as u64);
         self.a.ld64(R11, m(R10, 0));
         self.a.test_rr64(R11, R11);
         self.a.jcc(Cc::E, back);
@@ -198,8 +215,10 @@ impl Gen<'_> {
             if w == 2 {
                 self.a.alu_ri(Alu::And, RSI, !1u32); // a halfword is the one at addr & !1 (Soc read16)
             }
+            // (a window shorter than the access holds none of it: every offset is at or above
+            // the 0 the length less the width then gives, as the AArch64 code)
             self.a.alu_ri(Alu::Cmp, RSI, len.saturating_sub(w as u32));
-            self.a.jcc(Cc::A, miss);
+            self.a.jcc(if len < w as u32 { Cc::Ae } else { Cc::A }, miss);
             // (esi was written as 32 bits: rsi is the zero-extended offset)
             match (w, signed) {
                 (4, _) => self.a.ld(RAX, mx(base_reg, RSI)),
@@ -234,8 +253,9 @@ impl Gen<'_> {
         }
         self.a.mov_rr(RSI, RAX);
         self.a.alu_ri(Alu::Sub, RSI, mem.ram_base);
+        // (RAM shorter than the access: none of it inline, as `load`)
         self.a.alu_ri(Alu::Cmp, RSI, mem.ram_len.saturating_sub(w as u32));
-        self.a.jcc(Cc::A, slow);
+        self.a.jcc(if mem.ram_len < w as u32 { Cc::Ae } else { Cc::A }, slow);
         if !mem.ram_code.is_null() {
             self.a.mov_rr(RDX, RSI);
             self.a.sh_i(Sh::Shr, RDX, 2);
@@ -298,13 +318,12 @@ impl Gen<'_> {
     fn f2i(&mut self, signed: bool) {
         let (done, zero, max) = (self.a.label(), self.a.label(), self.a.label());
         self.a.movd_xr(0, RAX);
+        // (a NaN goes as the infinity of its sign, `fpu`)
         if signed {
             // 0x8000_0000: out of range or NaN, or exactly -2^31
             self.a.cvttss2si(RAX, 0, false);
             self.a.alu_ri(Alu::Cmp, RAX, 0x8000_0000);
             self.a.jcc(Cc::Ne, done);
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, done); // negative: i32::MIN
@@ -321,9 +340,7 @@ impl Gen<'_> {
             self.a.jcc(Cc::Ne, max);
             self.a.jmp(done);
             self.a.bind(neg);
-            // NaN or below zero: 0; 2^63 and up: u32::MAX
-            self.a.ucomiss(0, 0);
-            self.a.jcc(Cc::P, zero);
+            // below zero or a negative NaN: 0; 2^63 and up or a positive NaN: u32::MAX
             self.a.movd_rx(RCX, 0);
             self.a.test_rr(RCX, RCX);
             self.a.jcc(Cc::S, zero);
@@ -582,7 +599,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             g.a.bind(taken);
             g.chain(next_pc, count);
         }
-        // (the multiply-accumulates 7 / 8 read d too, min / max are Rust's, and the rounding
+        // (the multiply-accumulates 7 / 8 read d too, min / max are `fminmax`, and the rounding
         // conversions other than trunc have no single SSE instruction here: through the
         // interpreter's executor)
         Fast::FOp { d, a, b, op } if matches!(op, 0..=3 | 0x1f | 0x5f | 0x8f | 0x9f) => {
@@ -595,6 +612,12 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                     let f = match op { 0 => Fop::Add, 1 => Fop::Sub, 2 => Fop::Mul, _ => Fop::Div };
                     g.a.fop(f, 0, 1);
                     g.a.movd_rx(RAX, 0);
+                    // every NaN is 0x7f800001 (`fnan`)
+                    g.a.mov_rr(RCX, RAX);
+                    g.a.alu_ri(Alu::And, RCX, 0x7fff_ffff);
+                    g.a.alu_ri(Alu::Cmp, RCX, 0x7f80_0000);
+                    g.a.mov_ri(RCX, 0x7f80_0001);
+                    g.a.cmov(Cc::A, RAX, RCX);
                 }
                 0x1f => g.f2i(true),
                 0x5f => g.f2i(false),
@@ -817,7 +840,8 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
                 }
                 k += 1;
             }
-            if post {
+            // (a load into its own base keeps the loaded word, as the interpreter)
+            if post && (store || mask >> (base & 15) & 1 == 0) {
                 g.a.ld(RAX, m(RSP, KEEP));
                 if !down {
                     g.add_imm(RAX, 4 * n);
@@ -866,19 +890,21 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
             if p != 0 {
                 g.a.sh_i(Sh::Shr, RAX, p);
             }
-            if l != 0 {
-                if signed {
-                    g.a.sh_i(Sh::Shl, RAX, 32 - l);
-                    g.a.sh_i(Sh::Sar, RAX, 32 - l);
-                } else {
-                    g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
-                }
+            if l == 0 {
+                // (a width of 0 gives 0, `bit_extract`)
+                g.a.mov_ri(RAX, 0);
+            } else if signed {
+                g.a.sh_i(Sh::Shl, RAX, 32 - l);
+                g.a.sh_i(Sh::Sar, RAX, 32 - l);
+            } else {
+                g.a.alu_ri(Alu::And, RAX, (1u32 << l) - 1);
             }
             g.st_reg(RAX, d);
         }
         Fast::BitIns { d, s, p, l } => {
+            // (a width of 0 changes nothing, `bit_insert`)
             let (p, l) = (p as u32 & 31, l as u32 & 31);
-            let mask = if l == 0 { u32::MAX } else { (1u32 << l) - 1 };
+            let mask = (1u32 << l) - 1;
             g.ld_reg(RAX, s);
             g.ld_reg(RCX, d);
             g.a.alu_ri(Alu::And, RAX, mask);
@@ -924,6 +950,7 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         Fast::PopRets => {
             g.ld_sp(RAX);
             g.load(4, false, idx);
+            g.a.alu_ri(Alu::And, RAX, crate::RETS_MASK);
             g.a.st(m(CPU, off_rets() as i32), RAX);
             g.ld_sp(RAX);
             g.a.alu_ri(Alu::Add, RAX, 4);
@@ -956,9 +983,9 @@ fn emit_op<B: Bus>(g: &mut Gen, fast: Fast, idx: u32, next_pc: u32, profile: boo
         }
         // ---- everything else: the interpreter's executor for this one op
         other => {
-            let p: &'static Fast = Box::leak(Box::new(other));
+            let p = g.kept.op(other);
             g.a.mov_rr64(RDI, CTX);
-            g.a.mov_ri64(RSI, p as *const Fast as u64);
+            g.a.mov_ri64(RSI, p as u64);
             g.idx(RDX, idx);
             g.a.mov_ri(RCX, next_pc);
             g.call(op_helper::<B>(&other, profile));
@@ -1043,14 +1070,14 @@ fn emit_ops<B: Bus>(g: &mut Gen, ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)],
         }
     }
     // fell off the end of the prefix
-    if !ops.last().map_or(false, |o| o.fast.may_jump()) {
+    if !ops.last().is_some_and(|o| o.fast.may_jump()) {
         g.chain(pc, ins);
     }
 }
 
 /// Native code for a block prefix of plain micro-ops (none careful), and its body's offset.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
+#[allow(clippy::too_many_arguments, clippy::vec_box)]
+pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], then: &[crate::BOp], pc0: u32, mem: &JitMem, guards: &mut Vec<Box<RamGuard>>, kept: &mut Kept, profile: bool, itab: u64, stops: Option<bool>) -> Option<(Vec<u8>, usize)> {
     let mut a = Asm::new();
     let exit = a.label();
     let mut g = Gen {
@@ -1061,6 +1088,7 @@ pub(super) fn compile<B: Bus>(ops: &[crate::BOp], swaps: &[(Fast, Fast, u8)], th
         h_write: h_write::<B> as *const () as u64,
         h_pair: h_pair::<B> as *const () as u64,
         itab,
+        kept,
         stops: stops.is_some(),
         probe_copy: None,
     };

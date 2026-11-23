@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>fm1-emu for developers</title>
+<meta name="description" content="fm1-emu for firmware authors and developers: test an FM-1 or SMK-37 firmware without the hardware, in the browser or headless, get it listed, and build the emulator.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="fm1-emu for developers">
+<meta property="og:description" content="Test an FM-1 or SMK-37 firmware without the hardware, in the browser or headless, get it listed, and build the emulator.">
+<meta property="og:url" content="https://joakimeriksson.github.io/fm1-emu/dev/">
+<meta property="og:image" content="https://joakimeriksson.github.io/fm1-emu/og.png">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="devpage">
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="../"><span class="logo" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 11C4 3 6 3 8 8s4 5 6-3"/></svg></span><span class="wordmark"><b>fm1-emu</b><small>for developers</small></span></a>
+    <!-- release:pill --><a class="ver" href="https://github.com/joakimeriksson/fm1-emu/releases/tag/v0.5.1" title="Release notes and downloads for 0.5.1">v0.5.1</a><!-- /release:pill -->
+    <nav class="devices" aria-label="Play"><a href="../">FM-1</a><a href="../smk37/">SMK-37</a></nav>
+    <nav class="sitenav" aria-label="This page">
+      <a href="#test">Test a firmware</a><a href="#listed">Get listed</a><a href="#how">How it works</a><a href="#build">Build</a>
+    </nav>
+    <a class="gh" href="https://github.com/joakimeriksson/fm1-emu" aria-label="Source code on GitHub"><svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span><span class="arrow" aria-hidden="true">↗</span></a>
+  </div>
+</header>
+
+<section class="hero dev-hero" aria-labelledby="hero-h">
+  <div class="wrap hero-grid">
+    <div class="hero-text">
+      <p class="kicker">For firmware authors and developers</p>
+      <h1 id="hero-h">Run your firmware <em>without the hardware.</em></h1>
+      <p class="lead">fm1-emu runs the FM-1's and the SMK-37's update packages unchanged: their pi32v2 CPU, the
+        parts of the chip the firmwares use, the screen and the audio, written in Rust. Try a build before
+        you flash it, link people to it, and run it from a script.</p>
+      <div class="ctas"><a class="cta primary" href="#test">Test a firmware</a><a class="cta" href="https://github.com/joakimeriksson/fm1-emu">Source on GitHub ↗</a></div>
+    </div>
+    <pre class="term" aria-label="Examples"><span class="c"># your build in a window, with sound and MIDI in</span>
+<span class="p">$</span> fm1-live --fwsc my-synth.fwsc
+
+<span class="c"># headless: hold a chord, write the screen at 5 s</span>
+<span class="p">$</span> FM1_BENCH_KEYS=1500:C4,1500:E4,1500:G4 \
+  fm1-live --fwsc my-synth.fwsc --shot 5000
+
+<span class="c"># or in the browser, from your own site</span>
+…/fm1-emu/?package=https://you.example/my-synth.fwsc</pre>
+  </div>
+</section>
+
+<main class="dev">
+  <section id="test" class="devsec" aria-labelledby="h-test">
+    <p class="eyebrow">Test a firmware</p>
+    <h2 id="h-test">Before it goes near a device.</h2>
+    <div class="devcards">
+      <article>
+        <h3>In the browser</h3>
+        <p>On <a href="../">the FM-1 page</a> or <a href="../smk37/">the SMK-37 page</a>, open your
+          <code>.fwsc</code> with <b>Open .fwsc…</b>, or drop it on the synth. The page keeps what the firmware
+          saves to its flash. A changed package starts a save of its own, so a new build cannot overwrite an
+          older one's patches.</p>
+      </article>
+      <article>
+        <h3>From a link</h3>
+        <ul class="params">
+          <li><code>?package=URL&amp;name=Name</code> plays a package your site serves over https, with CORS on</li>
+          <li><code>?fw=id</code> one of the listed firmwares</li>
+          <li><code>?mhz=240</code> the clock, 60 to 240 MHz (the page starts at 100 MHz)</li>
+          <li><code>?embed=1</code> the synth and its controls alone, for an iframe on your page</li>
+        </ul>
+      </article>
+      <article>
+        <h3>Headless, with fm1-live</h3>
+        <ul class="params">
+          <li><code>--shot MS</code> runs MS ms, then writes the panel to <code>work/panel.ppm</code>
+            (<code>--lcd-only</code>: the screen alone)</li>
+          <li><code>--record DIR</code> with it: a frame every 16 ms, and the audio</li>
+          <li><code>FM1_BENCH_KEYS</code> a script of keys, encoders, the MASTER knob and MIDI bytes</li>
+          <li><code>--bench MS</code> how fast it runs</li>
+        </ul>
+      </article>
+    </div>
+    <p class="more">fm1-live also plugs in a USB cable (<code>--usb</code>: a USB-MIDI firmware shows up on this
+      computer as a MIDI device, on macOS and Linux), keeps the flash chip in a file between runs
+      (<code>--flash FILE</code>), and runs with the FM-1's own timings (<code>FM1_STRICT=1</code>). Download it
+      from <a href="https://github.com/joakimeriksson/fm1-emu/releases/latest">the latest release</a>; all of its
+      options are in <a href="https://github.com/joakimeriksson/fm1-emu#on-your-computer">the README</a>.</p>
+  </section>
+
+  <section id="listed" class="devsec" aria-labelledby="h-listed">
+    <p class="eyebrow">Get listed</p>
+    <h2 id="h-listed">The FM-1 list follows the Hub.</h2>
+    <p class="lead">The FM-1 page lists the firmwares on <a href="https://thefirmwarehub.com/">the FM-1 Firmware
+      Hub</a>. Publish yours there, as you would for a real FM-1; nothing else is needed.</p>
+    <ol class="steps">
+      <li><b>Publish it on the Hub</b>The page reads the Hub's list when it opens.</li>
+      <li><b>It shows up as new</b>Listed last, marked as not yet run here, and playable from its card.</li>
+      <li><b>It gets its card</b>When the list is next refreshed, it is played. If it plays, it moves up with a
+        picture of its screen, its version and your links. If not, it stays with the new ones, and the
+        refresh says what failed.</li>
+    </ol>
+    <p>The SMK-37 page's list follows <a href="https://genkigenki.github.io/smk37/">genkigenki's SMK-37 install
+      page</a>.</p>
+    <p>Once a firmware is on the FM-1 list, a pull request that changes the emulator's CPU or chip plays it, with
+      every other listed firmware, for 8 seconds at 240 MHz, compiled and interpreted. The two must give the
+      same audio, and the audio must match its recording (<code>tests/catalog.json</code>). A change that moves
+      a firmware's sound updates that recording in the same pull request, where review sees it.</p>
+  </section>
+
+  <section id="how" class="devsec" aria-labelledby="h-how">
+    <p class="eyebrow">How it works</p>
+    <h2 id="h-how">One emulator, three front ends.</h2>
+    <p class="lead">The FM-1 is built on a JieLi AC791N: two cores of JieLi's own 32-bit pi32v2 CPU, with no public
+      instruction set manual. The instruction set here was recovered from the firmwares themselves and checked
+      against test programs built with JieLi's toolchain. The same Rust crates run in the page, in the desktop
+      app and in the DAW plugin. Hot code is compiled while it runs: to native code on ARM64 and x86-64, to
+      WebAssembly in the browser.</p>
+    <ul class="crates">
+      <li><code>fm1-isa</code><span>The instruction set: decoder and disassembler, generated from <code>isa/fm1.yaml</code></span></li>
+      <li><code>fm1-core</code><span>The CPU: the interpreter and the JITs</span></li>
+      <li><code>fm1-soc</code><span>The chip and the board: memory map, timers, interrupts, flash, screen, keys, audio, MIDI</span></li>
+      <li><code>fm1-web</code><span>The page's WebAssembly: the machine in an AudioWorklet, and the panel</span></li>
+      <li><code>fm1-live</code><span>The desktop app: the panel in a window, audio out, MIDI in, headless runs</span></li>
+      <li><code>fm1-plugin</code><span>The instrument plugin: CLAP from Rust, AU and VST3 around it</span></li>
+    </ul>
+    <p class="more">Read more: <a href="../fm1-emu-report.pdf">the technical report</a> (PDF, 12 pages), the
+      <a href="https://github.com/joakimeriksson/fm1-emu/blob/master/docs/isa-notes.md">instruction set notes</a>,
+      <a href="https://github.com/joakimeriksson/fm1-emu/blob/master/docs/recon.md">the hardware notes</a>,
+      <a href="https://github.com/joakimeriksson/fm1-emu/blob/master/docs/stock-firmware.md">M-VAVE's firmware and the second core</a>.</p>
+  </section>
+
+  <section id="build" class="devsec" aria-labelledby="h-build">
+    <p class="eyebrow">Build and contribute</p>
+    <h2 id="h-build">MIT, on GitHub.</h2>
+    <p class="lead">Issues and pull requests are welcome:
+      <a href="https://github.com/joakimeriksson/fm1-emu">the source</a> ·
+      <a href="https://github.com/joakimeriksson/fm1-emu/issues">issues</a>.</p>
+    <pre class="term"><span class="c"># the desktop app, and the listed firmwares to play in it</span>
+<span class="p">$</span> cargo build --release -p fm1-live
+<span class="p">$</span> node tools/fetch_firmwares.mjs
+<span class="p">$</span> target/release/fm1-live --fw felucca
+
+<span class="c"># the page, served locally (needs the wasm32-unknown-unknown target)</span>
+<span class="p">$</span> web/build.sh &amp;&amp; (cd web/dist &amp;&amp; python3 -m http.server 8642)
+
+<span class="c"># the plugin, on a Mac (AU, VST3, CLAP)</span>
+<span class="p">$</span> tools/build_plugin.sh
+
+<span class="c"># the tests, and the listed firmwares compiled against interpreted</span>
+<span class="p">$</span> cargo test --release -p fm1-isa -p fm1-core -p fm1-soc -p fm1-web
+<span class="p">$</span> node --test web/*.test.mjs
+<span class="p">$</span> tools/catalog_check.py --jobs 4</pre>
+    <p>Every pull request runs the unit tests and the page's tests, builds the site and boots a firmware in it, and
+      runs the core tests and the JIT against the interpreter on Linux (x86-64 and ARM64) and Windows. One that
+      changes the emulator also plays the FM-1 list; one that changes the plugin builds and tests it on macOS and
+      Windows.</p>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap">
+    <div class="about-site">
+      <b>fm1-emu</b>
+      <span>The M-VAVE FM-1 and SMK-37, emulated. Not made by or affiliated with M-VAVE. The emulator's code is
+        MIT; each firmware is its author's, under its own licence. No firmware is hosted on this site.</span>
+    </div>
+    <div class="col">
+      <b>Play</b>
+      <a href="../">FM-1 emulator</a>
+      <a href="../smk37/">SMK-37 emulator</a>
+      <a href="../fm1-sid/">FM-1 SID</a>
+    </div>
+    <div class="col">
+      <b>Code</b>
+      <a href="https://github.com/joakimeriksson/fm1-emu">Source on GitHub ↗</a>
+      <a href="https://github.com/joakimeriksson/fm1-emu/releases">All releases ↗</a>
+      <a href="https://github.com/joakimeriksson/fm1-emu/issues/new">Report an issue ↗</a>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

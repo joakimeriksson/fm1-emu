@@ -97,7 +97,7 @@ pub fn read_with_firmware(path: &Path, fallback: Option<&Firmware>) -> Result<Sa
     std::fs::File::open(path).map_err(io_error)?.take((MAX_SAVE + 1) as u64)
         .read_to_end(&mut bytes).map_err(io_error)?;
     if bytes.len() > MAX_SAVE { return Err("save file too large".into()); }
-    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fwsc") || e.eq_ignore_ascii_case("area")) {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("fwsc")) {
         let data = SaveData { firmware: Firmware {
             name: path.file_stem().map_or_else(String::new, |s| s.to_string_lossy().into_owned()),
             pkg: Arc::new(bytes),

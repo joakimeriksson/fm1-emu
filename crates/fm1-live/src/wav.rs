@@ -97,65 +97,6 @@ impl Wav {
     }
 }
 
-/// A bounded recording queue isolates filesystem stalls from audio production.
-/// If storage cannot keep up, stop the take rather than omit samples inside it.
-pub struct AsyncWav {
-    pub path: PathBuf,
-    pub frames: u64,
-    pub error: Option<String>,
-    sender: Option<std::sync::mpsc::SyncSender<Vec<i16>>>,
-    worker: Option<std::thread::JoinHandle<std::io::Result<PathBuf>>>,
-}
-
-impl AsyncWav {
-    pub fn create(name: &str) -> std::io::Result<Self> {
-        Self::start(Wav::create(name)?)
-    }
-
-    fn start(mut wav: Wav) -> std::io::Result<Self> {
-        let path = wav.path.clone();
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<i16>>(32);
-        let worker = std::thread::Builder::new().name("fm1-recording".into()).spawn(move || {
-            for samples in receiver {
-                wav.write(&samples);
-                if wav.error.is_some() { break; }
-            }
-            wav.finish()
-        })?;
-        Ok(Self { path, frames: 0, error: None, sender: Some(sender), worker: Some(worker) })
-    }
-
-    pub fn write(&mut self, samples: &[i16]) {
-        if self.error.is_some() { return; }
-        match self.sender.as_ref().unwrap().try_send(samples.to_vec()) {
-            Ok(()) => self.frames += samples.len() as u64 / 2,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                self.error = Some("recording stopped: storage could not keep up".into());
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                self.error = Some("recording stopped: file writer failed".into());
-            }
-        }
-    }
-
-    pub fn finish(mut self) -> std::io::Result<PathBuf> {
-        self.sender.take();
-        let result = self.worker.take().unwrap().join()
-            .map_err(|_| std::io::Error::other("recording thread stopped"))?;
-        // A disk error is more specific than the disconnected-queue error.
-        let path = result?;
-        if let Some(error) = self.error.take() { return Err(std::io::Error::other(error)); }
-        Ok(path)
-    }
-}
-
-impl Drop for AsyncWav {
-    fn drop(&mut self) {
-        // The worker finalizes the accepted samples even if the host drops a take.
-        self.sender.take();
-    }
-}
-
 fn header(data: u32) -> [u8; 44] {
     let mut h = [0u8; 44];
     let (rate, ch, bits) = (44_100u32, 2u16, 16u16);
@@ -231,37 +172,5 @@ mod tests {
         assert!(e.contains("disk full"), "{e}");
         assert_eq!(data_len(&d.join("t.wav")), 4, "what was written before stays playable");
         let _ = std::fs::remove_dir_all(&d);
-    }
-}
-
-#[cfg(test)]
-mod async_tests {
-    use super::*;
-    #[test]
-    fn finishing_drains_and_finalizes_every_accepted_stereo_frame() {
-        let dir = std::env::temp_dir().join(format!("fm1-async-wav-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut recording = AsyncWav::start(Wav::create_in(&dir, "take").unwrap()).unwrap();
-        recording.write(&[100, -100, 200, -200]);
-        recording.write(&[300, -300]);
-        assert_eq!(recording.frames, 3);
-        let path = recording.finish().unwrap();
-        let data = std::fs::read(&path).unwrap();
-        assert_eq!(u32::from_le_bytes(data[40..44].try_into().unwrap()), 12);
-        let expected: Vec<u8> = [100i16, -100, 200, -200, 300, -300].into_iter().flat_map(i16::to_le_bytes).collect();
-        assert_eq!(&data[44..], expected);
-        std::fs::remove_file(path).unwrap();
-        let _ = std::fs::remove_dir(dir);
-    }
-    #[test]
-    fn a_full_recording_queue_stops_the_take_without_blocking() {
-        let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
-        let mut recording = AsyncWav { path: PathBuf::new(), frames: 0, error: None,
-            sender: Some(sender), worker: None };
-        recording.write(&[1, -1]);
-        recording.write(&[2, -2]);
-        recording.write(&[3, -3]);
-        assert_eq!(recording.frames, 1);
-        assert!(recording.error.as_ref().unwrap().contains("could not keep up"));
     }
 }

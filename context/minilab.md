@@ -1,20 +1,30 @@
 ---
-load_when: "setting up or changing the dedicated MiniLab 3 FM-1 controller program"
-last_verified: 2026-11-22
+load_when: "MiniLab User program setup and input routing"
+last_verified: 2026-11-23
 source_refs:
-  - crates/fm1-soc/src/controller.rs
-  - crates/fm1-live/src/main.rs
-  - crates/fm1-plugin/src/lib.rs
-  - crates/fm1-plugin/src/engine.rs
-  - crates/fm1-plugin/src/editor.rs
-  - web/midi-input.js
-  - web/main.js
-  - web/index.html
-  - web/studio/controller-profile.test.mjs
+  - crates/fm1-live/src/studio/minilab.json
+  - crates/fm1-live/src/studio/controller_tests.rs
+  - crates/fm1-live/src/ctl.rs
 ---
 # MiniLab 3 FM-1 User program
 
+The app defaults to a factory-compatible profile on the standard MiniLab MIDI port. Factory knobs use absolute values, and channel-10 pads 36–51 map to the same button order listed below. Absolute knobs stop at their MIDI endpoints.
+
+Use Controller → Automatic for factory settings, Controller → MiniLab FM-1 User for the configured relative program, or Controller → Raw MIDI to bypass mapping. Changes apply live, release old holds, and apply for the current run; opening firmware or reopening from Finder selects Automatic. Other MiniLab ports remain raw.
+
 The dedicated program maps physical FM-1 controls, so each firmware keeps its own page meanings and button combinations. It requires a MiniLab User program and explicit selection in the emulator. The factory profile remains available with its previous assignments; do not select FM-1 User while sending factory absolute knob values.
+
+## Factory knob layout
+
+| MiniLab knob | CC | FM-1 action |
+|---|---|---|
+| 1–4 | 74, 71, 76, 77 | K1–K4 |
+| 5 | 93 | Master |
+| 6 | 18 | Select |
+| 7 | 19 | Presets |
+| 8 | 16 | Algorithm |
+
+The main encoder and master fader retain their assignments. This changes Automatic/factory mapping only; the separately configured relative User program below keeps its own layout.
 
 ## Configure the controller
 
@@ -50,28 +60,16 @@ In each pad bank, set every pad to Output CC, MIDI channel 16 (fixed, not Global
 
 Tap Shift + Pad 2 to switch A/B, then release Shift before pressing a command pad. Avoid the separate Transport Bank mode: it invokes MiniLab's local/transport functions instead of these custom pads. A normal pad press sends no musical note. Hold a pad while turning a knob or pressing another control to use firmware button combinations. SAVE and REC are the firmware's actual buttons; holding REC can clear patterns in some firmware. They do not start the emulator's WAV recorder or write to a physical FM-1.
 
-Keep the four faders on their factory CCs (82, 83, 85, 17). They pass through as musical MIDI, as do keys, pitch/modulation strips, Hold, pedal and other unmapped messages. Their effects depend on the firmware. The main encoder duplicates SELECT, Shift-turn duplicates PRESETS and click duplicates HOME. Duplicate HOME/SEL sources stay held until all matching sources are released.
+Keep the four faders on their factory CCs (82, 83, 85, 17). They pass through as musical MIDI, as do pitch/modulation strips, Hold, pedal and other unmapped messages. Their effects depend on the firmware. The main encoder duplicates SELECT, Shift-turn duplicates PRESETS and click duplicates HOME. Duplicate HOME/SEL sources stay held until all matching sources are released.
 
 ## Select the profile
 
-| Host | Selection |
-|---|---|
-| Standalone | Add `--controller-fm1 --midi "Minilab3 MIDI"` to the launch command; the setting carries through firmware changes and remembered GUI launches |
-| Browser | Choose the standard MiniLab MIDI input, then **Controller → FM-1 User · MiniLab 3** |
-| Plugin | Route the standard MiniLab MIDI port to a dedicated instrument track; choose **Controller → MiniLab FM-1 User** in the plugin toolbar |
+```sh
+target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3 MIDI" --map "MiniLab FM-1 User"
+```
 
-Plugins default to Raw MIDI, including older projects. The selected profile and last controller MASTER position are saved per plugin instance. Plugin profile mapping runs on the machine worker at the MIDI event's scheduled frame, before MIDI channel reassignment. Mapped messages are consumed, so a command cannot also change a firmware MIDI parameter. DAWs may intercept or transform CCs; pass them through unchanged and avoid sharing this track with another controller using the same CCs. Controller identity cannot be inferred from plugin MIDI.
+The relative User program selection is explicit and applies to the current run. Opening firmware or reopening from Finder selects Automatic. It is not auto-selected because factory absolute knobs are incompatible with this User program. The standard performance port filter avoids MCU/HUI, DIN and DAW ports being mapped accidentally. F1 shows bindings; right-click uses upstream MIDI learn. User-learned profiles follow upstream storage behavior.
 
-The controller MASTER position takes over volume until host Master automation changes or the on-screen Master is adjusted. This is saved controller state, not a recorded host automation gesture. Switching the plugin to Raw clears the controller volume override and releases held profile buttons. Browser route/profile/channel changes and standalone disconnection release mapped buttons; received CC120/123 also releases dedicated profile holds. Rebooting clears the controller's transient held state.
+Channel-1 keyboard notes use the same panel key actions as the on-screen keyboard, including velocity and release. Both bundled profiles default to panel mode: MIDI F3 (53) is the first panel key; notes outside F3–G5 fold by octaves using upstream behavior. F2 cycles the upstream keyboard modes. Pedal, modulation, pitch bend and unmapped faders pass to firmware MIDI. Pads decode channel 16 before any --midi-ch remap. Relative knobs use the upstream relative-64 mode. Duplicate HOME/SCL assignments stay held until all sources release. Panic and input disconnect release mapped holds. Reconnect discovers the selected input without restarting the app. With --map auto, profile choice is still made at startup.
 
-For the old mapping, use the factory Arturia program with browser **Factory · MiniLab 3** or omit `--controller-fm1` in standalone. **Raw MIDI** / `--controller-raw` bypasses mapping. The dedicated program applies only to FM-1, not SMK-37.
-
-## Octave and transpose
-
-MiniLab Oct−/+ shifts outgoing keyboard notes by octaves; Shift + Oct−/+ transposes by semitones. Press both octave buttons to reset. Keep these local functions: do not transpose the received notes again in the emulator. MiniLab's local octave buttons are not treated as FM-1 panel presses. Bank B pads 5/6 send the actual FM-1 OCT−/+ buttons, including firmware menu/confirm and held-button behavior. They can affect firmware state independently of MiniLab's keyboard range.
-
-## Evidence and limits
-
-Automated routing tests cover relative repetition/direction, all 16 pad assignments, duplicate holds, panic release, performance passthrough, factory compatibility, and plugin mapping before channel reassignment. No physical-controller configuration, bank switching, relative-mode capture or actual DAW acceptance is claimed for this program. No installable proprietary MCC template is supplied; the tables above are the configuration contract.
-
-References: [Arturia MIDI chart](https://support.arturia.com/hc/en-us/articles/6189475866396-MiniLab-3-General-Questions), [MiniLab 3 MCC manual](https://dl.arturia.net/products/minilab-3/manual/minilab-3-mcc_Manual_1_14_1_EN.pdf), [MiniLab cheatsheet](https://medias.arturia.net/images/products/minilab-3/cheatsheet-minilab-3.pdf), [relative encoder firmware update](https://ipn.arturia.com/products/hybrid-synths/minilab-3/update). The older MCC manual predates the relative-mode update; confirm outgoing 63/65 bytes with MIDI monitoring after setup.
+This fork bundles the profile only in standalone. Browser and plugin retain upstream profiles/behavior. No controller settings are uploaded by the app. Real MiniLab User-program and bank-switch acceptance remains pending.

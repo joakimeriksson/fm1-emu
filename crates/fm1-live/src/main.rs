@@ -14,7 +14,8 @@
 //! LEDs follow the firmware's LED lines.
 //!
 //! Keyboard: A W S E D F T G Y H U J K O L P ; ' = C4..F5 (piano layout),
-//! Z / X = OCT- / OCT+, Space = PLAY, R = REC, 1..0 = FX SCL ENV LFO EDIT
+//! Z / X = OCT- / OCT+, Space = PLAY, Shift+Space = REC (not a key among the notes, where a slip
+//! would start a recording), 1..0 = FX SCL ENV LFO EDIT
 //! GLO HOME SAVE ARP SEQ, Left/Right = SELECT, Up/Down = PRESETS,
 //! , / . = ALGORITHM, Esc quits.
 //!
@@ -36,34 +37,28 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use fm1_core::{Bus, Cpu};
-use fm1_soc::{machine, Action, Soc};
-mod app_icon;
-
+use fm1_soc::{machine, machine::RAM_SIZE, Action, Soc, RAM_BASE};
 use minifb::{Key, KeyRepeat, MouseButton, MouseMode, Window, WindowOptions};
-use panel::{Ctl, ENCS};
+use panel::{Ctl, ENCS, H, W};
 
 #[path = "../../fm1-emu/src/buildinfo.rs"]
 mod buildinfo;
 mod fit;
 #[cfg(windows)]
 mod exclusive;
-mod panel;
+mod ctl;
+mod labels;
+mod studio;
+use studio::panel;
 mod wav;
 mod panel_smk;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// `--record -` streams the frames on stdout: the run's reports go to stderr then.
 static REPORTS_TO_STDERR: AtomicBool = AtomicBool::new(false);
-
-/// How the FM-1's panel is drawn (--layout, --key-labels; F2 / F5 in the window).
-static LOOK: Mutex<panel::Look> = Mutex::new(panel::Look { layout: panel::Layout::Large, labels: false, scale: 1.0 });
-
-fn look() -> panel::Look {
-    *LOOK.lock().unwrap()
-}
 
 /// println!, except that with `--record -` it prints to stderr (the frames own stdout).
 macro_rules! println {
@@ -79,12 +74,60 @@ fn say(args: std::fmt::Arguments) {
     };
 }
 
-const RAM_BASE: u32 = 0x01c0_0000;
-const RAM_SIZE: usize = 1 << 20;
 /// How far emulated time runs ahead of the wall clock before audio starts.
 const LEAD_MS: f64 = 60.0;
-const AUDIO_TARGET_DEFAULT_MS: f64 = 12.0;
-use fm1_host::audio::AudioTarget;
+/// Once the firmware streams audio, the emulator runs whenever less than the target of sound
+/// is queued: the audio device sets the pace. The target starts at --latency and grows by this
+/// much at each underrun, up to AUDIO_TARGET_MAX_MS: a played note waits about that long.
+const AUDIO_TARGET_STEP_MS: f64 = 4.0;
+const AUDIO_TARGET_MAX_MS: f64 = 80.0;
+/// --latency's default: low on Windows, where it was measured; elsewhere the earlier 50 ms
+/// (the JIT's warm-up can underrun at the start there).
+const AUDIO_TARGET_DEFAULT_MS: f64 = if cfg!(windows) { 12.0 } else { 50.0 };
+/// After this long without an underrun the target comes back down (see [`AudioTarget`]).
+const AUDIO_TARGET_CALM: Duration = Duration::from_secs(10);
+
+/// How much audio the emulator keeps queued ahead of the device. An underrun raises it by a
+/// step. After a calm while it comes back down by a quarter of the way to the lowest it may
+/// go (at least half a step), so a burst of underruns (the start, while the JIT compiles the
+/// firmware's code, or another program busy for a moment) does not leave the latency high:
+/// from 80 ms to 12 in about two minutes. A step down that underruns within the calm while
+/// shows the device needs the level before it, which then becomes the lowest it goes for the
+/// rest of the run: no probing down and clicking again every minute.
+struct AudioTarget {
+    ms: f64,
+    /// --latency: the lowest asked for
+    floor: f64,
+    /// the lowest it goes now: --latency, or a level a step down from which underran
+    low: f64,
+    calm_since: Instant,
+    /// the last step down: the level before it, and when
+    probe: Option<(f64, Instant)>,
+}
+
+impl AudioTarget {
+    fn new(floor: f64, now: Instant) -> AudioTarget {
+        AudioTarget { ms: floor, floor, low: floor, calm_since: now, probe: None }
+    }
+
+    /// One look at the device: `underran` since the last.
+    fn update(&mut self, underran: bool, now: Instant) {
+        if underran {
+            if let Some((before, at)) = self.probe.take() {
+                if now.duration_since(at) < AUDIO_TARGET_CALM {
+                    self.low = self.low.max(before);
+                }
+            }
+            self.calm_since = now;
+            self.ms = (self.ms + AUDIO_TARGET_STEP_MS).min(AUDIO_TARGET_MAX_MS.max(self.floor)).max(self.low);
+        } else if self.ms > self.low && now.duration_since(self.calm_since) >= AUDIO_TARGET_CALM {
+            let down = ((self.ms - self.low) / 4.0).max(AUDIO_TARGET_STEP_MS / 2.0);
+            self.probe = Some((self.ms, now));
+            self.calm_since = now;
+            self.ms = (self.ms - down).max(self.low);
+        }
+    }
+}
 
 struct Opts {
     bin: String,
@@ -106,8 +149,6 @@ struct Opts {
     midi: String,
     /// channel messages sent to this channel (1-16; 0 = as sent)
     midi_ch: u8,
-    controller_raw: bool,
-    controller_fm1: bool,
     /// a flaky core 1 (fm1_soc::flaky): the chance that one of its RAM loads misreads
     flaky_core1: Option<f64>,
     cpu1_survives: bool,
@@ -120,12 +161,8 @@ struct Opts {
     flash: Option<String>,
     /// --usb: a USB cable to this computer (a host; USB-MIDI as a virtual MIDI device)
     usb: bool,
-    /// --theme NAME: the panel color theme (graphite, classic, cool-gray, black, orange, black-green, purple, white-blue)
+    /// --theme NAME: the panel color theme (default, cool-gray, black, orange, black-green, purple, white-blue)
     theme: String,
-    /// --layout NAME: large (the default: a larger screen), real (the real FM-1's proportions) or display (the LCD alone)
-    layout: panel::Layout,
-    /// --key-labels: the stock firmware's labels under the top keys
-    key_labels: bool,
     /// --flash-chip NAME: which part the FM-1's flash is (the stock Puya, or the newer units' UC25HQ80)
     flash_part: fm1_soc::FlashPart,
     /// --latency MS: the audio queued ahead of the device to start with (it grows on underruns)
@@ -134,6 +171,10 @@ struct Opts {
     buffer: Option<u32>,
     /// --exclusive (Windows): the output in WASAPI exclusive mode
     exclusive: bool,
+    /// --map: the controller profile (crates/fm1-map): auto, none, a profile's name or a .json
+    map: String,
+    /// --midi-log: each MIDI message from the inputs and what the controller profile made of it
+    midi_log: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -156,6 +197,18 @@ fn catalog() -> Vec<(String, String, String, String)> {
     }).collect()
 }
 
+/// `--fw ID`: the catalog's firmware `want` as (the window's title, its package), or what to say:
+/// the catalog is read from the current directory, so outside a checkout there is none.
+fn catalog_pick(cat: Vec<(String, String, String, String)>, want: &str) -> Result<(String, String), String> {
+    if cat.is_empty() {
+        return Err("--fw: no firmware catalog here: web/firmwares.json is looked for in the current directory, so --fw \
+                    works from the top of a checkout (anywhere else: --fwsc FILE)".into());
+    }
+    let (_, name, ver, path) = cat.into_iter().find(|f| f.0 == want)
+        .ok_or_else(|| format!("--fw: no firmware {want:?} in web/firmwares.json (--fw list lists them)"))?;
+    Ok((format!("{name} {ver}"), path))
+}
+
 fn parse() -> Option<Opts> {
     parse_args(std::env::args().collect())
 }
@@ -173,9 +226,10 @@ fn check_opts(o: &Opts) -> Result<(), String> {
 
 fn parse_args(a: Vec<String>) -> Option<Opts> {
     let mut o = Opts { bin: "work/felucca_xip.bin".into(), entry: 0x0200_0120, mhz: 240, bench: None, shot: None,
-                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0, controller_raw: false, controller_fm1: false,
-                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "graphite".into(), layout: panel::Layout::Large, key_labels: false,
-                       flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false };
+                       record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
+                       flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
+                       flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false,
+                       map: "auto".into(), midi_log: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -185,6 +239,11 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
         }
         if a[i] == "--exclusive" {
             o.exclusive = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--midi-log" {
+            o.midi_log = true;
             i += 1;
             continue;
         }
@@ -202,18 +261,21 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                 // a firmware from web/firmwares.json by id (`--fw list` lists them)
                 let want = a.get(i + 1)?;
                 let cat = catalog();
-                if want == "list" {
+                if want == "list" && !cat.is_empty() {
                     for (id, name, ver, path) in &cat {
                         let have = if std::path::Path::new(path).exists() { "" } else { "  (missing: node tools/fetch_firmwares.mjs)" };
                         println!("{id:14} {name} {ver}{have}");
                     }
                     std::process::exit(0);
                 }
-                let (_, name, ver, path) = cat.into_iter().find(|f| &f.0 == want)?;
+                let (name, path) = catalog_pick(cat, want).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(2);
+                });
                 o.fwsc = Some(path);
-                o.name = format!("{name} {ver}");
+                o.name = name;
             }
-            "--fwsc" | "--area" => {
+            "--fwsc" => {
                 let path = a.get(i + 1)?;
                 o.fwsc = Some(path.clone());
                 // (the window's title: the package's name, `FM-1` for M-VAVE's own FM-1.fwsc)
@@ -221,8 +283,6 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             }
             "--syx" => o.syx = Some(a.get(i + 1)?.clone()),
             "--midi" => o.midi = a.get(i + 1)?.clone(),
-            "--controller-fm1" => { o.controller_fm1 = true; i -= 1; },
-            "--controller-raw" => { o.controller_raw = true; i -= 1; },
             "--midi-ch" => o.midi_ch = a.get(i + 1)?.parse().ok().filter(|c| *c <= 16)?,
             "--entry" => o.entry = u32::from_str_radix(a.get(i + 1)?.trim_start_matches("0x"), 16).ok()?,
             "--mhz" => o.mhz = a.get(i + 1)?.parse().ok()?,
@@ -233,12 +293,11 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--cpu1-survives" => { o.cpu1_survives = true; i -= 1; }
             "--flash" => o.flash = Some(a.get(i + 1)?.clone()),
             "--theme" => o.theme = a.get(i + 1)?.clone(),
-            "--layout" => o.layout = panel::Layout::from_name(a.get(i + 1)?)?,
-            "--key-labels" => { o.key_labels = true; i -= 1; }
             "--flash-chip" => o.flash_part = fm1_soc::FlashPart::parse(a.get(i + 1)?)?,
             "--record" => o.record = Some(a.get(i + 1)?.clone()),
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
             "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
+            "--map" => o.map = a.get(i + 1)?.clone(),
             _ => return None,
         }
         i += 2;
@@ -246,21 +305,105 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
     Some(o)
 }
 
-/// The machine: cpu0 + SoC, stepped with interrupts and the peripheral clock; cpu1 once
-/// the firmware releases it.
+/// The machine: fm1_soc::machine's (its `cpu`, `cpu1` and `soc` are reached through `Deref`), with
+/// this program's debugging hooks.
 struct Machine {
-    cpu: Cpu,
-    /// The second core, from when cpu0 releases it (fm1_soc::machine).
-    cpu1: Option<Cpu>,
-    soc: Soc,
+    m: machine::Machine,
     /// FM1_SKIP_LOG: where idle skips happen (pc -> count).
     skip_log: Option<std::collections::HashMap<u32, u64>>,
     /// Run micro-ops in blocks (FM1_NO_BLOCKS=1: the reference per-step loop).
     blocks: bool,
-    pending_tick: bool,
     /// FM1_WATCH_LEDPUT=after_ms: report led_put(…, 25, on) calls (debug)
     watch_call: Option<(u32, u64)>,
     watch_hits: u32,
+    /// FM1_FLAG_AUDIT=file (with FM1_NO_BLOCKS=1): every flag read against the writer it got its
+    /// flags from (`FlagAudit`)
+    flag_audit: Option<FlagAudit>,
+}
+
+/// FM1_FLAG_AUDIT: while the reference loop steps cpu0, every instruction that reads the psr flags is
+/// matched with the instruction they came from. Compiled code runs some flag-writing micro-ops off the
+/// careful path without their flags (`flags_read_later` found no reader within its window), so a read
+/// whose flags came from one of those would see stale flags there: `stale` lists them. A psr push and
+/// its pop carry the flags' origin across (an interrupt's prologue and epilogue, a context switch): a
+/// read after the pop counts against the instruction that wrote them before the push. Also the reads
+/// by distance from their writer, and the `ifeq` / `ifne` whose flags did not come from the
+/// instruction just before.
+#[derive(Default)]
+struct FlagAudit {
+    /// the flags' origin: writer pc, compiled without its flags, syntax; instructions since
+    last: Option<(u32, bool, &'static str)>,
+    since: u64,
+    /// the origin a psr push saved, by the sp it left
+    saved: std::collections::HashMap<u32, (Option<(u32, bool, &'static str)>, u64)>,
+    /// what each pc does with the flags (`Cpu::flag_audit`)
+    uses: std::collections::HashMap<u32, Option<fm1_core::FlagUse>>,
+    steps: u64,
+    reads: u64,
+    /// reads by distance from their writer: 1, 2..8, 9..32, 33..256, more
+    dist: [u64; 5],
+    /// (writer pc, reader pc) -> (reads, farthest, writer syntax, reader syntax)
+    stale: std::collections::BTreeMap<(u32, u32), (u64, u64, &'static str, &'static str)>,
+    /// `ifeq` / `ifne`: right after their writer; else (writer syntax, distance) -> reads
+    if_next: u64,
+    if_other: std::collections::BTreeMap<(&'static str, u64), u64>,
+}
+
+impl FlagAudit {
+    fn use_at(&mut self, cpu: &mut Cpu, soc: &mut Soc, pc: u32) -> Option<fm1_core::FlagUse> {
+        *self.uses.entry(pc).or_insert_with(|| cpu.flag_audit(soc, pc))
+    }
+
+    fn step(&mut self, pc: u32, u: Option<fm1_core::FlagUse>, flags: (u32, u32), sp: (u32, u32)) {
+        self.steps += 1;
+        self.since += 1;
+        let Some(u) = u else { return };
+        if u.psr_push {
+            self.saved.insert(sp.1, (self.last, self.since));
+            return;
+        }
+        if u.psr_pop {
+            if let Some((last, since)) = self.saved.remove(&sp.0) {
+                (self.last, self.since) = (last, since);
+            }
+            return;
+        }
+        if u.reads {
+            self.reads += 1;
+            let k = match self.since { 0..=1 => 0, 2..=8 => 1, 9..=32 => 2, 33..=256 => 3, _ => 4 };
+            self.dist[k] += 1;
+            if let Some((w, dropped, ws)) = self.last {
+                if dropped {
+                    let e = self.stale.entry((w, pc)).or_insert((0, 0, ws, u.syntax));
+                    e.0 += 1;
+                    e.1 = e.1.max(self.since);
+                }
+                if u.syntax.starts_with("ifeq") || u.syntax.starts_with("ifne") {
+                    if self.since == 1 {
+                        self.if_next += 1;
+                    } else {
+                        *self.if_other.entry((ws, self.since.min(1000))).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        // (a write of the value the flags held shows only when the form says it writes them)
+        if u.writes || flags.0 & 15 != flags.1 & 15 {
+            self.last = Some((pc, u.dropped, u.syntax));
+            self.since = 0;
+        }
+    }
+
+    fn report(&self) -> String {
+        let stale: Vec<String> = self.stale.iter().map(|((w, r), (n, far, ws, rs))| {
+            format!("{{\"writer\": \"{w:#010x}\", \"reader\": \"{r:#010x}\", \"reads\": {n}, \"farthest\": {far}, \"writer_syntax\": {ws:?}, \"reader_syntax\": {rs:?}}}")
+        }).collect();
+        let other: Vec<String> = self.if_other.iter().map(|((ws, d), n)| {
+            format!("{{\"writer_syntax\": {ws:?}, \"distance\": {d}, \"reads\": {n}}}")
+        }).collect();
+        format!("{{\"steps\": {}, \"reads\": {}, \"distance\": {:?}, \"stale\": [{}], \"if_right_after\": {}, \"if_other\": [{}]}}\n",
+                self.steps, self.reads, self.dist, stale.join(", "), self.if_next, other.join(", "))
+    }
 }
 
 impl Machine {
@@ -269,51 +412,37 @@ impl Machine {
             Some(path) => {
                 let syx = o.syx.as_ref().map(std::fs::read).transpose()?;
                 let pkg = std::fs::read(path)?;
-                let st = fm1_soc::firmware_from_bytes(&pkg, syx.as_deref())
+                let st = fm1_soc::stock_from_package(&pkg, syx.as_deref())
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path}: {e}")))?;
                 Some(st)
             }
             None => None,
         };
-        let image = match &stock {
-            Some(st) => st.xip.clone(),
-            None => std::fs::read(&o.bin)?,
+        let opts = machine::Options {
+            mhz: o.mhz,
+            jit: std::env::var("FM1_NO_JIT").is_err(),
+            // the SPL hands cpu0 over in user mode (see fm1-emu)
+            user: std::env::var_os("FM1_SUPERVISOR_START").is_none(),
+            // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
+            // time) and as it is timed (`Options::strict`)
+            strict: std::env::var_os("FM1_STRICT").is_some(),
+            // (FM1_STRICT or FM1_LCD_TIMED; FM1_LCD_INSTANT turns it off again)
+            lcd_timed: fm1_soc::lcd_timed_from_env(),
+            flash_part: o.flash_part,
+            cpu1_survives: o.cpu1_survives,
+            flaky_core1: o.flaky_core1.map(|rate| (rate, o.seed.unwrap_or(1))),
+            // (the SFC with the chip key, as the loader leaves it: a `--flash` file reads through it)
+            sfc: true,
+            ..Default::default()
         };
-        let mut soc = Soc::new(RAM_SIZE, image);
-        // (before the boot: the board sets the flash chip's id from it)
-        soc.set_flash_part(o.flash_part);
-        let strict = std::env::var_os("FM1_STRICT").is_some();
-        // FM1_STRICT: as an FM-1 is (misaligned RAM accesses fault, the LCD's transfers take their
-        // time) and as it is timed: each instruction its measured cost (fm1_core's op_cost8) on a
-        // clock in eighths of a cycle (the HW units' jobs too); the interpreter only, and no loop
-        // skip (it counts instructions)
-        soc.periph.cycle_ticks = if strict { 8 } else { 1 };
-        soc.periph.hz = o.mhz * 1_000_000 * soc.periph.cycle_ticks;
-        soc.strict_align = strict;
-        // (FM1_STRICT or FM1_LCD_TIMED; FM1_LCD_INSTANT turns it off again)
-        soc.lcd_timed = fm1_soc::lcd_timed_from_env();
-        if strict {
-            soc.loop_skip.enabled = false;
-            soc.xip_cache = Some(fm1_soc::XipCache::default());
-        }
-        soc.periph.skip_idle = true;
-        soc.flaky_core1 = o.flaky_core1.map(|rate| fm1_soc::flaky::FlakyCore1::new(rate, o.seed.unwrap_or(1)));
-        soc.cpu1_survives = o.cpu1_survives;
-        let mut cpu = Cpu::new(stock.as_ref().map_or(o.entry, |st| st.entry));
-        cpu.jit_on = std::env::var("FM1_NO_JIT").is_err() && !strict;
-        cpu.cost_model = strict;
+        let mut m = match stock {
+            Some(st) => machine::Machine::from_stock(st, &opts),
+            None => machine::Machine::from_image(std::fs::read(&o.bin)?, o.entry, &opts),
+        };
         if std::env::var_os("FM1_ISA_HIST").is_some() {
-            cpu.isa_hist = Some(Default::default());
+            m.cpu.isa_hist = Some(Default::default());
         }
-        // the SPL hands cpu0 over in user mode (see fm1-emu)
-        cpu.user = std::env::var_os("FM1_SUPERVISOR_START").is_none();
-        // the SPL's boot-parameter struct (see fm1-emu): an all-zero pair
-        let params = RAM_BASE + 0x7fc00;
-        soc.write32(params, params + 0x40);
-        cpu.regs[0] = params;
-        if let Some(st) = &stock {
-            fm1_soc::boot_firmware(&mut soc, &mut cpu, st);
-        }
+        let soc = &mut m.soc;
         if let Some(path) = o.flash.as_ref().filter(|p| std::path::Path::new(p).exists()) {
             let f = std::fs::read(path)?;
             if f.len() != fm1_soc::FLASH_SIZE {
@@ -329,7 +458,8 @@ impl Machine {
         let blocks = std::env::var("FM1_NO_BLOCKS").is_err();
         let watch_call = std::env::var("FM1_WATCH_LEDPUT").ok().and_then(|v| v.parse().ok()).map(|ms| (0x0201_ad60u32, ms));
         let blocks = blocks && watch_call.is_none();
-        Ok(Self { cpu, cpu1: None, soc, skip_log, blocks, pending_tick: false, watch_call, watch_hits: 0 })
+        let flag_audit = std::env::var_os("FM1_FLAG_AUDIT").map(|_| FlagAudit::default());
+        Ok(Self { m, skip_log, blocks, watch_call, watch_hits: 0, flag_audit })
     }
 
     /// Run n instructions of cpu0, and of cpu1 alongside once it is running
@@ -338,24 +468,22 @@ impl Machine {
         if !self.blocks {
             return self.run_steps(n);
         }
-        let jit = self.cpu.jit_on;
-        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
-        machine::run_dual(cpu1, soc, n, RAM_SIZE, jit, |soc, k| machine::run_blocks(cpu, soc, k, pending_tick))
+        self.m.run(n)
     }
 
     /// The reference loop: one instruction per iteration.
     fn run_steps(&mut self, n: u32) -> Result<(), String> {
-        self.soc.take_boot(&self.cpu);
+        self.m.soc.take_boot(&self.m.cpu);
         for _ in 0..n {
             if self.soc.periph.tick() {
                 self.soc.advance(0);
             }
             if self.soc.reset_due() {
-                self.soc.chip_reset(&mut self.cpu); // (as run_blocks: cpu0 from its start)
+                self.m.soc.chip_reset(&mut self.m.cpu); // (as run_blocks: cpu0 from its start)
                 self.cpu1 = None;
             }
             // (as run_blocks: the PC limits, the interrupt due, the exception taken once)
-            machine::cpu0_between(&mut self.cpu, &mut self.soc);
+            machine::cpu0_between(&mut self.m.cpu, &mut self.m.soc);
             if let Some((bpc, after)) = self.watch_call {
                 if self.cpu.pc == bpc && self.cpu.regs[2] != 0 && self.soc.periph.ms() >= after && self.watch_hits < 60 {
                     self.watch_hits += 1;
@@ -363,12 +491,32 @@ impl Machine {
                 }
             }
             let (pc, sk) = (self.cpu.pc, self.soc.periph.skipped);
-            machine::cpu0_step(&mut self.cpu, &mut self.soc)?;
+            let audit = match self.flag_audit.as_mut() {
+                Some(a) => Some((a.use_at(&mut self.m.cpu, &mut self.m.soc, pc), self.m.cpu.flags, self.m.cpu.sp)),
+                None => None,
+            };
+            machine::cpu0_step(&mut self.m.cpu, &mut self.m.soc)?;
+            if let (Some(a), Some((u, f0, sp0))) = (self.flag_audit.as_mut(), audit) {
+                a.step(pc, u, (f0, self.m.cpu.flags), (sp0, self.m.cpu.sp));
+            }
             if self.skip_log.is_some() && self.soc.periph.skipped != sk {
                 *self.skip_log.as_mut().unwrap().entry(pc).or_insert(0) += 1;
             }
         }
         Ok(())
+    }
+}
+
+impl std::ops::Deref for Machine {
+    type Target = machine::Machine;
+    fn deref(&self) -> &machine::Machine {
+        &self.m
+    }
+}
+
+impl std::ops::DerefMut for Machine {
+    fn deref_mut(&mut self) -> &mut machine::Machine {
+        &mut self.m
     }
 }
 
@@ -412,23 +560,50 @@ fn high_priority() -> Priority {
             timeBeginPeriod(1);
         }
     }
-    fm1_host::audio::prioritize_producer();
+    #[cfg(target_os = "macos")]
+    {
+        extern "C" {
+            fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+        }
+        const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
+    }
     Priority
+}
+
+/// Why `Machine::new` made no machine, for the user. An error that names its file (a package that
+/// does not unpack, a --flash file of another size) is said as it is; one from reading a file is
+/// the first of the run's files that cannot be read (one that opens may still not read: a folder),
+/// in the order they are read: the package's bank, the firmware (the package of --fwsc or --fw,
+/// else the --bin image), the --flash file, which is read only when it is there.
+fn load_error(o: &Opts, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        return e.to_string();
+    }
+    let firmware = o.fwsc.as_ref().unwrap_or(&o.bin);
+    let unread = |p: &&String| std::fs::read(p.as_str()).is_err();
+    let which = [o.syx.as_ref().filter(|_| o.fwsc.is_some()), Some(firmware)].into_iter().flatten().find(unread)
+        .or(o.flash.as_ref().filter(|p| std::path::Path::new(p.as_str()).exists() && unread(p)))
+        .unwrap_or(firmware);
+    format!("cannot read {which}: {e}")
 }
 
 fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_BENCH_NOKEYS").is_ok() {
         m.soc.periph.script.clear();
     } else if script_keys(&mut m) {
     } else {
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(800), Action::Key { id: 21, down: true }));
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(900), Action::Key { id: 25, down: true }));
-    m.soc.periph.script.push_back((m.soc.periph.cycle_of_ms(1000), Action::Key { id: 28, down: true }));
+        for (at, id) in [(800, 21), (900, 25), (1000, 28)] {
+            let at = m.soc.periph.cycle_of_ms(at);
+            m.soc.periph.script.push_back((at, Action::Key { id, down: true }));
+        }
     }
     m.cpu.profile = std::env::var("FM1_BENCH_ROUTES").is_ok();
     let warmup = std::env::var("FM1_WARMUP_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000).min(ms.saturating_sub(1));
@@ -458,7 +633,8 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     while m.soc.periph.ms() < ms {
         if let Some((dir, step)) = &film {
             while m.soc.periph.ms() >= next_frame {
-                let leds = m.soc.periph.led_take();
+                // (as the live panel shows them: a dim LED does not flicker in a film either)
+                let leds = m.soc.periph.led_shown();
                 let down = m.soc.periph.keys_down;
                 if let Err(e) = write_panel(&mut m, &down, &leds, &format!("{dir}/{nframes:06}.ppm"), theme) {
                     eprintln!("{dir}: {e}");
@@ -494,9 +670,6 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
             std::process::exit(1);
         }
         insns += 100_000;
-        if let Some(c1) = m.cpu1.as_mut() {
-            c1.profile = m.cpu.profile;
-        }
         if std::env::var_os("FM1_BENCH_TRACE").is_some() {
             // a checkpoint to diff between runs (JIT against the interpreter)
             eprintln!("cp {insns} cyc {} pc {:#010x} sp {:#x} r {:x?}", m.soc.periph.cycles, m.cpu.pc, m.cpu.sp, &m.cpu.regs[..8]);
@@ -504,7 +677,7 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     }
     if sample {
         let mut v: Vec<_> = pcs.into_iter().collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1));
+        v.sort_by_key(|x| std::cmp::Reverse(x.1));
         let tot: u64 = v.iter().map(|x| x.1).sum();
         for (pc, n) in v.iter().take(25) {
             println!("pc {pc:#010x} {:5.1}%", 100.0 * *n as f64 / tot as f64);
@@ -514,13 +687,18 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     let steady_rt = steady.map(|(t, start)| (m.soc.periph.ms() - start) as f64 / 1000.0 / t.elapsed().as_secs_f64());
     let frames = m.soc.periph.audio.len() / 2;
     println!("steady: {:?}x real time; {frames} real audio frames", steady_rt);
+    let starved = m.soc.refill.starved;
+    println!("starved: {starved} audio halves the firmware did not refill in time");
     if let Ok(path) = std::env::var("FM1_BENCH_JSON") {
-        let json = format!("{{\"emulatedMs\":{},\"wallSeconds\":{wall},\"realtime\":{},\"audioFrames\":{frames},\"steadyRealtime\":{}}}\n",
+        let json = format!("{{\"emulatedMs\":{},\"wallSeconds\":{wall},\"realtime\":{},\"audioFrames\":{frames},\"steadyRealtime\":{},\"starvedHalves\":{starved}}}\n",
             m.soc.periph.ms(), m.soc.periph.ms() as f64 / 1000.0 / wall,
             steady_rt.map_or_else(|| "null".to_owned(), |v| v.to_string()));
         std::fs::write(path, json).expect("write benchmark JSON");
     }
     println!("icache: {} decodes for {} instructions", m.cpu.decodes, insns);
+    if let (Some(path), Some(a)) = (std::env::var_os("FM1_FLAG_AUDIT"), m.flag_audit.as_ref()) {
+        let _ = std::fs::write(&path, a.report());
+    }
     if let Some(c1) = &m.cpu1 {
         println!("cpu1: {} instructions ({:.1} M per emulated s)", c1.insn_count, c1.insn_count as f64 / 1e3 / ms as f64);
     }
@@ -597,14 +775,16 @@ fn bench(o: &Opts, ms: u64, theme: &'static panel::Theme) {
 // ---------------------------------------------------------------- audio --
 
 struct AudioRing {
-    prefill: AtomicUsize,
+    q: Mutex<VecDeque<i16>>,
+    /// Set once the firmware has produced sound (silence before that is boot).
+    started: AtomicBool,
     underruns: AtomicU64,
     /// The stream died after it had started (the exclusive one: the device unplugged or no
     /// longer answering): the emulation goes by the clock instead.
     dead: AtomicBool,
 }
 
-fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<(cpal::Stream, rtrb::Producer<[f32; 2]>), String> {
+fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let dev = host.default_output_device().ok_or("no audio output device")?;
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
@@ -612,7 +792,7 @@ fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<(cpal::Strea
         return Err(format!("output format {:?} not handled (f32 only)", cfg.sample_format()));
     }
     let mut config = cfg.config();
-    if let Some(n) = buffer.or(if cfg!(target_os = "macos") { Some(128) } else { None }) {
+    if let Some(n) = buffer {
         let ok = match cfg.buffer_size() {
             cpal::SupportedBufferSize::Range { min, max } => (*min..=*max).contains(&n),
             cpal::SupportedBufferSize::Unknown => true,
@@ -623,7 +803,7 @@ fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<(cpal::Strea
             eprintln!("audio: the device does not take a {n}-frame buffer ({:?}); its own it is", cfg.buffer_size());
         }
     }
-    let (stream, producer) = match output_stream(&dev, &config, ring.clone()) {
+    let stream = match output_stream(&dev, &config, ring.clone()) {
         Ok(s) => s,
         Err(e) if config.buffer_size != cpal::BufferSize::Default => {
             eprintln!("audio: a {:?} buffer: {e}; the device's own it is", config.buffer_size);
@@ -634,38 +814,48 @@ fn start_audio(ring: Arc<AudioRing>, buffer: Option<u32>) -> Result<(cpal::Strea
     };
     eprintln!("audio: {} at {} Hz, {} channels, buffer {:?}", dev.name().unwrap_or_default(), config.sample_rate.0, config.channels, config.buffer_size);
     stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, producer))
+    Ok(stream)
 }
 
 /// The output stream: the ring's 44.1 kHz frames, resampled to the device's rate.
-fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<AudioRing>) -> Result<(cpal::Stream, rtrb::Producer<[f32; 2]>), String> {
+fn output_stream(dev: &cpal::Device, config: &cpal::StreamConfig, ring: Arc<AudioRing>) -> Result<cpal::Stream, String> {
     let channels = config.channels as usize;
-    let (producer, consumer) = rtrb::RingBuffer::new(65_536);
-    let mut playback = fm1_host::audio::Playback::new(consumer, config.sample_rate.0 as f64);
-    let failed = ring.clone();
-    let stream = dev.build_output_stream(
+    let step = 44_100.0 / config.sample_rate.0 as f64; // source frames per output frame
+    let (mut pos, mut cur, mut next) = (0.0f64, (0.0f32, 0.0f32), (0.0f32, 0.0f32));
+    dev.build_output_stream(
         config,
         move |out: &mut [f32], _| {
-            let prefill = ring.prefill.load(Ordering::Relaxed);
+            let mut q = ring.q.lock().unwrap();
+            let mut starved = false;
             for frame in out.chunks_mut(channels) {
-                let stereo = playback.frame(prefill);
-                for (c, sample) in frame.iter_mut().enumerate() {
-                    *sample = stereo[c % 2];
+                pos += step;
+                while pos >= 1.0 {
+                    pos -= 1.0;
+                    cur = next;
+                    next = match (q.pop_front(), q.pop_front()) {
+                        (Some(l), Some(r)) => (l as f32 / 32768.0, r as f32 / 32768.0),
+                        _ => {
+                            starved = true;
+                            (0.0, 0.0)
+                        }
+                    };
+                }
+                let f = pos as f32;
+                let (l, r) = (cur.0 + (next.0 - cur.0) * f, cur.1 + (next.1 - cur.1) * f);
+                for (c, s) in frame.iter_mut().enumerate() {
+                    *s = if c % 2 == 0 { l } else { r };
                 }
             }
-            ring.underruns.store(playback.underruns, Ordering::Relaxed);
+            if starved && ring.started.load(Ordering::Relaxed) {
+                ring.underruns.fetch_add(1, Ordering::Relaxed);
+            }
         },
-        move |e| { failed.dead.store(true, Ordering::Relaxed); eprintln!("audio: {e}"); },
+        |e| eprintln!("audio: {e}"),
         None,
-    ).map_err(|e| e.to_string())?;
-    Ok((stream, producer))
+    )
+    .map_err(|e| e.to_string())
 }
 
-/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
-/// the panel drawn at `ms` into work/panel.ppm.
-/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
-/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
-/// False when the variable is unset.
 /// --flash: the flash chip back to its file; and how many erases / programs it saw
 fn save_flash(m: &Machine, path: Option<&String>) {
     let f = &m.soc.flash;
@@ -688,6 +878,9 @@ fn halted(e: &str) {
     eprintln!("{}", buildinfo::halt_note("fm1-live"));
 }
 
+/// FM1_BENCH_KEYS=ms:id[,ms:id^,ms:eN:clicks...]: queue key presses (`^`: release) and
+/// encoder turns, `ms:mHEX` MIDI bytes into the MIDI IN jack (`@FILE`: the script from FILE).
+/// False when the variable is unset.
 fn script_keys(m: &mut Machine) -> bool {
     let Ok(mut keys) = std::env::var("FM1_BENCH_KEYS") else { return false };
     if let Some(path) = keys.strip_prefix('@') {
@@ -815,13 +1008,15 @@ fn run_tail(m: &mut Machine, ms: u64, mut rec: Option<&mut Recorder>, theme: &pa
     Ok((in_isr, total))
 }
 
+/// Headless panel picture: C4-E4-G4 held from 0.8 s, PLAY pressed at 1.2 s,
+/// the panel drawn at `ms` into work/panel.ppm.
 fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
     if o.record.as_deref() == Some("-") {
         REPORTS_TO_STDERR.store(true, Ordering::Relaxed);
     }
     let mut m = match Machine::new(o) {
         Ok(m) => m,
-        Err(e) => { eprintln!("cannot read {}: {e}", o.bin); std::process::exit(1); },
+        Err(e) => { eprintln!("{}", load_error(o, &e)); std::process::exit(1); },
     };
     usb_audio_arm(&mut m);
     if std::env::var("FM1_NO_SKIP").is_ok() {
@@ -938,6 +1133,9 @@ fn shot(o: &Opts, ms: u64, theme: &'static panel::Theme) {
         m.soc.periph.hz / 1_000_000
     );
     let leds = m.soc.periph.led_take();
+    if let (Some(path), Some(a)) = (std::env::var_os("FM1_FLAG_AUDIT"), m.flag_audit.as_ref()) {
+        let _ = std::fs::write(&path, a.report());
+    }
     if let (Some(path), Some(h)) = (std::env::var_os("FM1_ISA_HIST"), m.cpu.isa_hist.as_ref()) {
         // executed instructions by ISA form, as JSON {syntax: count} (FM1_NO_BLOCKS: every step)
         let mut v: Vec<_> = h.iter().collect();
@@ -1165,7 +1363,7 @@ fn panel_ppm(buf: &[u32], w: usize, h: usize) -> Vec<u8> {
 
 /// The board's panel art, rasterized, and its size.
 fn panel_base(board: fm1_soc::Board, theme: &panel::Theme) -> (Vec<u32>, usize, usize) {
-    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { { let l = look(); let (w, h) = panel::size(&l); (panel::base(theme, &l), w, h) } }
+    if board == fm1_soc::Board::Smk37 { (panel_smk::base(), panel_smk::W, panel_smk::H) } else { (panel::base(theme), W, H) }
 }
 
 /// The LCD as the machine shows it now, as a PPM file.
@@ -1195,8 +1393,8 @@ fn render_panel(m: &Machine, base: &[u32], down: &[bool; 41], leds: &[f32; 41], 
         };
         panel_smk::draw(buf, base, &st);
     } else {
-        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, positions: None, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
-        panel::draw(buf, base, &st, theme, &look());
+        let st = panel::State { lcd: &m.soc.lcd.fb, enc_clicks, pot: m.soc.periph.adc_value[4], down, leds, turning: &[0; 8] };
+        panel::draw(buf, base, &st, theme);
     }
 }
 
@@ -1225,100 +1423,42 @@ fn piano(k: Key) -> Option<u8> {
     Some(21 + semis)
 }
 
-fn button(k: Key) -> Option<u8> {
+/// `shift`: Space went down with Shift held, and is REC, PLAY's neighbour on the panel.
+fn button(k: Key, shift: bool) -> Option<u8> {
     Some(match k {
-        Key::Z => 0, Key::X => 1, Key::Space => 12, Key::R => 13,
+        Key::Z => 0, Key::X => 1, Key::Space if shift => 13, Key::Space => 12,
         Key::Key1 => 2, Key::Key2 => 3, Key::Key3 => 4, Key::Key4 => 5, Key::Key5 => 6,
         Key::Key6 => 7, Key::Key7 => 8, Key::Key8 => 9, Key::Key9 => 10, Key::Key0 => 11,
         _ => return None,
     })
 }
 
-/// Connect the MIDI inputs `--midi` asks for: their bytes go to the MIDI IN jack. The
-/// connections live as long as the returned value.
-struct MidiInputs {
-    quit: Arc<AtomicBool>,
-    worker: Option<std::thread::JoinHandle<()>>,
-    panel: mpsc::Receiver<Action>,
-}
-impl Drop for MidiInputs {
-    fn drop(&mut self) {
-        self.quit.store(true, Ordering::Relaxed);
-        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+/// The MIDI inputs `--midi` asks for, by name.
+fn midi_input_names(o: &Opts) -> Vec<String> {
+    if o.midi == "none" {
+        return Vec::new();
     }
+    let Ok(probe) = midir::MidiInput::new("fm1-live") else { return Vec::new() };
+    probe.ports().iter().filter_map(|p| probe.port_name(p).ok())
+        .filter(|n| o.midi == "all" || n.to_lowercase().contains(&o.midi.to_lowercase()))
+        .collect()
 }
-fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, fm1_panel: bool) -> MidiInputs {
-    let quit = Arc::new(AtomicBool::new(false));
-    let (panel_tx, panel_rx) = mpsc::channel();
-    let mut result = MidiInputs { quit: quit.clone(), worker: None, panel: panel_rx };
-    if o.midi == "none" { return result; }
-    let (wanted, channel, tx) = (o.midi.clone(), o.midi_ch, tx.clone());
-    let controller_raw = o.controller_raw;
-    let controller_fm1 = o.controller_fm1;
-    result.worker = Some(std::thread::spawn(move || {
-        let mut connections = std::collections::HashMap::new();
-        while !quit.load(Ordering::Relaxed) {
-            if let Ok(probe) = midir::MidiInput::new("fm1-live discovery") {
-                let ports: Vec<_> = probe.ports().into_iter().filter_map(|port| {
-                    let name = probe.port_name(&port).ok()?;
-                    let lower = name.to_lowercase();
-                    if wanted == "all" && lower.replace(' ', "").contains("minilab3") && !fm1_soc::controller::is_minilab3(&name) { return None; }
-                    if wanted != "all" && !name.to_lowercase().contains(&wanted.to_lowercase()) { return None; }
-                    Some((port.id(), port, name))
-                }).collect();
-                connections.retain(|id, (_, profile)| {
-                    if ports.iter().any(|(live, _, _)| live == id) { return true; }
-                    eprintln!("MIDI input disconnected: {id}");
-                    for ch in 0..16 { for cc in [64, 123, 120] {
-                        for b in [0xb0 | ch, cc, 0] { let _ = tx.send(Action::Midi { b }); }
-                    }}
-                    if *profile { for id in 0..14 {
-                        let _ = tx.send(Action::Key{id,down:false});
-                        let _ = panel_tx.send(Action::Key{id,down:false});
-                    } }
-                    false
-                });
-                for (id, port, name) in ports {
-                    if connections.contains_key(&id) { continue; }
-                    let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue; };
-                    input.ignore(midir::Ignore::None);
-                    let sender = tx.clone();
-                    let panel_sender = panel_tx.clone();
-                    let profile = fm1_panel && !controller_raw && fm1_soc::controller::is_minilab3(&name);
-                    let mut controller = if controller_fm1 { fm1_soc::controller::MiniLab3::fm1() } else { fm1_soc::controller::MiniLab3::default() };
-                    match input.connect(&port, "fm1-live in", move |_, msg, _| {
-                        if profile && controller.route(msg, |a| { let _ = panel_sender.send(a.clone()); let _ = sender.send(a); }) { return; }
-                        for (i, &byte) in msg.iter().enumerate() {
-                            let b = if i == 0 && channel != 0 && (0x80..0xf0).contains(&byte) {
-                                (byte & 0xf0) | (channel - 1)
-                            } else { byte };
-                            let _ = sender.send(Action::Midi { b });
-                        }
-                    }, ()) {
-                        Ok(connection) => { eprintln!("MIDI in: {name}"); connections.insert(id, (connection, profile)); }
-                        Err(error) => eprintln!("MIDI in: {name}: {error}"),
-                    }
-                }
-            }
-            // Check between short waits so closing or changing firmware stays responsive.
-            for _ in 0..5 {
-                if quit.load(Ordering::Relaxed) { break; }
-                std::thread::sleep(Duration::from_millis(100));
-            }
-        }
-    }));
-    result
+
+/// Connect the MIDI inputs `--midi` asks for: their messages go through the controller profile
+/// (crates/fm1-map) to the panel and the MIDI IN jack, or with `--map none` to the jack as they
+/// are. The discovery worker and connections stop when the returned value is dropped.
+fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> studio::midi::Inputs {
+    studio::midi::connect(&o.midi, o.midi_ch, tx.clone(), control.clone())
 }
 
 /// Pixels of vertical mouse drag per encoder click.
-const DRAG_PER_CLICK: f32 = 8.0;
+const DRAG_PER_CLICK: f32 = 12.0;
 
-const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc (or --area FIRMWARE.area)   (a firmware package: a community firmware, or M-VAVE's own)
+const USAGE: &str = "usage: fm1-live --fwsc FIRMWARE.fwsc   (a firmware package: a community firmware, or M-VAVE's own)
        fm1-live --fw ID | --fw list    (the page's list, in a checkout: node tools/fetch_firmwares.mjs)
        fm1-live --bin XIP.bin [--entry 0x02000120]
-F6 (Fn-F6 on some Macs): open Hardware Library in Chrome or Edge
-options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw | --controller-fm1] [--midi-ch N] [--flash FILE] [--usb]
-         [--theme NAME] [--layout large|real|display] [--key-labels] [--latency MS] (12 by default)
+options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--flash FILE] [--usb]
+         [--theme NAME] [--latency MS] (12 on Windows, else 50)
                                  audio queued ahead of the device to start with; it grows by itself
                                  on underruns and back down after 10 s without one, no lower
                                  than a level that underran
@@ -1328,7 +1468,13 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--controller-raw |
          [--flash-chip p25q80|uc25hq80]
                                  the FM-1's flash part: the stock Puya P25Q80 (85 60 14), or the
                                  UC25HQ80 (B3 60 14) of units sold since autumn 2026
+         [--map auto|none|NAME|FILE.json]  a MIDI controller as the panel (profiles: crates/fm1-map;
+                                 yours in %APPDATA%\\fm1-emu\\controllers or ~/.config/fm1-emu/controllers);
+                                 auto: the profile made for a controller, for that input only
+         [--midi-log]            print each MIDI message and what the profile made of it
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
+window: right-click a control, then move or press one of your controller's: MIDI learn (right-click
+        again: cancel, Delete: unbind); F1 labels, F2 keys: panel / MIDI / auto; F3 records a WAV
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
           --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
@@ -1344,7 +1490,7 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_BENCH_FRAMES=DIR[,MS]  --bench: a film: the panel every MS ms (40) as DIR/000000.ppm..., and
                            DIR/audio.raw from the boot (tools/film.py turns them into a video)
      FM1_DUMPRAM=FILE      --bench, --shot: the 1 MiB of RAM at the end
-     FM1_BENCH_JSON=FILE   --bench: the speed as JSON
+     FM1_BENCH_JSON=FILE   --bench: the speed and the starved audio halves as JSON
      FM1_BENCH_NOKEYS, FM1_WARMUP_MS=N (1000), FM1_BENCH_THREAD, FM1_BENCH_TRACE, FM1_BENCH_PCS,
      FM1_BENCH_ROUTES      --bench: no default keys, the steady-speed start, a thread, checkpoints, profiles
      FM1_KEY_AT, FM1_KEY_UP, FM1_NO_PLAY, FM1_NO_SKIP, FM1_SKIP_FROM, FM1_DUMP=ADDR  --shot
@@ -1366,61 +1512,21 @@ env: FM1_BENCH_KEYS='T:PLAY,T:PLAY^,T:C4@100,T:e0:+3,T:pot:512,T:mHEX'  scripted
      FM1_TPROF=PATH,FROM,TO  --shot: both cores' time-weighted PCs and the flash cache's misses by line from
                            FROM to TO ms, into PATH (with FM1_STRICT: where the cycles go)";
 
-/// Native menu actions share the same handlers as panel shortcuts.
-#[cfg(target_os = "macos")]
-fn install_menus(win: &mut Window) -> Vec<minifb::Menu> {
-    use minifb::{Menu, MENU_KEY_COMMAND, MENU_KEY_SHIFT};
-    let mut menus=Vec::new();
-    for (title, items) in [
-        ("File", vec![("Open Firmware…", 1001, Some((Key::O, MENU_KEY_COMMAND))),
-                       ("Close Window", 1002, Some((Key::W, MENU_KEY_COMMAND)))]),
-        ("Audio", vec![("Toggle WAV Recording", 1003, Some((Key::R, MENU_KEY_COMMAND | MENU_KEY_SHIFT)))]),
-        ("Instrument", vec![("Reset Firmware State…",1006,None)]),
-        ("Hardware", vec![("Open Hardware Library", 1004, Some((Key::L, MENU_KEY_COMMAND | MENU_KEY_SHIFT)))]),
-        ("Help", vec![("FM-1 Studio User Guide", 1005, None)]),
-    ] {
-        let mut menu=Menu::new(title).expect("native menu");
-        for (label,id,shortcut) in items {
-            let mut item=menu.add_item(label,id);
-            if let Some((key,modifiers))=shortcut { item=item.shortcut(key,modifiers); }
-            item.build();
-        }
-        win.add_menu(&menu);menus.push(menu);
-    }
-    menus
-}
-
-fn launch_hardware_library() {
-    std::thread::spawn(|| { if let Err(e)=fm1_host::open_hardware_library(){eprintln!("Hardware Library: {e}");} });
-}
-
 /// A firmware package from a file dialog (Windows, macOS).
 #[cfg(any(windows, target_os = "macos"))]
 fn pick_firmware() -> Option<std::path::PathBuf> {
-    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc", "area"]).set_title("Open an FM-1 firmware").pick_file()
-}
-
-/// Modal shortcuts trigger on release, after observing an idle key state.
-/// This avoids repeat events and a held launch key reopening a picker.
-#[derive(Default)]
-struct ReleaseShortcut { armed: bool, pressed: bool }
-impl ReleaseShortcut {
-    fn update(&mut self, down: bool) -> bool {
-        if !self.armed { if !down { self.armed = true; } return false; }
-        let fire = self.pressed && !down;
-        self.pressed = down;
-        fire
-    }
+    rfd::FileDialog::new().add_filter("FM-1 firmware", &["fwsc"]).set_title("Open an FM-1 firmware").pick_file()
 }
 
 /// F4: pick another firmware package; the arguments to start again on it. The run then ends as
 /// on Esc (the emulation stopped, a WAV being recorded finished, MIDI and audio let go of) and
 /// [`restart`] starts the new one.
-fn open_another() -> Option<Vec<String>> {
+fn open_another(now: &[String]) -> Option<Vec<String>> {
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(path) = pick_firmware() {
-        let now: Vec<String> = std::env::args().skip(1).collect();
-        let mut args = carried_over(&now);
+        let mut args = carried_over(now);
+        #[cfg(target_os = "macos")]
+        { args = ctl::controller_args(&args, "auto"); }
         args.push("--fwsc".into());
         args.push(path.to_string_lossy().into_owned());
         return Some(args);
@@ -1435,8 +1541,8 @@ fn open_another() -> Option<Vec<String>> {
 /// new one never loads or overwrites the old one's flash.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn carried_over(args: &[String]) -> Vec<String> {
-    const WITH_VALUE: [&str; 8] = ["--theme", "--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
-    const FLAGS: [&str; 5] = ["--usb", "--exclusive", "--midi-log", "--controller-raw", "--controller-fm1"];
+    const WITH_VALUE: [&str; 7] = ["--mhz", "--midi", "--midi-ch", "--latency", "--buffer", "--map", "--flash-chip"];
+    const FLAGS: [&str; 3] = ["--usb", "--exclusive", "--midi-log"];
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -1503,10 +1609,6 @@ fn double_clicked() -> bool {
 }
 
 fn main() {
-    if std::env::args().any(|a| a == "--hardware-library") {
-        if let Err(e)=fm1_host::open_hardware_library(){eprintln!("Hardware Library: {e}");std::process::exit(1);}
-        return;
-    }
     fit::dpi_aware();
     if std::env::args().any(|a| a == "--version" || a == "-V") {
         println!("{}", buildinfo::version("fm1-live"));
@@ -1523,24 +1625,32 @@ fn main() {
     // script: the usage, as before)
     #[cfg(any(windows, target_os = "macos"))]
     if std::env::args().len() == 1 && double_clicked() {
-        let remembered=fm1_host::last_session().ok().filter(|args| parse_args(std::iter::once("fm1-live".to_string()).chain(args.clone()).collect()).is_some_and(|o| o.fwsc.as_ref().is_some_and(|p| std::path::Path::new(p).is_file())));
-        let startup=remembered.or_else(||pick_firmware().map(|p|vec!["--fwsc".into(),p.to_string_lossy().into_owned()]));
-        if let Some(args) = startup {
-            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
-            // a firmware that would not load: its error stays readable, not gone with the console
-            let failed = match run {
-                Ok(st) if st.success() => None,
-                Ok(st) => Some(format!("fm1-live stopped ({st})")),
-                Err(e) => Some(format!("cannot start fm1-live: {e}")),
-            };
-            if let Some(why) = failed {
-                eprintln!("\n{why}. Press Enter to close.");
-                let _ = std::io::stdin().read_line(&mut String::new());
-                std::process::exit(1);
+        #[cfg(target_os = "macos")]
+        let recalled = studio::session::recalled();
+        #[cfg(not(target_os = "macos"))]
+        let recalled: Option<Vec<String>> = None;
+        if let Some(args) = recalled.or_else(|| pick_firmware().map(|p| vec!["--fwsc".into(),p.to_string_lossy().into_owned()])) {
+            #[cfg(target_os = "macos")]
+            restart(&args);
+            #[cfg(not(target_os = "macos"))]
+            {
+                let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
+                // a firmware that would not load: its error stays readable, not gone with the console
+                let failed = match run {
+                    Ok(st) if st.success() => None,
+                    Ok(st) => Some(format!("fm1-live stopped ({st})")),
+                    Err(e) => Some(format!("cannot start fm1-live: {e}")),
+                };
+                if let Some(why) = failed {
+                    eprintln!("\n{why}. Press Enter to close.");
+                    let _ = std::io::stdin().read_line(&mut String::new());
+                    std::process::exit(1);
+                }
             }
         }
         return;
     }
+    #[allow(unused_mut)]
     let Some(mut o) = parse() else {
         eprintln!("{USAGE}");
         std::process::exit(2);
@@ -1554,7 +1664,6 @@ fn main() {
         eprintln!("error: unknown --theme {:?}; available: {}", o.theme, names.join(", "));
         std::process::exit(2);
     });
-    *LOOK.lock().unwrap() = panel::Look { layout: o.layout, labels: o.key_labels, scale: if o.layout == panel::Layout::Display { 3.0 } else { 1.0 } };
     if let Some(ms) = o.shot {
         return shot(&o, ms, theme);
     }
@@ -1565,56 +1674,54 @@ fn main() {
         }
         return bench(&o, ms, theme);
     }
+    #[cfg(target_os = "macos")]
+    if o.flash.is_none() {
+        if let Some(firmware) = &o.fwsc {
+            match studio::session::memory(firmware) {
+                Ok(path) => o.flash = Some(path),
+                Err(e) => eprintln!("Session memory unavailable: {e}"),
+            }
+        }
+    }
+    #[allow(unused_mut)]
+    let mut launch_args: Vec<String> = std::env::args().skip(1).collect();
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("cannot read {}: {e}", o.bin);
+            eprintln!("{}", load_error(&o, &e));
             if std::env::args().len() == 1 {
                 eprintln!("(no firmware given)\n{USAGE}");
             }
             std::process::exit(1);
         }
     };
-    // GUI sessions persist by immutable firmware content. Explicit CLI flash paths still win.
-    if let Some(path)=o.fwsc.clone() {
-        let configured=(|| -> std::io::Result<()> {
-            if o.flash.is_none(){o.flash=Some(fm1_host::firmware_memory(&std::fs::read(&path)?)?.to_string_lossy().into_owned());
-                m=Machine::new(&o)?;}
-            let mut args=std::env::args().skip(1).collect::<Vec<_>>();
-            if !args.iter().any(|a|a=="--flash"){args.extend(["--flash".into(),o.flash.clone().unwrap()]);}
-            for i in 0..args.len().saturating_sub(1) {
-                if ["--fwsc","--area","--flash","--syx"].contains(&args[i].as_str()) {
-                    let p=std::path::Path::new(&args[i+1]);
-                    if p.is_relative(){args[i+1]=std::env::current_dir()?.join(p).to_string_lossy().into_owned();}
-                } else if args[i]=="--fw" {args[i]="--fwsc".into();args[i+1]=std::env::current_dir()?.join(&path).to_string_lossy().into_owned();}
-            }
-            fm1_host::remember_session(&args)
-        })();
-        if let Err(e)=configured{eprintln!("Session recall: {e}");}
-    }
     let mut pot = m.soc.periph.adc_value[4];
 
-    let ring = Arc::new(AudioRing { prefill: AtomicUsize::new((o.latency_ms * 44.1).ceil() as usize), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
+    let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
     #[cfg(windows)]
-    let exclusive = o.exclusive.then(|| exclusive::start(ring.clone()));
-    #[cfg(windows)]
-    let (exclusive_on, mut producer) = match exclusive {
-        Some(Ok((msg, producer))) => { eprintln!("{msg}"); (true, Some(producer)) },
-        Some(Err(e)) => { eprintln!("--exclusive: {e}; the shared output it is"); (false, None) },
-        None => (false, None),
-    };
+    let exclusive_on = o.exclusive
+        && match exclusive::start(ring.clone()) {
+            Ok(msg) => {
+                eprintln!("{msg}");
+                true
+            }
+            Err(e) => {
+                eprintln!("--exclusive: {e}; the shared output it is");
+                false
+            }
+        };
     #[cfg(not(windows))]
-    let (exclusive_on, mut producer) = {
+    let exclusive_on = {
         if o.exclusive {
             eprintln!("--exclusive: Windows only; the default output it is");
         }
-        (false, None)
+        false
     };
     let _stream = if exclusive_on {
         None
     } else {
         match start_audio(ring.clone(), o.buffer) {
-            Ok((s, tx)) => { producer = Some(tx); Some(s) },
+            Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("audio off: {e}");
                 None
@@ -1628,11 +1735,28 @@ fn main() {
     let status = Arc::new(Mutex::new(String::from("booting")));
     let quit = Arc::new(AtomicBool::new(false));
     let (tx, rx) = mpsc::channel::<Action>();
-    let _midi = midi_inputs(&o, &tx, board == fm1_soc::Board::Fm1);
+    // the MIDI inputs, through the controller profile (--map) to the panel and the MIDI IN jack
+    // (the profiles are the FM-1's panel: an SMK-37 firmware takes MIDI as it comes)
+    let names = midi_input_names(&o);
+    let profile = match ctl::choose(&o.map, &names) {
+        Ok(p) if board == fm1_soc::Board::Fm1 => p,
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("--map: {e}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(p) = &profile {
+        eprintln!("controller: {} (F1 shows what is bound where; right-click a control to learn)", p.name);
+    }
+    let mut control = ctl::Ctl::new(profile, o.midi_ch, o.map == "auto");
+    control.log = o.midi_log;
+    let control = Arc::new(control);
+    let _midi = midi_inputs(&o, &tx, &control);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
     // F3: a WAV of what the firmware plays, written as the emulation makes it
-    let recorder: Arc<Mutex<Option<wav::AsyncWav>>> = Arc::new(Mutex::new(None));
+    let recorder: Arc<Mutex<Option<wav::Wav>>> = Arc::new(Mutex::new(None));
 
     let audio_ok = _stream.is_some() || exclusive_on;
     let emu = {
@@ -1649,7 +1773,6 @@ fn main() {
             let (mut stat_emu, mut stat_wall) = (0u64, Instant::now());
             let mut usb_ports = UsbPorts::default();
             let mut target = AudioTarget::new(floor_ms, Instant::now());
-            let buffered_ms = |p: &rtrb::Producer<[f32; 2]>| (p.buffer().capacity() - p.slots()) as f64 / 44.1;
             let mut underruns_seen = 0u64;
             let mut audio_lost = false;
             while !quit.load(Ordering::Relaxed) {
@@ -1664,12 +1787,11 @@ fn main() {
                 if real - emu_ms > 250.0 {
                     offset_ms += real - emu_ms - LEAD_MS; // too far behind: resync, do not race
                 }
-                let buffered = producer.as_ref().map_or(0.0, &buffered_ms);
+                let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
                 // an underrun: a little more queued from now on; a calm while: a little less
                 let u = ring.underruns.load(Ordering::Relaxed);
                 target.update(u > underruns_seen, Instant::now());
                 underruns_seen = u;
-                ring.prefill.store((target.ms * 44.1).ceil() as usize, Ordering::Relaxed);
                 // the audio stream died (the exclusive one, a device unplugged): the clock paces
                 // the emulation from here, so it does not stop waiting for a device that is gone
                 if audio_ok && !audio_lost && ring.dead.load(Ordering::Relaxed) {
@@ -1700,37 +1822,35 @@ fn main() {
                     };
                     // a failed write or the size limit: the take ends here, and says why
                     if let Some(w) = stopped {
-                        std::thread::spawn(move || {
-                            if let Err(e) = w.finish() { eprintln!("recording: {e}"); }
-                        });
-                    }
-                    if let Some(output) = producer.as_mut() {
-                        for frame in m.soc.periph.audio.chunks_exact(2) {
-                            if output.push([frame[0] as f32 / 32768.0, frame[1] as f32 / 32768.0]).is_err() {
-                                // Stop producing after a device failure instead of blocking the emulator.
-                                ring.dead.store(true, Ordering::Relaxed);
-                                break;
-                            }
+                        if let Err(e) = w.finish() {
+                            eprintln!("recording: {e}");
                         }
                     }
-                    m.soc.periph.audio.clear();
+                    let mut q = ring.q.lock().unwrap();
+                    q.extend(m.soc.periph.audio.drain(..));
+                    ring.started.store(true, Ordering::Relaxed);
+                    let cap = 44_100 * 2 / 4; // 250 ms
+                    if q.len() > cap {
+                        let extra = q.len() - cap;
+                        q.drain(..extra);
+                    }
                 }
                 if last_lcd.elapsed() >= Duration::from_millis(16) {
-                    if let Ok(mut frame) = lcd.try_lock() { frame.copy_from_slice(&m.soc.lcd.fb); }
+                    lcd.lock().unwrap().copy_from_slice(&m.soc.lcd.fb);
                     if m.soc.board == fm1_soc::Board::Smk37 {
                         let mut l = [0f32; 41];
                         l[..fm1_soc::smk::NLED].copy_from_slice(&m.soc.periph.smk.led_take());
                         *leds.lock().unwrap() = l;
                         *pads.lock().unwrap() = m.soc.periph.smk.pads;
                     } else {
-                        *leds.lock().unwrap() = m.soc.periph.led_take();
+                        *leds.lock().unwrap() = m.soc.periph.led_shown();
                     }
                     last_lcd = Instant::now();
                 }
                 if last_stat.elapsed() >= Duration::from_millis(500) {
                     let e = m.soc.periph.ms();
                     let speed = (e - stat_emu) as f64 / stat_wall.elapsed().as_secs_f64() / 1000.0;
-                    let buffered = producer.as_ref().map_or(0.0, &buffered_ms);
+                    let buffered = ring.q.lock().unwrap().len() as f64 / 88.2;
                     *status.lock().unwrap() = format!(
                         "{:.2}x real time | {} MHz | audio {:.0} ms queued (target {:.0}), {} underruns{}",
                         speed, m.soc.periph.hz / 1_000_000, buffered, target.ms, ring.underruns.load(Ordering::Relaxed),
@@ -1755,26 +1875,14 @@ fn main() {
         return;
     }
     // as large as the display scaling asks, no larger than the screen; resizable (fit.rs)
-    // a window the size of the look's canvas (F2 / F5 change the look: a new window)
-    let open_window = |l: &panel::Look| -> Result<Window, minifb::Error> {
-        let (w, h) = panel::size(l);
-        let ((ww, wh), at) = fit::start(w, h, None);
-        // (elsewhere the window stays as it was: minifb scales it for the display itself)
-        let opts = if cfg!(windows) {
-            WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
-        } else {
-            WindowOptions::default()
-        };
-        let mut win = Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts)?;
-        app_icon::apply(&mut win);
-        win.set_target_fps(120);
-        if let Some((x, y)) = at {
-            win.set_position(x, y);
-        }
-        Ok(win)
+    let ((ww, wh), at) = fit::start(W, H, None);
+    // (elsewhere the window stays as it was: minifb scales it for the display itself)
+    let opts = if cfg!(windows) {
+        WindowOptions { resize: true, scale_mode: minifb::ScaleMode::UpperLeft, ..WindowOptions::default() }
+    } else {
+        WindowOptions::default()
     };
-    let mut lk = look();
-    let mut win = match open_window(&lk) {
+    let mut win = match Window::new(&format!("FM-1 · {} (emulated)", o.name), ww, wh, opts) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("window: {e}");
@@ -1783,90 +1891,110 @@ fn main() {
             return;
         }
     };
-    let (mut pw, mut ph) = panel::size(&lk);
-    let mut fit = fit::Fit::new(pw, ph);
-    let mut base = panel::base(theme, &lk);
-    let mut buf = vec![0u32; pw * ph];
+    #[cfg(target_os = "macos")]
+    if let Some(firmware) = &o.fwsc {
+        if let Err(e) = studio::session::remember(&launch_args, firmware) {
+            eprintln!("Launch settings not saved: {e}");
+        }
+    }
+    studio::app_icon::apply(&mut win);
+    win.set_target_fps(60);
+    if let Some((x, y)) = at {
+        win.set_position(x, y);
+    }
+    let mut fit = fit::Fit::new(W, H);
+    let base = panel::base(theme);
+    let mut buf = vec![0u32; W * H];
+    let mut fb = Vec::new();
     let mut down = [false; 41];
     let mut enc_clicks = [0i32; 7];
     let mut turning = [0u32; 8];
-    let mut positions = [0.0f32; 7];
     let mut scroll_acc = [0f32; 8];
-    let mut shown_leds = [0f32; 41];
     let mut grab: Option<Ctl> = None;
-    // Shift-click latches a key or button down so another can be pressed while it's held;
-    // shift-click or a plain click on it again releases it.
     let mut latched = [false; 41];
-    let mut latch_vel = [100u8; 41];
+    let mut latch_vel = [100; 41];
     let mut was_pressed = false;
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
     let mut last_title = Instant::now();
-    eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), shift-click a key or button to hold it, click buttons, drag or scroll the knobs (MASTER = volume)");
-    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, R REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F2 layout (large screen, true to life, display only); F5 key labels; F3 records a WAV (to Music/fm1-emu); Cmd/Ctrl+O or F4 another firmware; Esc quits");
+    // the controller: its labels over the panel, MIDI learn, the keys' mode
+    let mut labels = false;
+    let mut right_was = false;
+    let mut note = String::new(); // what the title says for a few seconds
+    let mut note_at = Instant::now();
+    let say = |s: String, note: &mut String, note_at: &mut Instant| {
+        eprintln!("{s}");
+        *note = s;
+        *note_at = Instant::now();
+    };
+    let mut space_rec = false;
+    eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
+    eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, Shift+Space REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
+    if control.enabled() {
+        eprintln!("controller: right-click a control, then move or press one of yours (MIDI learn; right-click again cancels, Delete unbinds); F1 labels, F2 keys: panel / MIDI / auto");
+    }
 
+    let mut firmware_shortcut = studio::shortcuts::ReleaseShortcut::default();
+    #[cfg(target_os = "macos")]
+    let menus = studio::menus::install(&o.map).unwrap_or_else(|e| {
+        eprintln!("Menus unavailable: {e}");
+        studio::menus::Menus::default()
+    });
+    #[cfg(target_os = "macos")]
+    let mut reset = false;
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
-    let mut firmware_shortcut = ReleaseShortcut::default();
-    let mut open_chord = ReleaseShortcut::default();
-    let mut suppress_o = false;
-    #[cfg(target_os = "macos")]
-    let _menus=install_menus(&mut win);
     while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
-        #[cfg(target_os = "macos")]
-        let menu_action=win.is_menu_pressed();
-        #[cfg(not(target_os = "macos"))]
-        let menu_action: Option<usize>=None;
-        match menu_action {
-            Some(1001) => { next=open_another(); continue; }
-            Some(1002) => break,
-            Some(1003) => toggle_record(&recorder, &o.name),
-            Some(1004) => launch_hardware_library(),
-            Some(1006) => {
-                #[cfg(target_os="macos")]
-                if rfd::MessageDialog::new().set_title("Reset Firmware State")
-                    .set_description("Restart the current firmware with its initial saved memory? Unsaved edits will be lost. A copy of the previous memory file will be kept. Host preferences and physical hardware are unchanged.")
-                    .set_buttons(rfd::MessageButtons::OkCancel).show()==rfd::MessageDialogResult::Ok {
-                    let mut args=std::env::args().skip(1).collect::<Vec<_>>();
-                    if !args.iter().any(|a|a=="--flash"){if let Some(p)=&o.flash{args.extend(["--flash".into(),p.clone()]);}}
-                    if let Some(i)=args.iter().position(|a|a=="--syx") {args.drain(i..(i+2).min(args.len()));}
-                    args.push("--reset-after-shutdown".into());next=Some(args);
-                }
-            },
-            Some(1005) => { std::thread::spawn(|| {
-                let _=fm1_host::open_user_guide();
-            }); },
-            _ => {}
-        }
-
         let turn = |i: usize, clicks: i32, enc_clicks: &mut [i32; 7], turning: &mut [u32; 8]| {
             enc_clicks[i] += clicks;
             turning[i] = 10;
             let _ = tx.send(Action::Enc { enc: ENCS[i].1, clicks });
         };
 
-        for action in _midi.panel.try_iter() {
-            match action {
-                Action::Enc {enc, clicks} => if let Some(i) = ENCS.iter().position(|e| e.1 == enc) { enc_clicks[i] += clicks; turning[i] = 10; },
-                Action::Adc {ch:4, value} => {pot=value;turning[7]=10;},
-                _ => {}
+        #[cfg(target_os = "macos")]
+        match win.is_menu_pressed() {
+            Some(studio::menus::OPEN) => next = open_another(&launch_args),
+            Some(studio::menus::CLOSE) => break,
+            Some(studio::menus::RECORD) => toggle_record(&recorder, &o.name),
+            Some(studio::menus::LABELS) => labels = !labels,
+            Some(studio::menus::RESET) => {
+                if studio::menus::confirm_reset() {
+                    reset = true;
+                    next = Some(launch_args.clone());
+                }
             }
+            Some(id) if studio::menus::controller_selection(id).is_some() => {
+                let selection = studio::menus::controller_selection(id).unwrap();
+                match ctl::choose(selection, &midi_input_names(&o)) {
+                    Ok(profile) => {
+                        control.configure(profile, selection == "auto", &tx);
+                        launch_args = ctl::controller_args(&launch_args, selection);
+                        menus.select_controller(selection);
+                        if let Some(firmware) = &o.fwsc {
+                            if let Err(e) = studio::session::remember(&launch_args, firmware) {
+                                say(format!("Controller selected, not saved: {e}"), &mut note, &mut note_at);
+                            }
+                        }
+                    }
+                    Err(e) => say(e, &mut note, &mut note_at),
+                }
+            }
+            _ => {}
         }
         // ---- mouse
         let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = pos {
             if pressed && !was_pressed {
-                grab = panel::hit(&lk, mx, my);
+                grab = panel::hit(mx, my);
                 last_y = my;
                 drag_acc = 0.0;
                 if let Some(Ctl::Key(k)) = grab {
-                    mouse_vel = panel::key_vel(&lk, k, my);
+                    mouse_vel = panel::key_vel(k, my);
                 }
-                let shift = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
                 if let Some(Ctl::Key(id) | Ctl::Btn(id)) = grab {
                     let id = id as usize;
-                    if shift {
+                    if win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift) {
                         latched[id] = !latched[id];
                         latch_vel[id] = mouse_vel;
                         grab = None;
@@ -1880,8 +2008,8 @@ fn main() {
                     // glissando: the held note follows the pointer across keys; on the same key,
                     // its height is the pressure (aftertouch)
                     Some(Ctl::Key(k0)) => {
-                        if let Some(Ctl::Key(k)) = panel::hit(&lk, mx, my) {
-                            let v = panel::key_vel(&lk, k, my);
+                        if let Some(Ctl::Key(k)) = panel::hit(mx, my) {
+                            let v = panel::key_vel(k, my);
                             if k != k0 {
                                 grab = Some(Ctl::Key(k));
                                 mouse_vel = v;
@@ -1892,7 +2020,7 @@ fn main() {
                         }
                     }
                     Some(Ctl::Enc(i)) => {
-                        drag_acc += (last_y - my) * if win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift) { 0.25 } else { 1.0 };
+                        drag_acc += last_y - my;
                         while drag_acc >= DRAG_PER_CLICK {
                             drag_acc -= DRAG_PER_CLICK;
                             turn(i, 1, &mut enc_clicks, &mut turning);
@@ -1915,7 +2043,7 @@ fn main() {
                 last_y = my;
             }
             if let Some((_, dy)) = win.get_scroll_wheel() {
-                match panel::hit(&lk, mx, my) {
+                match panel::hit(mx, my) {
                     Some(Ctl::Enc(i)) => {
                         scroll_acc[i] += dy;
                         while scroll_acc[i] >= 1.0 {
@@ -1941,15 +2069,99 @@ fn main() {
         }
         was_pressed = pressed;
 
+        // ---- MIDI learn: right-click a control, then move or press one of the controller's
+        let right = win.get_mouse_down(MouseButton::Right);
+        if right && !right_was && control.enabled() {
+            if let Some(c) = pos.and_then(|(mx, my)| panel::hit(mx, my)) {
+                let t = ctl::target_of(c);
+                let mut mp = control.mapper.lock().unwrap();
+                if mp.learning() == Some(t) {
+                    mp.learn(None);
+                    drop(mp);
+                    say("learn: cancelled".into(), &mut note, &mut note_at);
+                } else {
+                    mp.learn(Some(t));
+                    drop(mp);
+                    labels = true;
+                    let what = if matches!(t, fm1_map::Target::Key(_)) { "press the note that should play it" } else { "move or press a control" };
+                    say(format!("learn {t}: {what} (right-click again: cancel, Delete: unbind)"), &mut note, &mut note_at);
+                }
+            }
+        }
+        right_was = right;
+
+        // ---- what the controller did since the last frame
+        let midi_down;
+        {
+            let mut v = control.view.lock().unwrap();
+            midi_down = v.down;
+            for i in 0..7 {
+                if v.enc[i] != 0 {
+                    enc_clicks[i] += v.enc[i];
+                    turning[i] = 10;
+                    v.enc[i] = 0;
+                }
+            }
+            if let Some(p) = v.pot.take() {
+                pot = p;
+                turning[7] = 10;
+            }
+            let events = std::mem::take(&mut v.events);
+            drop(v);
+            for e in events {
+                match e {
+                    ctl::Ui::Labels => labels = !labels,
+                    ctl::Ui::Record => toggle_record(&recorder, &o.name),
+                    ctl::Ui::KeysMode(k) => say(format!("keys: {}", k.name()), &mut note, &mut note_at),
+                    ctl::Ui::Learned => {
+                        let p = control.mapper.lock().unwrap().profile().clone();
+                        match fm1_map::save_user(&p) {
+                            Ok(path) => say(format!("learned; {} saved to {}", p.name, path.display()), &mut note, &mut note_at),
+                            Err(e) => say(format!("learned, not saved: {e}"), &mut note, &mut note_at),
+                        }
+                    }
+                }
+            }
+        }
+        for k in win.get_keys_pressed(KeyRepeat::No) {
+            match k {
+                Key::F1 => labels = !labels,
+                Key::F2 if control.enabled() => {
+                    // (mapper, then view: the order the MIDI thread takes them in)
+                    let mut mp = control.mapper.lock().unwrap();
+                    let mut v = control.view.lock().unwrap();
+                    let next = mp.keys_mode().next();
+                    mp.set_keys_mode(next, &mut |out| ctl::apply(out, &tx, &mut v, control.midi_ch));
+                    drop(mp);
+                    v.events.retain(|e| !matches!(e, ctl::Ui::KeysMode(_)));
+                    drop(v);
+                    say(format!("keys: {}", next.name()), &mut note, &mut note_at);
+                }
+                Key::Delete | Key::Backspace if control.enabled() => {
+                    let mut mp = control.mapper.lock().unwrap();
+                    if let Some(t) = mp.learning() {
+                        let t = if matches!(t, fm1_map::Target::Key(_)) { fm1_map::Target::Keys } else { t };
+                        mp.learn(None);
+                        mp.unbind(t);
+                        let p = mp.profile().clone();
+                        drop(mp);
+                        let saved = fm1_map::save_user(&p).map_or_else(|e| format!(", not saved: {e}"), |_| String::new());
+                        say(format!("{t}: unbound{saved}"), &mut note, &mut note_at);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // ---- held keys and buttons: computer keyboard + mouse
-        let command = [Key::LeftSuper, Key::RightSuper, Key::LeftCtrl, Key::RightCtrl].iter().any(|&k| win.is_key_down(k));
-        let o_down = win.is_key_down(Key::O);
-        if command && o_down { suppress_o = true; }
-        if !o_down { suppress_o = false; }
-        let mut want = [false; 41];
-        for k in win.get_keys() {
-            if command || (k == Key::O && suppress_o) { continue; }
-            if let Some(id) = piano(k).or_else(|| button(k)) {
+        let mut want = latched;
+        // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
+        if win.is_key_pressed(Key::Space, KeyRepeat::No) {
+            space_rec = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
+        }
+        let shift = space_rec;
+        for k in win.get_keys().into_iter().filter(|_| !win.is_key_down(Key::LeftSuper) && !win.is_key_down(Key::RightSuper)) {
+            if let Some(id) = piano(k).or_else(|| button(k, shift)) {
                 want[id as usize] = true;
             }
         }
@@ -1957,16 +2169,12 @@ fn main() {
             want[id as usize] = true;
         }
         for id in 0..41 {
-            want[id] |= latched[id];
-        }
-        for id in 0..41 {
             if want[id] != down[id] {
                 down[id] = want[id];
                 if want[id] && id >= 14 {
                     // the mouse's key at its height, the computer keyboard's at 100
                     let mouse = matches!(grab, Some(Ctl::Key(k)) if k as usize == id);
-                    let vel = if mouse { mouse_vel } else if latched[id] { latch_vel[id] } else { 100 };
-                    let _ = tx.send(Action::KeyVel { vel });
+                    let _ = tx.send(Action::KeyVel { vel: if mouse { mouse_vel } else if latched[id] { latch_vel[id] } else { 100 } });
                 }
                 let _ = tx.send(Action::Key { id: id as u8, down: want[id] });
             }
@@ -1982,77 +2190,51 @@ fn main() {
                 _ => {}
             }
         }
-        let f4 = firmware_shortcut.update(win.is_key_down(Key::F4));
-        let open = open_chord.update(command && o_down && !cfg!(target_os = "macos"));
-        if f4 || open {
-            next = open_another();
-        }
-        if win.is_key_pressed(Key::F6, KeyRepeat::No) {
-            launch_hardware_library();
+        if firmware_shortcut.update(win.is_key_down(Key::F4)) {
+            next = open_another(&launch_args);
         }
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
-        }
-        let (f2, f5) = (win.is_key_pressed(Key::F2, KeyRepeat::No), win.is_key_pressed(Key::F5, KeyRepeat::No));
-        if f2 || f5 {
-            let mut l = lk;
-            if f2 {
-                l.layout = l.layout.next();
-                l.scale = if l.layout == panel::Layout::Display { 3.0 } else { 1.0 };
-            }
-            if f5 {
-                l.labels = !l.labels;
-            }
-            if l.layout != lk.layout {
-                // another size: another window
-                match open_window(&l) {
-                    Ok(w) => win = w,
-                    Err(e) => {
-                        eprintln!("window: {e}");
-                        l = lk;
-                    }
-                }
-            }
-            lk = l;
-            *LOOK.lock().unwrap() = lk;
-            (pw, ph) = panel::size(&lk);
-            fit = fit::Fit::new(pw, ph);
-            base = panel::base(theme, &lk);
-            buf = vec![0u32; pw * ph];
-            grab = None;
         }
         for t in turning.iter_mut() {
             *t = t.saturating_sub(1);
         }
 
-        // ---- draw: LEDs fade out over a few frames instead of flickering
-        {
-            let l = leds.lock().unwrap();
-            for i in 0..41 {
-                shown_leds[i] = l[i].max(shown_leds[i] * 0.8);
-            }
-        }
+        // ---- draw
         {
             // the emulator thread waits on this lock to publish a frame: copy, then draw unlocked
-            let fb = lcd.lock().unwrap().clone();
-            for i in 0..7 {
-                let target = enc_clicks[i] as f32 + if matches!(grab, Some(Ctl::Enc(k)) if k == i) { drag_acc / DRAG_PER_CLICK } else { 0.0 };
-                positions[i] += (target - positions[i]) * 0.75;
+            fb.clone_from(&lcd.lock().unwrap());
+            let lit = *leds.lock().unwrap();
+            // (the controller's buttons and keys show as pressed too)
+            let mut shown_down = down;
+            for i in 0..41 {
+                shown_down[i] |= midi_down[i];
             }
-            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, positions: Some(&positions), pot, down: &down, leds: &shown_leds, turning: &turning };
-            panel::draw(&mut buf, &base, &st, theme, &lk);
+            let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &shown_down, leds: &lit, turning: &turning };
+            panel::draw(&mut buf, &base, &st, theme);
+        }
+        if labels && control.enabled() {
+            control.draw_labels(&mut buf);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
             let s = w.frames / 44_100;
-            panel::text(&mut buf, (pw - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
+            panel::text(&mut buf, (W - 90) as f32, 12.0, &format!("REC {}:{:02}", s / 60, s % 60), 2, 0xff5050);
         }
-        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (pw, ph) };
+        let (ww, wh) = if cfg!(windows) { win.get_size() } else { (W, H) };
         let (frame, fw, fh) = fit.frame(&buf, ww, wh);
         if win.update_with_buffer(frame, fw, fh).is_err() {
             break;
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
-            win.set_title(&format!("FM-1 · {} — {}", o.name, status.lock().unwrap()));
+            let mut extra = String::new();
+            if control.enabled() {
+                let mp = control.mapper.lock().unwrap();
+                extra = format!(" | {} · keys: {}", mp.profile().name, mp.keys_mode().name());
+            }
+            if note_at.elapsed() < Duration::from_secs(6) && !note.is_empty() {
+                extra += &format!(" | {note}");
+            }
+            win.set_title(&format!("FM-1 · {} — {}{extra}", o.name, status.lock().unwrap()));
             last_title = Instant::now();
         }
     }
@@ -2068,11 +2250,16 @@ fn main() {
     }
     // F4: the new firmware, now that this one has stopped, with the window, the MIDI inputs
     // (WinMM's are one program's at a time) and the audio device let go of first
-    if let Some(mut args) = next {
-        if args.iter().any(|a|a=="--reset-after-shutdown") {
-            args.retain(|a|a!="--reset-after-shutdown");
-            if let Some(path)=&o.flash { if let Err(e)=fm1_host::archive_memory(path){eprintln!("Reset cancelled: {e}");return;} }
+    #[cfg(target_os = "macos")]
+    if reset {
+        if let Some(path) = &o.flash {
+            if let Err(e) = studio::session::archive(std::path::Path::new(path)) {
+                eprintln!("Reset cancelled: {e}");
+                return;
+            }
         }
+    }
+    if let Some(args) = next {
         drop(win);
         drop(_midi);
         drop(_stream);
@@ -2083,14 +2270,14 @@ fn main() {
 /// F3: start a WAV of the output (in the Music folder's fm1-emu), or finish the one being written.
 /// (The file is finished or created outside the lock, which the emulation thread takes for every
 /// block: a slow disk must not hold up the audio.)
-fn toggle_record(rec: &Mutex<Option<wav::AsyncWav>>, name: &str) {
+fn toggle_record(rec: &Mutex<Option<wav::Wav>>, name: &str) {
     let taken = rec.lock().unwrap().take();
     match taken {
         Some(w) => match w.finish() {
             Ok(p) => eprintln!("recorded {}", p.display()),
             Err(e) => eprintln!("recording: {e}"),
         },
-        None => match wav::AsyncWav::create(name) {
+        None => match wav::Wav::create(name) {
             Ok(w) => {
                 eprintln!("recording to {} (F3 stops)", w.path.display());
                 *rec.lock().unwrap() = Some(w);
@@ -2118,15 +2305,17 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
         Ok(w) => w,
         Err(e) => return eprintln!("window: {e}"),
     };
+    studio::app_icon::apply(&mut win);
     win.set_target_fps(60);
     let base = panel_smk::base();
     let mut buf = vec![0u32; w * h];
+    let mut fb = Vec::new();
     let btn0 = fm1_soc::smk::BTN0;
     let (mut down, mut enc_clicks, mut turning) = ([false; 64], [0i32; 8], [0u32; 8]);
     let mut analog = [0u16; 23];
     analog[ANALOG_PITCH as usize] = PITCH_REST;
     analog[ANALOG_MOD as usize] = MOD_REST;
-    let mut set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
+    let set_analog = |analog: &mut [u16; 23], i: usize, v: u16| {
         if analog[i] != v {
             analog[i] = v;
             let _ = tx.send(Action::Adc { ch: i as u8, value: v });
@@ -2141,7 +2330,8 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
     let vel = |f: f32| Action::Vel { us: (80_000f32.ln() + (2_000f32.ln() - 80_000f32.ln()) * f.clamp(0.0, 1.0)).exp() as u32 };
     let (mut grab, mut was_pressed, mut last_y, mut drag_acc, mut scroll_acc) = (None, false, 0f32, 0f32, [0f32; 8]);
     let mut last_title = Instant::now();
-    eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, R SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
+    let mut space_rec = false;
+    eprintln!("SMK-37: click the keys (lower = harder), pads, buttons; drag faders, wheels, knobs. A..' C4..F5, Z/X OCTAVE, Space SEQ PLAY, Shift+Space SEQ REC, 1..8 pads, arrows K1/K2; Esc quits");
     while win.is_open() && !win.is_key_down(Key::Escape) {
         let pressed = win.get_mouse_down(MouseButton::Left);
         if let Some((mx, my)) = mouse_pos(&win) {
@@ -2201,11 +2391,16 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
         // held keys and buttons: the computer keyboard (as on the page) and the mouse
         let mut want = [false; 64];
         let mut pad_keys = [false; 8];
+        // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
+        if win.is_key_pressed(Key::Space, KeyRepeat::No) {
+            space_rec = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
+        }
+        let shift = space_rec;
         for k in win.get_keys() {
             if let Some(id) = piano(k) {
                 want[(id - 21 + 12) as usize] = true; // (piano() gives the FM-1's ids, C4 = 21)
             }
-            let b = match k { Key::Z => Some(4), Key::X => Some(5), Key::Space => Some(16), Key::R => Some(17), _ => None };
+            let b = match k { Key::Z => Some(4), Key::X => Some(5), Key::Space if shift => Some(17), Key::Space => Some(16), _ => None };
             if let Some(b) = b {
                 want[(btn0 + b) as usize] = true;
             }
@@ -2247,7 +2442,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
             *t = t.saturating_sub(1);
         }
         {
-            let fb = lcd.lock().unwrap().clone();
+            fb.clone_from(&lcd.lock().unwrap());
             let l = *leds.lock().unwrap();
             let pc = *pads.lock().unwrap();
             let st = panel_smk::State {
@@ -2276,58 +2471,6 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    #[test]
-    #[ignore = "requires the macOS CoreMIDI service; run explicitly outside sandbox"]
-    fn midi_hotplug_delivers_notes_releases_and_disconnect_panic() {
-        use midir::os::unix::VirtualOutput;
-        let name = format!("FM1-hotplug-test-{}", std::process::id());
-        let options = super::parse_args(args(&["--midi", &name])).unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let inputs = super::midi_inputs(&options, &tx, true);
-        std::thread::sleep(Duration::from_millis(100));
-        let mut source = midir::MidiOutput::new("FM1 test").unwrap().create_virtual(&name).unwrap();
-        std::thread::sleep(Duration::from_millis(1500));
-        source.send(&[0x90,60,100]).unwrap();
-        source.send(&[0x80,60,0]).unwrap();
-        for expected in [0x90,60,100,0x80,60,0] {
-            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
-                fm1_soc::Action::Midi { b } => assert_eq!(b,expected),
-                _ => panic!("unexpected action"),
-            }
-        }
-        drop(source);
-        for expected in [0xb0,64,0,0xb0,123,0,0xb0,120,0] {
-            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
-                fm1_soc::Action::Midi { b } => assert_eq!(b,expected),
-                _ => panic!("unexpected action"),
-            }
-        }
-        drop(inputs);
-    }
-    #[test]
-    fn controller_fm1_flag_is_carried_to_the_next_firmware() {
-        let a=args(&["--controller-fm1", "--mhz", "200"]);
-        let o=super::parse_args(a.clone()).unwrap();
-        assert!(o.controller_fm1); assert_eq!(o.mhz,200);
-        assert!(super::carried_over(&a).contains(&"--controller-fm1".to_string()));
-    }
-    #[test]
-    fn controller_raw_flag_does_not_consume_the_next_option() {
-        let o = super::parse_args(args(&["--controller-raw", "--mhz", "200"])).unwrap();
-        assert!(o.controller_raw); assert_eq!(o.mhz,200);
-    }
-    #[test]
-    fn firmware_picker_ignores_repeat_and_startup_held_key() {
-        let mut shortcut = super::ReleaseShortcut::default();
-        for down in [true,true,false,false] { assert!(!shortcut.update(down)); }
-        assert!(!shortcut.update(true));
-        assert!(!shortcut.update(true));
-        assert!(shortcut.update(false));
-        for _ in 0..100 { assert!(!shortcut.update(false)); }
-        assert!(!shortcut.update(true));
-        assert!(shortcut.update(false));
-    }
     use super::AudioTarget;
     use std::time::{Duration, Instant};
 
@@ -2348,7 +2491,7 @@ mod tests {
         // a device that needs 20 ms (WASAPI shared: a 10 ms period and jitter)
         let first = run(&mut t, t0, 0, 120, 20.0);
         let settled = t.ms;
-        assert!(settled >= 20.0 && settled <= 24.0, "settled at {settled}: {first:?}");
+        assert!((20.0..=24.0).contains(&settled), "settled at {settled}: {first:?}");
         // then an hour: no more underruns, no more probing below what it needs
         let later = run(&mut t, t0, 120, 3720, 20.0);
         assert!(later.iter().all(|&ms| ms >= 20.0), "went under 20: {:?}", later.iter().cloned().fold(f64::MAX, f64::min));
@@ -2447,6 +2590,51 @@ mod tests {
         assert!(check_opts(&o).is_err());
         let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
         assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn fw_says_why_it_finds_no_firmware() {
+        let cat = || vec![("felucca".to_string(), "Felucca".to_string(), "0.7".to_string(), "reference/firmwares/felucca.fwsc".to_string())];
+        assert_eq!(catalog_pick(cat(), "felucca"), Ok(("Felucca 0.7".into(), "reference/firmwares/felucca.fwsc".into())));
+        let unknown = catalog_pick(cat(), "feluca").unwrap_err();
+        assert!(unknown.contains("no firmware \"feluca\"") && unknown.contains("--fw list"), "{unknown}");
+        // outside a checkout (web/firmwares.json is not there): nothing to pick from, whatever is asked for
+        for want in ["felucca", "list"] {
+            let none = catalog_pick(Vec::new(), want).unwrap_err();
+            assert!(none.contains("web/firmwares.json") && none.contains("--fwsc FILE"), "{none}");
+        }
+    }
+
+    #[test]
+    fn a_firmware_that_does_not_load_is_named_by_its_own_file() {
+        let dir = std::env::temp_dir().join(format!("fm1-live-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (there, gone) = (dir.join("there.fwsc"), dir.join("gone.fwsc"));
+        std::fs::write(&there, [0u8; 16]).unwrap();
+        let (there, gone, bank) = (there.to_string_lossy().into_owned(), gone.to_string_lossy().into_owned(), dir.join("gone.syx").to_string_lossy().into_owned());
+        let said = |a: &[&str]| {
+            let o = parse_args(args(a)).unwrap();
+            let e = Machine::new(&o).err().expect("nothing to boot");
+            load_error(&o, &e)
+        };
+        // a package that is not there: its own name, not the default --bin image's
+        let s = said(&["--fwsc", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a package that is there and is none says so itself, once; its bank that is not there is the file named
+        let s = said(&["--fwsc", &there]);
+        assert!(s.starts_with(&format!("{there}: ")) && !s.contains("cannot read"), "{s}");
+        let s = said(&["--fwsc", &there, "--syx", &bank]);
+        assert!(s.starts_with(&format!("cannot read {bank}: ")), "{s}");
+        // and with no package the image is
+        let s = said(&["--bin", &gone]);
+        assert!(s.starts_with(&format!("cannot read {gone}: ")), "{s}");
+        // a file that opens and does not read (a folder) is the one named, not the firmware before it
+        let folder = dir.to_string_lossy().into_owned();
+        let s = said(&["--fwsc", &there, "--syx", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
+        let s = said(&["--bin", &there, "--flash", &folder]);
+        assert!(s.starts_with(&format!("cannot read {folder}: ")), "{s}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

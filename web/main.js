@@ -6,7 +6,6 @@
 import { fetchPackage, hubNewcomers, hubCardUrl } from "./fwsc.js";
 import { SaveStore, packageHash, changedSectors, packSectors, exportSave, importSave } from "./persistence.js";
 import { tryOutOf, loadTryOut } from "./tryout.js";
-import { selectedInputs, panicMessages, MiniLab3, isMiniLab3 } from "./midi-input.js";
 
 const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // The device this page is for: the FM-1 (index.html) or the SMK-37 (smk37/index.html, <html
@@ -14,22 +13,29 @@ const CLOCKS = [60, 80, 100, 120, 160, 200, 240];
 // the panel follows it (an SMK-37 package opened on the FM-1 page gets the SMK-37's).
 const DEVICE = document.documentElement.dataset.device === "smk37" ? "smk37" : "fm1";
 const DEV = DEVICE === "smk37"
-  ? { product: "M-VAVE SMK-37", board: 1, key: "smk37.", stock: "SMK-37 Pro_016.fwsc", stockFile: /^SMK-37 (Pro|Elite)_\d+( \(\d+\))?\.(fwsc|area)$/i,
+  ? { product: "M-VAVE SMK-37", board: 1, key: "smk37.", stock: "SMK-37 Pro_016.fwsc", stockFile: /^SMK-37 (Pro|Elite)_\d+( \(\d+\))?\.fwsc$/i,
       other: { name: "FM-1", href: "../" } }
-  : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.(fwsc|area)$/i,
+  : { product: "M-VAVE FM-1", board: 0, key: "fm1.", stock: "FM-1.fwsc", stockFile: /^FM-1( \(\d+\))?\.fwsc$/i,
       other: { name: "SMK-37", href: "smk37/" } };
 const params = new URLSearchParams(location.search);
-const STUDIO = params.get("studio") === "1";
-const instanceScope = STUDIO ? params.get("instance") || "" : "";
-if (STUDIO && !/^[a-f0-9-]{36}:[a-f0-9]{64}$/.test(instanceScope)) throw new Error("Studio instance identity is missing or invalid");
 const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
-const store = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+const store = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* private mode */ } };
 
-const catalog = STUDIO ? {default:"studio-local",firmwares:[{id:"studio-local",name:"Import firmware",version:"",byo:true}]} : await (await fetch("firmwares.json")).json();
+// What the page cannot do without (its list of firmwares, the emulator's module): when one does not load, the status
+// line says so and Start is off; the page would otherwise sit there with a Start that does nothing.
+async function needed(what, load) {
+  try { return await load(); } catch (error) {
+    document.getElementById("status").textContent = `${what} did not load (${error.message}): reload the page to try again`;
+    document.getElementById("start").disabled = true;
+    throw error;
+  }
+}
+const loaded = (r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r; };
+const catalog = await needed("the list of firmwares", async () => loaded(await fetch("firmwares.json")).json());
 // The Hub's firmwares not in the file yet, listed last as not yet run here (none when the Hub
 // does not answer in time; the read goes on for the package fallback). The SMK-37's list is its own.
 let hubWait;
-const newcomers = !STUDIO && DEVICE === "fm1"
+const newcomers = DEVICE === "fm1"
   ? await Promise.race([hubNewcomers(catalog), new Promise((ok) => { hubWait = setTimeout(() => ok([]), 3000); })]).finally(() => clearTimeout(hubWait))
   : [];
 catalog.firmwares.push(...newcomers);
@@ -69,7 +75,7 @@ function linkedFirmware(q) {
   const raw = url.pathname.split("/").pop() || url.host;
   let file = raw;
   try { file = decodeURIComponent(raw); } catch { /* a malformed escape: the name as written */ }
-  file = file.replace(/\.(fwsc|area)$/i, "");
+  file = file.replace(/\.fwsc$/i, "");
   return { id: "link", name: q.get("name") || file, version: "", author: "", license: "", about: "",
     repo: url.href, package: url.href, link: true };
 }
@@ -81,11 +87,19 @@ function endTryOut() {
   q.delete("script");
   history.replaceState(null, "", `?${q}`);
 }
-if (STUDIO) fw = catalog.firmwares[0];
-let mhz = Number(params.get("mhz") || stored("fm1.mhz") || 240);
+// ?mhz= or the clock kept from the last visit: a whole number of MHz within the clocks offered (one between two of them
+// is listed with them). Anything else is no clock: it would go to the machine as it is (not a number: 0 MHz; a huge one:
+// a quantum of audio that takes minutes to emulate).
+const clockOf = (v) => { const c = Number(v); return Number.isInteger(c) && c >= CLOCKS[0] && c <= CLOCKS[CLOCKS.length - 1] ? c : null; };
+// A firmware runs at its package's catalog minimum when that is above the picked clock;
+// the pick stays apart so the next firmware runs at it again.
+let pickedMhz = clockOf(params.get("mhz")) ?? clockOf(stored("fm1.mhz")) ?? 100;
+let mhz = pickedMhz;
 // the audio buffer: "interactive" (small: keys answer quickly) unless this device needed a larger
 // one ("playback", offered when the sound drops out with time to spare; ?latency= overrides)
-let latency = params.get("latency") || stored("fm1.latency") || "interactive";
+// (an AudioContext refuses any other word)
+const latencyOf = (v) => (["interactive", "balanced", "playback"].includes(v) ? v : null);
+let latency = latencyOf(params.get("latency")) || latencyOf(stored("fm1.latency")) || "interactive";
 
 const canvas = document.getElementById("panel");
 const ctx = canvas.getContext("2d");
@@ -100,105 +114,57 @@ const bankInput = document.getElementById("bank");
 const bankName = document.getElementById("bankname");
 const themeSel = document.getElementById("theme");
 const saveStatus = document.getElementById("save-status");
-const saveStore = new SaveStore(globalThis.indexedDB, STUDIO ? "studio:" + instanceScope : "");
+const saveStore = new SaveStore();
 const memoryRecords = new Map();
 const saveMessage = (text, failed = false) => { saveStatus.textContent = text; saveStatus.dataset.error = String(failed); };
 const saveFailure = error => saveMessage(`Not saved in browser: ${error.message}. Export a backup to keep your changes.`, true);
 
-const wasm = await (await fetch("fm1_web.wasm")).arrayBuffer();   // the worklet gets its own copy
+const wasm = await needed("the emulator", async () => loaded(await fetch("fm1_web.wasm")).arrayBuffer());   // the worklet gets its own copy
 // (the panel's instance runs no machine: its JIT import is never called)
-const ui = (await WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } })).instance.exports;
+const ui = (await needed("the emulator", () => WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } }))).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
-const fitPanel = () => document.documentElement.style.setProperty("--above",
-  `${Math.round(canvas.parentElement.getBoundingClientRect().top + scrollY)}px`);
+// --above: what sits over the panel in the player (its title, the screen's controls, a warning)
+// when the player is scrolled to the top of the window, as by the Play link. From the player, not
+// the page's top: the opening and the header above the player scroll away. The big screen does
+// not count: the panel goes below it at its full size.
+const player = document.getElementById("play");
+const fitPanel = () => {
+  const bigScreen = document.getElementById("big");
+  const big = bigScreen.hidden ? 0 : (bigScreen.getBoundingClientRect().height || 0) + 12;
+  const above = canvas.parentElement.getBoundingClientRect().top - player.getBoundingClientRect().top - big;
+  document.documentElement.style.setProperty("--above", `${Math.round(above + 12)}px`);   // (12: html's scroll-padding-top)
+};
 {
   const ro = new ResizeObserver(fitPanel);
-  ro.observe(document.querySelector("header"));
-  ro.observe(document.querySelector(".bar"));
+  ro.observe(document.querySelector(".deck-head"));
+  ro.observe(document.querySelector(".view"));
+  ro.observe(document.getElementById("perfwarn"));
 }
 fitPanel();
 
 let node = null;
-let renderWorker = null;
-let frame = null;            // the latest LCD + LEDs from the render worker
+let frame = null;            // the latest LCD + LEDs from the audio thread
 const down = new Uint8Array(64);           // keys and buttons held (FM-1: matrix ids 0..40; SMK-37: keys 0..36, buttons 37..54)
 const encClicks = new Int32Array(8);
-const visualPositions = new Float32Array(8);
 const turning = new Uint32Array(9);
-let pot = 900;
+const POT_REST = 900;                      // MASTER on a machine just booted (fm1-soc's periph.rs)
+let pot = POT_REST;
 // SMK-37: its analog inputs as set (pads 0..15, faders 16..19, the pitch / mod wheel 20 / 21)
 const PITCH_REST = 535, MOD_REST = 629;
 const analog = new Uint16Array(23);
 analog[20] = PITCH_REST;
 analog[21] = MOD_REST;
-// the FM-1's view (index.html's View and Key labels): large screen (the default), true to life,
-// or the display alone; ?layout= and ?labels=1 in a link, else the last choice
-const VIEWS = ["large", "real", "display"];
-const viewSel = document.getElementById("view");
-const labelsBox = document.getElementById("keylabels");
-const exitView = document.getElementById("exitview");
-let view = [params.get("layout"), stored(DEV.key + "view")].find((v) => VIEWS.includes(v)) || "large";
-let lastPanelView = view === "display" ? "large" : view;
-let keyLabels = (params.get("labels") ?? stored(DEV.key + "labels")) === "1";
-// panel pixels per CSS pixel of drag: knobs turn at the same speed at any resolution
-let lookScale = 1;
-// the canvas at this view and resolution: the panel at 2x on a high-density screen; the display
-// alone at the largest whole multiple of its 240 pixels that fits the window, shown pixel for pixel
-function applyLook() {
-  const dpr = devicePixelRatio || 1;
-  if (board === 0) {
-    const display = view === "display";
-    const scale = display ? Math.max(1, Math.floor(Math.min(innerWidth, innerHeight) * dpr / 240)) : (dpr >= 1.5 ? 2 : 1);
-    lookScale = display ? 1 : scale;
-    ui.panel_look(VIEWS.indexOf(view), keyLabels ? 1 : 0, scale);
-    document.documentElement.dataset.view = view;
-  } else {
-    lookScale = 1;
-  }
-  W = ui.panel_width();
-  H = ui.panel_height();
-  if (canvas.width !== W) canvas.width = W;
-  if (canvas.height !== H) canvas.height = H;
-  const px = board === 0 && view === "display";
-  canvas.style.width = px ? `${W / dpr}px` : "";
-  canvas.style.height = px ? `${H / dpr}px` : "";
-  // the synth's width follows the room left below the header and the bar (index.html's canvas rule)
-  document.documentElement.style.setProperty("--aspect", String(W / H));
-}
-function setView(v, remember = true) {
-  if (!VIEWS.includes(v)) return;
-  view = v;
-  if (v !== "display") lastPanelView = v;
-  if (viewSel) viewSel.value = v;
-  if (remember) store(DEV.key + "view", v);
-  applyLook();
-}
-if (viewSel) {
-  viewSel.value = view;
-  viewSel.addEventListener("change", () => setView(viewSel.value));
-}
-if (labelsBox) {
-  labelsBox.checked = keyLabels;
-  labelsBox.addEventListener("change", () => {
-    keyLabels = labelsBox.checked;
-    store(DEV.key + "labels", keyLabels ? "1" : "0");
-    applyLook();
-  });
-}
-if (exitView) exitView.addEventListener("click", () => setView(lastPanelView));
-// the display's multiple follows the window; the panel's resolution follows the screen's density
-let lookPending = false;
-addEventListener("resize", () => {
-  if (lookPending) return;
-  lookPending = true;
-  requestAnimationFrame(() => { lookPending = false; applyLook(); });
-});
 function setBoard(b) {
   if (b === board) return;
   board = b;
   ui.panel_board(b);
-  applyLook();
+  W = ui.panel_width();
+  H = ui.panel_height();
+  canvas.width = W;
+  canvas.height = H;
+  // the synth's width follows the room left below the header and the bar (index.html's canvas rule)
+  document.documentElement.style.setProperty("--aspect", String(W / H));
   document.documentElement.dataset.board = b ? "smk37" : "fm1";
   down.fill(0);
   encClicks.fill(0);
@@ -244,10 +210,23 @@ if (themeSel) {
   });
 }
 
+// pictures of the firmwares' screens beside this page (tools/firmware_shots.py): each card's, and
+// the wall at the top; by the start of the picture's hash, so a new picture is fetched again
+let shots = {};
+try { shots = await (await fetch("shots/shots.json")).json(); } catch { /* (no pictures here: cards without) */ }
+const shotUrl = (id) => (shots[id]?.v ? `shots/${encodeURIComponent(id)}.webp?v=${shots[id].v}` : null);
+const picture = (id, cls) => {
+  const img = document.createElement("img");
+  Object.assign(img, { src: shotUrl(id), alt: "", loading: "lazy", decoding: "async", width: 240, height: 240 });
+  if (cls) img.className = cls;
+  return img;
+};
+
 // the guide's firmware list, one card per catalog entry; "Play" picks it like the select does
 const NO_NOTE = "MIDI: no sound from a plain note-on";
 const MIDI_NOTES = {
   mvave: "MIDI: channel 2 in the emulator (not yet checked on a real FM-1)",
+  "mvave-v15": "MIDI: channel 2 in the emulator (not yet checked on a real FM-1)",
   felucca: "MIDI: its parts play on channels 1–4",
   choralroot: NO_NOTE, hortator: NO_NOTE, "sloop-alg": NO_NOTE, x0x: NO_NOTE,
 };
@@ -256,7 +235,7 @@ const hubCard = (f) => hubCardUrl(f.hub);
 const UNTESTED = "New on the Hub: not yet run in the emulator, so it may not work here";
 // the FM-1 page: which entries have an SMK-37 build (that catalog names them)
 const twins = new Map();
-if (!STUDIO && DEVICE === "fm1") {
+if (DEVICE === "fm1") {
   try {
     for (const s of (await (await fetch("smk37/firmwares.json")).json()).firmwares) if (s.fm1) twins.set(s.fm1, s.id);
   } catch { /* (no SMK-37 catalog next to this page: no links) */ }
@@ -293,18 +272,56 @@ if (!STUDIO && DEVICE === "fm1") {
     const twin = DEVICE === "smk37" ? f.fm1 : twins.get(f.id);
     if (twin) links.append(link(`${DEV.other.href}?fw=${twin}`, `also on the ${DEV.other.name}`));
     const by = [f.author + (f.base ? ` (${f.base})` : ""), f.porter && `SMK-37 port: ${f.porter}`].filter(Boolean).join(" · ");
-    const card = el("li", "",
+    // its screen, clicked like Play (for the mouse; the keyboard has the Play button)
+    const pic = shotUrl(f.id) ? [el("div", "pic", picture(f.id))] : [];
+    if (pic.length) pic[0].addEventListener("click", () => play.click());
+    const card = el("li", pic.length ? "has-pic" : "", ...pic,
       el("div", "head", el("b", "", f.name), el("span", "dim", f.version), play),
       el("div", "by", by),
-      el("p", "what", f.byo && DEVICE === "fm1" ? "The firmware the FM-1 ships with: a DX7-style FM synth, both cores running. " +
-        "Bring your own copy (see below)." : f.about));
+      el("p", "what", f.byo && DEVICE === "fm1" ? "M-VAVE's current version (V16 since October 2026), the one its update page " +
+        "installs. Bring your own copy (see below); V15 plays from the card before this one." : f.about));
     if (DEVICE === "fm1" && MIDI_NOTES[f.id]) card.append(el("div", "midi", MIDI_NOTES[f.id]));
     if (f.untested) card.append(el("div", "untested", UNTESTED));
     card.append(links);
+    card.dataset.find = [f.name, f.version, f.author, f.base, f.porter, f.about].filter(Boolean).join(" ").toLowerCase();
     list.append(card);
     cards.set(f.id, card);
   }
+
+  // the search over the cards: every word somewhere in a card's name, version, author or description
+  const search = document.getElementById("fwsearch"), found = document.getElementById("fwcount");
+  const count = (n) => `${n} firmware${n === 1 ? "" : "s"}`;
+  found.textContent = count(catalog.firmwares.length);
+  search.addEventListener("input", () => {
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    let n = 0;
+    for (const card of cards.values()) {
+      card.hidden = !words.every((w) => card.dataset.find.includes(w));
+      if (!card.hidden) n++;
+    }
+    found.textContent = words.length ? `${count(n)} of ${catalog.firmwares.length}` : count(n);
+  });
+
+  // the opening: the catalog's counts, and the wall of its screens (those that show the firmware
+  // itself: tools/firmware_shots.json keeps an error screen off it), in a fixed order so it looks
+  // the same at every visit; each column twice over, for the drift's loop. The counts are of the
+  // firmwares that run here: not the Hub's newcomers, which nobody has run here yet.
+  const runs = catalog.firmwares.filter((f) => !f.untested);
+  const all = runs.length, own = runs.filter((f) => f.byo || f.author === "M-VAVE").length;
+  document.getElementById("hero-count").textContent = String(all);
+  document.getElementById("hero-community").textContent = String(all - own);
+  const wall = document.getElementById("wall");
+  const onWall = catalog.firmwares.filter((f) => shotUrl(f.id) && shots[f.id].wall !== false)
+    .map((f, i) => [(i * 37) % 101, f]).sort((a, b) => a[0] - b[0]).map(([, f]) => f);
+  const COLS = 6, PER = 8;
+  if (onWall.length >= COLS * 2) {
+    for (let c = 0; c < COLS; c++) {
+      const mine = onWall.filter((_, i) => i % COLS === c).slice(0, PER);
+      wall.append(el("div", "col", ...[...mine, ...mine].map((f) => picture(f.id))));
+    }
+  } else wall.hidden = true;
 }
+const heroPlay = document.getElementById("hero-play");
 
 // Cached packages are pinned to their exact bytes. Checking for updates is explicit.
 const packages = new Map();
@@ -347,12 +364,12 @@ function noteVersion(f, version) {
   if (f === fw) showFirmware();
 }
 const keptLocal = await keptEntry("local");
-if (keptLocal && !STUDIO) {
+if (keptLocal) {
   localFw = { id: "local", name: keptLocal.name, version: "", bytes: keptLocal.package };
   fwSel.add(new Option(`${localFw.name} (your file)`, "local"), 0);
   if (params.get("fw") === "local" || (!params.has("fw") && stored(DEV.key + "fw") === "local")) { fw = localFw; fwSel.value = "local"; }
 }
-for (const f of catalog.firmwares.filter(f => f.byo && !STUDIO)) {
+for (const f of catalog.firmwares.filter(f => f.byo)) {
   try { await packageOf(f); } catch { /* user has not opened a stock package yet */ }
 }
 let bank = null;                           // a DX7 32-voice bank for the stock firmware, or null
@@ -361,6 +378,7 @@ let loadedUrl = null;                      // the package the running machine ca
 
 function showFirmware() {
   title.textContent = `${DEV.product} · ${fw.name} (emulated)`;
+  heroPlay.textContent = `Play ${fw.name}`;
   for (const [id, card] of cards) {
     card.classList.toggle("on", id === fw.id);
     card.querySelector("button").textContent = id === fw.id ? "Selected" : "Play";
@@ -374,10 +392,10 @@ function showFirmware() {
     parts = [b, "From a link: not in this page's list, so it may not run here."];
   } else if (fw.byo) {
     const dl = document.createElement("a");
-    dl.href = fw.download || "#";
+    dl.href = fw.download;
     dl.textContent = `download ${DEV.stock} from M-VAVE`;
     const doc = document.createElement("a");
-    doc.href = fw.repo || "#";
+    doc.href = fw.repo;
     doc.textContent = "how it runs";
     const have = packages.has(fw.id) ? " Your copy is kept in this browser; open another .fwsc to replace it." :
       " Then click \u201cOpen .fwsc\u2026\u201d (or drop the file on the synth); this browser keeps it for next time.";
@@ -417,7 +435,7 @@ function showFirmware() {
   about.replaceChildren(...parts);
   const q = new URLSearchParams(location.search);
   q.set("fw", fw.id);
-  q.set("mhz", mhz);
+  q.set("mhz", pickedMhz);
   if (!fw.link) { q.delete("package"); q.delete("name"); }
   history.replaceState(null, "", `?${q}`);
   const full = new URLSearchParams(fw.id === "local" ? "" : { fw: fw.id });
@@ -437,8 +455,8 @@ fwSel.addEventListener("change", () => {
   if (node) boot();
 });
 mhzSel.addEventListener("change", () => {
-  mhz = Number(mhzSel.value);
-  store("fm1.mhz", mhz);
+  pickedMhz = mhz = Number(mhzSel.value);
+  store("fm1.mhz", pickedMhz);
   showFirmware();
   mhzSel.blur();
   if (node) boot();
@@ -449,7 +467,7 @@ mhzSel.addEventListener("change", () => {
 async function openLocal(file) {
   if (!file) return;
   const mv = catalog.firmwares.find((f) => f.byo);
-  if (!STUDIO && mv && (fw.byo || DEV.stockFile.test(file.name))) {
+  if (mv && (fw.byo || DEV.stockFile.test(file.name))) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     packages.set(mv.id, { bytes, url: null });
     fw = mv;
@@ -461,7 +479,7 @@ async function openLocal(file) {
     else status.textContent = `${file.name} ready: click Start`;
     return;
   }
-  localFw = { id: "local", name: file.name.replace(/\.(fwsc|area)$/i, ""), version: "", bytes: new Uint8Array(await file.arrayBuffer()) };
+  localFw = { id: "local", name: file.name.replace(/\.fwsc$/i, ""), version: "", bytes: new Uint8Array(await file.arrayBuffer()) };
   let opt = [...fwSel.options].find((o) => o.value === "local");
   if (!opt) fwSel.add(opt = new Option("", "local"), 0);
   opt.text = `${localFw.name} (your file)`;
@@ -486,7 +504,7 @@ const stage = document.querySelector(".stage");
 stage.addEventListener("dragover", (e) => { e.preventDefault(); });
 stage.addEventListener("drop", (e) => {
   e.preventDefault();
-  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|area|syx)$/i.test(f.name));
+  const file = [...e.dataTransfer.files].find((f) => /\.(fwsc|syx)$/i.test(f.name));
   if (!file) return;
   if (/\.syx$/i.test(file.name)) {
     file.arrayBuffer().then((b) => { bank = new Uint8Array(b); bankName.textContent = file.name; if (node) boot(); });
@@ -495,25 +513,80 @@ stage.addEventListener("drop", (e) => {
   }
 });
 
+// ---------------------------------------------------------------- the screen, for eyes that need more
+// Big screen: the LCD again above the panel, as large as the page allows. Colours: the screen's
+// pixels by their brightness in two colours of strong contrast, on the big screen and the panel's.
+// Both are remembered for both devices.
+const SCHEMES = { yellow: [[0, 0, 0], [255, 221, 0]], white: [[0, 0, 0], [255, 255, 255]], paper: [[255, 255, 255], [0, 0, 0]] };
+const bigBtn = document.getElementById("bigscreen");
+const big = document.getElementById("big");
+const colourSel = document.getElementById("colours");
+const lcdRaw = new Uint16Array(240 * 240), lcdOut = new Uint16Array(240 * 240);
+let haveLcd = false, recolour = null, bigImg = null, rgba = null;
+const rgb565 = (p) => [(p >> 11) * 255 / 31, ((p >> 5) & 63) * 255 / 63, (p & 31) * 255 / 31];
+function setColours(name) {
+  const sc = SCHEMES[name];
+  colourSel.value = sc ? name : "";
+  recolour = null;
+  if (sc) {
+    // brightness (the eye's, a quarter of the way to its brightest primary, so that blue text
+    // still shows): its darkest tenth to the background, anything over half lit the full colour
+    recolour = new Uint16Array(65536);
+    for (let p = 0; p < 65536; p++) {
+      const [r, g, b] = rgb565(p), luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      const t = Math.min(1, Math.max(0, ((luma + (Math.max(r, g, b) - luma) / 4) / 255 - 0.1) / 0.45));
+      const [R, G, B] = sc[0].map((bg, i) => bg + (sc[1][i] - bg) * t);
+      recolour[p] = (Math.round(R * 31 / 255) << 11) | (Math.round(G * 63 / 255) << 5) | Math.round(B * 31 / 255);
+    }
+  }
+  store("fm1.colours", sc ? name : "");
+  if (haveLcd) showLcd();
+}
+function setBig(on) {
+  big.hidden = !on;
+  bigBtn.setAttribute("aria-pressed", String(on));
+  document.documentElement.toggleAttribute?.("data-big", on);
+  store("fm1.bigscreen", on ? "1" : "");
+  fitPanel();
+  if (on && haveLcd) showLcd();
+}
+// the latest screen (lcdRaw) to the panel's, recoloured, and to the big screen when it shows
+function showLcd() {
+  const out = recolour ? lcdOut : lcdRaw;
+  if (recolour) for (let i = 0; i < out.length; i++) out[i] = recolour[lcdRaw[i]];
+  new Uint16Array(ui.memory.buffer, ui.panel_lcd(), 240 * 240).set(out);
+  if (big.hidden) return;
+  if (!rgba) {
+    rgba = new Uint32Array(65536);         // (ImageData's bytes: R, G, B, A, little-endian)
+    for (let p = 0; p < 65536; p++) { const [r, g, b] = rgb565(p).map(Math.round); rgba[p] = 0xff000000 | (b << 16) | (g << 8) | r; }
+    bigImg = new ImageData(240, 240);
+  }
+  const px = new Uint32Array(bigImg.data.buffer);
+  for (let i = 0; i < out.length; i++) px[i] = rgba[out[i]];
+  big.getContext("2d").putImageData(bigImg, 0, 0);
+}
+for (const [v, t] of [["", "As the firmware draws it"], ["yellow", "Yellow on black"], ["white", "White on black"], ["paper", "Black on white"]])
+  colourSel.add(new Option(t, v));
+setColours(stored("fm1.colours") || "");
+setBig(stored("fm1.bigscreen") === "1");
+bigBtn.addEventListener("click", () => setBig(big.hidden));
+colourSel.addEventListener("change", () => setColours(colourSel.value));
+
 // ---------------------------------------------------------------- drawing
 function draw() {
   const mem = () => ui.memory.buffer;
   if (frame) {
     if (frame.lcd) {
-      new Uint16Array(mem(), ui.panel_lcd(), 240 * 240).set(frame.lcd);
+      lcdRaw.set(frame.lcd);
+      haveLcd = true;
       frame.lcd = null;
+      showLcd();
     }
     new Float32Array(mem(), ui.panel_leds(), 41).set(frame.leds);
     if (frame.pads) for (let p = 0; p < 16; p++) ui.panel_set(5, p, frame.pads[p]);
   }
   for (let i = 0; i < 64; i++) ui.panel_set(0, i, down[i]);
-  for (let i = 0; i < 8; i++) {
-    ui.panel_set(1, i, encClicks[i]);
-    const drag = [...pointers.values()].find(p => p.grab === i);
-    const target = encClicks[i] + (drag ? drag.acc / (8 * lookScale) : 0);
-    visualPositions[i] += (target - visualPositions[i]) * .75;
-    if (board === 0) ui.panel_position(i, visualPositions[i]);
-  }
+  for (let i = 0; i < 8; i++) ui.panel_set(1, i, encClicks[i]);
   ui.panel_set(2, 0, pot);
   for (let i = 0; i < 9; i++) {
     ui.panel_set(3, i, turning[i]);
@@ -568,7 +641,6 @@ const at = (e) => {
 const holds = new Uint8Array(64);          // pointers holding each key / button
 function press(id) { if (holds[id]++ === 0) setKey(id, true); }
 function unpress(id) { if (holds[id] && --holds[id] === 0) setKey(id, false); }
-const latched = new Set();                // keys / buttons held by Shift-click
 const pointers = new Map();                // pointerId -> { grab, lastY, acc, held }
 canvas.addEventListener("pointerdown", (e) => {
   const [x, y] = at(e);
@@ -576,18 +648,7 @@ canvas.addEventListener("pointerdown", (e) => {
   pointers.set(e.pointerId, p);
   canvas.setPointerCapture(e.pointerId);
   if (p.grab >= 100 && p.grab < 200) {
-    const id = p.grab - 100;
-    // Shift-click holds a key or button so another can be pressed while it's held;
-    // Shift-click or click it again to let go
-    if (e.shiftKey || latched.has(id)) {
-      p.grab = -1;
-      if (latched.delete(id)) { unpress(id); return; }
-      if (board === 1 && id < NKEY) setVelocity(ui.panel_hit_y());
-      latched.add(id);
-      press(id);
-      return;
-    }
-    p.held = id;
+    p.held = p.grab - 100;
     // SMK-37: a key hit further down sounds harder
     if (board === 1 && p.held < NKEY) setVelocity(ui.panel_hit_y());
     press(p.held);
@@ -615,12 +676,11 @@ canvas.addEventListener("pointermove", (e) => {
   } else if (board === 1 && p.grab >= 300) {
     slide(p, y);
   } else if (p.grab >= 0 && p.grab < (board === 1 ? 8 : 7)) {
-    p.acc += (p.lastY - y) * (e.shiftKey ? .25 : 1);
-    const step = 8 * lookScale;
-    while (p.acc >= step) { p.acc -= step; turn(p.grab, 1); }
-    while (p.acc <= -step) { p.acc += step; turn(p.grab, -1); }
+    p.acc += p.lastY - y;
+    while (p.acc >= 12) { p.acc -= 12; turn(p.grab, 1); }
+    while (p.acc <= -12) { p.acc += 12; turn(p.grab, -1); }
   } else if (board === 0 && p.grab === 7) {
-    setPot(pot + (p.lastY - y) * 4 / lookScale);
+    setPot(pot + (p.lastY - y) * 4);
   }
   p.lastY = y;
 });
@@ -653,41 +713,44 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 
 // computer keyboard: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z X OCT- OCT+, Space PLAY,
-// R REC, 1..0 FX SCL ENV LFO EDIT GLO HOME SAVE ARP SEQ, arrows / , . encoders. SMK-37: the same
-// notes (keys 12..29), Z X OCTAVE- / +, Space SEQ PLAY, R SEQ REC, 1..8 the top pads, arrows K1 / K2,
-// , . K3
+// Shift+Space REC, 1..0 FX SCL ENV LFO EDIT GLO HOME SAVE ARP SEQ, arrows / , . encoders. SMK-37:
+// the same notes (keys 12..29), Z X OCTAVE- / +, Space SEQ PLAY, Shift+Space SEQ REC, 1..8 the top
+// pads, arrows K1 / K2, , . K3. (REC was R, in the gap of the black keys' row: a slip started a
+// recording.)
 const PIANO = "awsedftgyhujkolp;'";
 const BUTTONS = [
-  { z: 0, x: 1, " ": 12, r: 13, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 0: 11 },
-  { z: BTN0 + 4, x: BTN0 + 5, " ": BTN0 + 16, r: BTN0 + 17 },
+  { z: 0, x: 1, " ": 12, "shift ": 13, 1: 2, 2: 3, 3: 4, 4: 5, 5: 6, 6: 7, 7: 8, 8: 9, 9: 10, 0: 11 },
+  { z: BTN0 + 4, x: BTN0 + 5, " ": BTN0 + 16, "shift ": BTN0 + 17 },
 ];
+// what each held key pressed, by its place on the keyboard: Space lets go of REC or PLAY, whichever it
+// pressed, whether or not Shift is still held
+const held = new Map();
 const ENC_KEYS = { ArrowLeft: [0, -1], ArrowRight: [0, 1], ArrowDown: [1, -1], ArrowUp: [1, 1], ",": [2, -1], ".": [2, 1] };
-function keyId(k) {
+function keyId(k, shift = false) {
   const i = PIANO.indexOf(k.toLowerCase());
   if (i >= 0) return (board === 1 ? 12 : 21) + i;
-  const b = BUTTONS[board === 1 ? 1 : 0][k.toLowerCase()];
+  const map = BUTTONS[board === 1 ? 1 : 0];
+  const b = (k === " " && shift ? map["shift "] : undefined) ?? map[k.toLowerCase()];
   return b === undefined ? -1 : b;
 }
 const padKey = (k) => (board === 1 && /^[1-8]$/.test(k) ? Number(k) - 1 : -1);
 addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && board === 0 && view === "display") { setView(lastPanelView); return; }
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
-    e.preventDefault(); if (!e.repeat) document.getElementById("open").click(); return;
-  }
   if (e.metaKey || e.ctrlKey || e.target instanceof HTMLSelectElement) return;
   if (ENC_KEYS[e.key]) { e.preventDefault(); turn(...ENC_KEYS[e.key]); return; }
   const pad = padKey(e.key);
   if (pad >= 0) { e.preventDefault(); if (!e.repeat) setAnalog(pad, 700); return; }
-  const id = keyId(e.key);
+  const id = keyId(e.key, e.shiftKey);
   if (id < 0 || e.repeat) return;
   e.preventDefault();
   if (board === 1 && id < NKEY) setVelocity(0.75);
+  held.set(e.code, id);
   setKey(id, true);
 });
 addEventListener("keyup", (e) => {
   const pad = padKey(e.key);
   if (pad >= 0) { setAnalog(pad, 0); return; }
-  const id = keyId(e.key);
+  const id = held.get(e.code) ?? keyId(e.key, e.shiftKey);
+  held.delete(e.code);
   if (id >= 0) setKey(id, false);
 });
 
@@ -708,38 +771,10 @@ if (!navigator.requestMIDIAccess) {
   midiSel.disabled = midiChSel.disabled = true;
   document.getElementById("midiin").title = "this browser has no Web MIDI (Chrome, Edge and Firefox do)";
 }
-const controllerProfiles = new Map();
-const controllerButtons = new Set();
-const controllerSel = document.getElementById("controller-profile");
-controllerSel.value = stored("fm1.controller") || "auto";
-controllerSel.addEventListener("change", () => {panicMidi();controllerProfiles.clear();store("fm1.controller", controllerSel.value);});
-function midiMessage(e, input) {
+function midiMessage(e) {
   const d = e.data;
   if (!d.length || !node) return;
   const bytes = Array.from(d);
-  if (bytes[0] < 0xf8) {
-    midiAct.classList.add("on");
-    clearTimeout(midiActOff);
-    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
-  }
-
-  if (board === 0 && controllerSel.value !== "raw" && isMiniLab3(input?.name)) {
-    let profile = controllerProfiles.get(input.id);
-    if (!profile) {profile = new MiniLab3(controllerSel.value === "fm1" ? "fm1" : "factory");controllerProfiles.set(input.id, profile);}
-    const actions = profile.route(bytes);
-    if (actions) {
-      for (const a of actions) {
-        if (a.type === "enc") {const i=[0,6,1,2,3,4,5].indexOf(a.enc);turn(i,a.clicks);}
-        else if (a.type === "pot") setPot(a.value);
-        else if (a.type === "midi") send(a);
-        else if (a.type === "key") {
-          if (a.down) controllerButtons.add(a.id); else controllerButtons.delete(a.id);
-          setKey(a.id,a.down);
-        }
-      }
-      return;
-    }
-  }
   if (midiCh && bytes[0] >= 0x80 && bytes[0] < 0xf0) bytes[0] = (bytes[0] & 0xf0) | (midiCh - 1);
   if (board === 1) {
     // the SMK-37 has no MIDI in jack: notes C3..C6 play its keys (the velocity as the time between
@@ -758,31 +793,22 @@ function midiMessage(e, input) {
   } else {
     send({ type: "midi", bytes });
   }
+  if (bytes[0] < 0xf8) {
+    midiAct.classList.add("on");
+    clearTimeout(midiActOff);
+    midiActOff = setTimeout(() => midiAct.classList.remove("on"), 120);
+  }
 }
 // listen to the wanted inputs only; the list follows devices coming and going
-let connectedMidiIds = new Set();
-function panicMidi() {
-  for (const id of controllerButtons) setKey(id,false);
-  controllerButtons.clear();
-  controllerProfiles.clear();
-  if (board === 0) for (const bytes of panicMessages()) send({type:"midi",bytes});
-}
 function midiConnect() {
   if (!midi) return;
   const want = midiSel.value;
-  const inputs = [...midi.inputs.values()].filter(input => input.state !== "disconnected");
-  const selected = selectedInputs(inputs,want).filter(input => want !== "*" || !input.name?.toLowerCase().replaceAll(" ","").includes("minilab3") || isMiniLab3(input.name));
-  const ids = new Set(selected.map(input=>input.id));
-  if ([...connectedMidiIds].some(id=>!ids.has(id))) panicMidi();
-  for (const id of controllerProfiles.keys()) if (!ids.has(id)) controllerProfiles.delete(id);
-  connectedMidiIds = ids;
-  for (const input of midi.inputs.values()) input.onmidimessage = ids.has(input.id) ? e => midiMessage(e,input) : null;
-  midiSel.replaceChildren(new Option("off",""),new Option("all inputs","*"));
-  for (const input of inputs) midiSel.add(new Option(input.name || "MIDI controller",input.id));
-  // Migrate a remembered name only if it identifies exactly one input.
-  const value = want === "*" || !want ? want : selected.length === 1 ? selected[0].id : want;
-  if (![...midiSel.options].some(option=>option.value===value)) midiSel.add(new Option("Disconnected controller",value));
-  midiSel.value = value;
+  const names = [...midi.inputs.values()].map((i) => i.name);
+  for (const o of [...midiSel.options]) if (o.value !== "" && o.value !== "*" && !names.includes(o.value)) o.remove();
+  for (const n of names) if (![...midiSel.options].some((o) => o.value === n)) midiSel.add(new Option(n, n));
+  if ([...midiSel.options].some((o) => o.value === want)) midiSel.value = want;
+  for (const input of midi.inputs.values())
+    input.onmidimessage = want === "*" || want === input.name ? midiMessage : null;
 }
 async function midiOpen() {
   if (midi || !navigator.requestMIDIAccess) return midiConnect();
@@ -803,12 +829,10 @@ async function midiOpen() {
   midiSel.value = want;
 }
 midiSel.addEventListener("change", () => {
-  panicMidi();
   store("fm1.midi", midiSel.value);
   if (midiSel.value) midiOpen(); else midiConnect();
 });
 midiChSel.addEventListener("change", () => {
-  panicMidi();
   midiCh = Number(midiChSel.value);
   store("fm1.midich", midiCh);
 });
@@ -822,11 +846,22 @@ midiChSel.addEventListener("change", () => {
 // The speed shown is the emulator's own: emulated time per time spent emulating (as
 // `node web/bench.mjs` and `fm1-live --bench` print it); at 1x a device just keeps up.
 const warnBox = document.getElementById("perfwarn");
+// The highest clock each firmware (id@version) ran out of time at during this visit: below it the
+// emulated chip is too slow for the firmware, on any device (the audio blocks it leaves unfilled,
+// fm1_starved), so the advice offers none of those clocks. Kept for the visit only: the clock the
+// user settles on is stored, and a firmware or emulator update can change where the floor is.
+const outOfTime = new Map();
+const fwKey = () => `${fw.id}@${fw.version || fw.name}`;   // (every package from this computer is "local")
+// The advice offers no clock below the catalog's minimum either (tools/clock_floors.py), which
+// holds only for the package it was measured on: another build of the firmware can need more or less.
+const minMhzOf = (f, hash) => f.minMhz && hash.slice(0, 16) === f.minMhzPackage ? f.minMhz : 0;
+const catalogMin = () => running ? minMhzOf(fw, running.record.hash) : 0;
 const perf = {
   reset() {
     this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.idleShare = 0; this.worst = 0;
     this.secs = 0; this.bad = 0; this.drops = 0; this.loads = []; this.speeds = []; this.drift = 0;
     this.stamp = null; this.jit = null; this.dismissed = false;
+    this.starved = 0; this.starvedTotal = 0; this.starvedSecs = 0; this.starvedRun = 0;
     warnBox.hidden = true;
   },
   add(m) {
@@ -834,6 +869,7 @@ const perf = {
     this.span += (m.quanta * m.frames) / 44.1;     // ms of audio those quanta stand for
     this.emulated += m.emulated ?? 0;              // ms of emulated time they ran
     this.idle += m.idle ?? 0;                      // of which idle skipping jumped over
+    this.starved += m.starved ?? 0;                // audio blocks the firmware left unfilled
     if (m.worst > this.worst) this.worst = m.worst;
     this.jit = m.jit;
   },
@@ -849,7 +885,8 @@ const perf = {
     if (this.emulated > 0) this.idleShare = Math.min(1, this.idle / this.emulated);
     if (this.loads.length > 30) this.loads.shift();
     if (this.speeds.length > 30) this.speeds.shift();
-    this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0;
+    const starved = this.starved;
+    this.busy = 0; this.span = 0; this.emulated = 0; this.idle = 0; this.starved = 0;
     const ts = ac.getOutputTimestamp?.();
     let drift = 0;
     if (ts && ts.contextTime > 0) {
@@ -861,10 +898,17 @@ const perf = {
     }
     this.drift = drift;
     if (++this.secs <= 3 || m.halted) return;      // (the first seconds: booting, compiling)
+    if (starved > 0) {
+      this.starvedTotal += starved;
+      this.starvedSecs++;
+      outOfTime.set(fwKey(), Math.max(mhz, outOfTime.get(fwKey()) ?? 0));
+    }
+    this.starvedRun = starved > 0 ? this.starvedRun + 1 : 0;
     const over = this.load() > 0.95, late = drift > 0.02;
     if (late) this.drops++;
     this.bad = over || late ? this.bad + 1 : 0;
-    if (this.bad >= 3 && warnBox.hidden && !this.dismissed) this.warn(over);
+    const hungry = this.starvedRun >= 2;
+    if ((hungry || this.bad >= 3) && warnBox.hidden && !this.dismissed) this.warn(over, hungry);
   },
   // A lower clock that brings the load down to ~80%, if one does. The cost of emulating a
   // second is a fixed part (about a quarter at the clocks offered: the peripherals, the audio, the
@@ -876,26 +920,42 @@ const perf = {
   lowerClock(load) {
     const FIXED = 0.25, busy = mhz * (1 - this.idleShare);   // MHz of cycles the firmware runs
     const at = (c) => load * (FIXED + (1 - FIXED) * Math.min(busy, c) / Math.max(busy, 1));
-    const lower = CLOCKS.filter((c) => c < mhz && at(c) <= 0.8);
-    const pick = lower.length ? lower[lower.length - 1] : CLOCKS.find((c) => c < mhz);
+    const clocks = this.lowerClocks();
+    const lower = clocks.filter((c) => at(c) <= 0.8);
+    const pick = lower.length ? lower[lower.length - 1] : clocks[0];
     return pick && at(pick) < 0.85 * load ? pick : null;     // only where it clearly helps
   },
-  warn(over) {
+  lowerClocks() {
+    return CLOCKS.filter((c) => c < mhz && c > (outOfTime.get(fwKey()) ?? 0) && c >= catalogMin());
+  },
+  warn(over, hungry) {
     const load = this.load();
-    const pick = over ? this.lowerClock(load) : null;
+    const pick = over && !hungry ? this.lowerClock(load) : null;
     const text = document.getElementById("perfwarn-text");
     const fix = document.getElementById("perfwarn-fix");
     // (a debugger attached, as DevTools open, runs the WebAssembly 3-4x slower)
     const devtools = " If the browser's developer tools are open, close them: they slow the emulator down 3-4x.";
     fix.hidden = false;
-    if (over && pick) {
+    if (hungry) {
+      // (a higher clock costs this device more; overloaded already, it would only trade one dropout for another)
+      const up = over ? null : CLOCKS.find((c) => c > Math.max(mhz, outOfTime.get(fwKey()) ?? 0) && c >= catalogMin());
+      text.textContent = `${fw.name} runs out of time at ${mhz} MHz: the emulated chip is too slow for it, so its ` +
+        `own sound breaks up, on any device.` + (up ? " The real FM-1 runs at 240 MHz." : !over ?
+          " No higher clock gives it enough, the desktop version too." :
+          ` This device can't run it faster in real time. A faster device or the desktop version will play it.`);
+      fix.hidden = !up;
+      if (up) {
+        fix.textContent = `Use ${up} MHz`;
+        fix.onclick = () => { setClock(up); };
+      }
+    } else if (over && pick) {
       text.textContent = `This device can't run ${fw.name} at ${mhz} MHz in real time (it needs ${Math.round(100 * load)}% ` +
         `of the audio thread), so the sound breaks up. It needs less at a lower clock.` + devtools;
       fix.textContent = `Use ${pick} MHz`;
       fix.onclick = () => { setClock(pick); };
     } else if (over) {
       // (a lower clock exists but would not help: say why)
-      const why = !CLOCKS.some((c) => c < mhz) ? "" : this.idleShare >= 0.3
+      const why = !this.lowerClocks().length ? "" : this.idleShare >= 0.3
         ? " A lower clock would not help: the emulator skips the time this firmware idles, so it costs about the same at any clock."
         : " A lower clock would help only a little.";
       text.textContent = `This device can't run ${fw.name} at ${mhz} MHz in real time (it needs ` +
@@ -928,9 +988,11 @@ const perf = {
       `speed (emulated time per time spent emulating, last ${this.speeds.length} s): ${this.speeds.map((v) => r(v, 2)).join(" ")}x real time`,
       `load (last ${loads.length} s): ${loads.join(" ")}% · worst quantum since the audio started ${r(this.worst, 1)} ms of ${r(128 / 44.1, 1)}`,
       `audio clock drift: ${r(100 * this.drift, 1)}% · seconds with drops: ${this.drops} · idle skipped: ${r(100 * this.idleShare)}% of the time`,
+      `firmware out of time: ${this.starvedSecs} s, ${this.starvedTotal} audio blocks not computed in time (its own sound ` +
+        `breaks up at this clock, on any device)`,
       `jit: ${jit ? `${jit.regions} regions compiled, ${jit.failed} failed${jit.error ? ` (${jit.error})` : ""} · ` +
         `compiling took ${r(jit.compileMs)} ms, the longest ${r(jit.compileMaxMs, 1)} ms` : "?"}`,
-      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"} · output underruns: ${frame?.outputUnderruns ?? "?"}`,
+      `emulated: ${frame ? r(frame.ms / 1000, 1) : "?"} s · short audio quanta: ${frame?.short ?? "?"}`,
     ].join("\n");
   },
 };
@@ -949,7 +1011,7 @@ document.getElementById("perfwarn-close").addEventListener("click", () => {
   perf.dismissed = true;
 });
 function setClock(c) {
-  mhz = c;
+  pickedMhz = mhz = c;
   if (![...mhzSel.options].some((o) => Number(o.value) === c)) mhzSel.add(new Option(`${c} MHz`, c));
   mhzSel.value = c;
   store("fm1.mhz", c);
@@ -957,23 +1019,39 @@ function setClock(c) {
   boot();
 }
 async function setLatency(l) {
-  await bootQueue;
-  await flushRunning(true);
-  latency = l;
-  store("fm1.latency", l);
-  // a larger buffer needs a new audio context: rebuild the graph, boot again
-  node.port.onmessage = null;
-  node.disconnect();
-  renderWorker?.terminate(); renderWorker = null;
-  running = null;
-  await ac.close();
-  await startAudio();
-  await boot();
-  await ac.resume();
+  const was = latency;
+  try {
+    await bootQueue;
+    await flushRunning(true);
+    latency = l;
+    // a larger buffer needs a new audio context: rebuild the graph, boot again
+    node.port.onmessage = null;
+    node.disconnect();
+    node = null;
+    running = null;
+    await ac.close();
+    await startAudio();
+    store("fm1.latency", l);              // (kept once there is a graph with it)
+    if (await boot()) return await ac.resume();
+  } catch (error) {
+    status.textContent = `the audio buffer was not changed: ${error.message}`;
+    // no graph came of it: the buffer is the one it was, for the graph Start makes, and a context half made is closed
+    if (!node) {
+      latency = was;
+      if (ac) { ac.close().catch(() => {}); ac = null; }
+    }
+  }
+  // Not done. The old machine still there (its flash could not be read): it plays on. None (the old graph is
+  // closed, the new one or its boot failed): Start makes one again.
+  if (running) node.port.postMessage({ type: "resume" });
+  else { startBtn.hidden = false; startBtn.disabled = false; }
 }
 
 // ---------------------------------------------------------------- audio: start on a click
 let ac = null, last = null, bootSeq = 0, booting = 0;
+// the boot whose machine the page shows (its screen, LEDs and status line): the latest asked for, or, when that one
+// failed and left the machine before it running, that machine's; and what the failed one said, kept in the status line
+let showing = 0, bootFailed = "";
 
 let bootQueue = Promise.resolve(), running = null, requestId = 0;
 const sessions = new Map(), bootWaiters = new Map(), snapshotWaiters = new Map();
@@ -1045,7 +1123,12 @@ async function flushRunning(pause = false) {
 // Serialize machine replacement, including the snapshot of the old machine. Requests that
 // became obsolete while downloading are skipped; every actual boot receives an acknowledgement.
 function boot(options = {}) {
-  const seq = ++bootSeq, f = fw, clock = mhz;
+  const seq = showing = ++bootSeq, f = fw, picked = pickedMhz;
+  // (the picks as stored for the next visit, which are those that ask for this machine: while it runs, a later pick
+  // that does not boot gives them back. Not the firmware in a window on another site, which stores none: it is the
+  // full page's)
+  const kept = [...(EMBED ? [] : [DEV.key + "fw"]), "fm1.mhz"].map((k) => [k, stored(k)]);
+  bootFailed = "";
   const task = async () => {
     if (seq !== bootSeq) return false;
     const importedBank = bank;
@@ -1063,6 +1146,7 @@ function boot(options = {}) {
         }
       }
       const hash = await packageHash(got.bytes);
+      const clock = Math.max(picked, minMhzOf(f, hash));
       let record = trying ? null : memoryRecords.get(hash);
       if (!record && !trying) {
         try { record = await saveStore.load(hash); } catch (error) { saveFailure(error); }
@@ -1075,14 +1159,16 @@ function boot(options = {}) {
         : memoryRecords.get(hash) || record;
       if (options.reset) record = { ...record, sectors: [] };
       const sectors = trying ? trying.sectors : record?.sectors || [];
-      const session = { seq, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
+      const session = { seq, fw: f, mhz: clock, picked, kept, ephemeral: !!trying, forceSave: !!(options.reset || options.imported || record?.unsaved),
         persistedSectors: record?.sectors || [], entry: DEV.key + f.id, revision: record?.revision || 0,
         record: { version: 1, hash, name: f.name, byo: !!(f.byo || record?.byo), device: DEVICE, package: got.bytes, url: got.url,
           sectors, revision: record?.revision || 0 } };
       sessions.set(seq, session);
       loadedUrl = got.url;
+      mhz = clock;
+      mhzSel.value = clock;
       showFirmware();
-      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0); visualPositions.fill(0); controllerProfiles.clear();
+      down.fill(0); holds.fill(0); pointers.clear(); encClicks.fill(0);
       frame = last = null;
       booting = seq;
       perf.reset();
@@ -1110,14 +1196,68 @@ function boot(options = {}) {
       if (bank === importedBank) bank = null;
       booting = 0;
       node?.port.postMessage({ type: "resume" });
-      if (seq === bootSeq) status.textContent = error instanceof NeedFile
-        ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+      if (seq === bootSeq) {
+        status.textContent = error instanceof NeedFile
+          ? `${f.name}: open your ${DEV.stock} to boot it` : `${f.name}: ${error.message}`;
+        if (running) {
+          bootFailed = status.textContent;
+          // M-VAVE's entry without its file stays picked: what it says of where its file is found stays shown, and
+          // the file opened next is its copy. The machine that plays is shown meanwhile, named in the status line.
+          if (error instanceof NeedFile) show(running);
+          else backTo(running);
+        }
+      }
       if (trying) tell("error", error.message);
       return false;
     }
   };
   bootQueue = bootQueue.then(task, task);
   return bootQueue;
+}
+
+// A boot that failed left the machine before it running (the worklet keeps it until the next one has booted): the page
+// is that machine's again, the firmware and the clock picked back to its own, so that what is shown is what plays, and
+// what the next visit opens is what it would have opened before the pick. (Not for M-VAVE's entry waiting for its
+// file, which stays picked: boot.)
+function backTo(session) {
+  fw = session.fw;
+  mhz = session.mhz;
+  pickedMhz = session.picked;
+  show(session);
+  for (const [k, v] of session.kept) store(k, v);
+  if (fw.id === "local") {
+    localFw = fw;
+    const opt = [...fwSel.options].find((o) => o.value === "local");
+    if (opt) opt.text = `${fw.name} (your file)`;
+  } else {
+    // its entry's package is the one it runs: not one opened or fetched in its place for the boot that failed (a file
+    // the emulator refused as M-VAVE's copy), which the entry's next boot would be given
+    packages.set(fw.id, { bytes: session.record.package, url: session.record.url });
+  }
+  fwSel.value = fw.id;
+  mhzSel.value = mhz;
+  loadedUrl = session.record.url;
+  // (a link is its package and name in the address, which the pick that failed took out of it)
+  if (fw.link) {
+    const q = new URLSearchParams(location.search);
+    q.set("package", fw.package);
+    q.set("name", fw.name);
+    history.replaceState(null, "", `?${q}`);
+  }
+  showFirmware();
+}
+
+// A booted machine becomes the one the page shows: the panel is its board's, and the controls that stay where they
+// were put are sent to it as the page shows them, a new machine having its own defaults (MASTER only once it was
+// turned: a try-out's script may set it from its first millisecond). Once for each machine: when it boots, or, for
+// one that booted while a later pick was waiting, when that pick fails and the page goes back to it.
+function show(session) {
+  showing = session.seq;
+  if (session.shown) return;
+  session.shown = true;
+  setBoard(session.board);
+  if (session.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
+  else if (pot !== POT_REST) send({ type: "pot", value: pot });
 }
 
 // the audio graph: a context with the chosen buffer, the emulator's worklet node in it
@@ -1133,14 +1273,11 @@ async function startAudio(auto = false) {
     ac = null;
     return false;
   }
+  // (a browser has the audio worklet only for a page it trusts: one from https, or from this computer. Over plain
+  // http from another one, as a build tried from a second device, there is none, and nothing to run the emulator in)
+  if (!ac.audioWorklet) throw new Error("this page is not on https or localhost, and the browser gives such a page no audio worklet to run the emulator in");
   await ac.audioWorklet.addModule("worklet.js");
   node = new AudioWorkletNode(ac, "fm1", { numberOfInputs: 0, outputChannelCount: [2] });
-  renderWorker = new Worker("render-worker.js", {type:"module"});
-  renderWorker.onmessage = onWorklet;
-  const channel = new MessageChannel();
-  renderWorker.postMessage({type:"connect", sampleRate:ac.sampleRate, port:channel.port1},[channel.port1]);
-  node.port.postMessage({type:"connect-renderer",port:channel.port2},[channel.port2]);
-  renderWorker.onerror = e => { status.textContent = `Audio renderer: ${e.message || "worker failed; restart audio"}`; };
   node.connect(ac.destination);
   node.port.onmessage = onWorklet;
   perf.reset();
@@ -1162,7 +1299,7 @@ function onWorklet(e) {
     }
     const waiter = bootWaiters.get(m.seq);
     if (waiter) { clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.reject(new Error(m.message)); }
-    if (m.seq === bootSeq) status.textContent = `${fw.name}: ${m.message}`;
+    if (m.seq === showing) status.textContent = `${(sessions.get(m.seq)?.fw || fw).name}: ${m.message}`;
     return;
   }
   if (m.type === "flash-changed") {
@@ -1188,6 +1325,7 @@ function onWorklet(e) {
     const session = sessions.get(m.seq), waiter = bootWaiters.get(m.seq);
     if (!session || !waiter) return;
     running = session;
+    session.board = m.board;
     for (const key of sessions.keys()) if (key !== m.seq) sessions.delete(key);
     session.base = m.base;
     session.observedRevision = m.revision;
@@ -1195,12 +1333,11 @@ function onWorklet(e) {
     clearTimeout(waiter.timer); bootWaiters.delete(m.seq); waiter.resolve();
     if (m.seq === bootSeq) {
       booting = 0;
-      setBoard(m.board);
-      if (m.board === 1) for (let i = 16; i < 22; i++) send({ type: "analog", idx: i, value: analog[i] });
+      show(session);
     }
     return;
   }
-  if (m.type !== "frame" || booting || m.seq !== bootSeq) return;
+  if (m.type !== "frame" || booting || m.seq !== showing) return;
   if (running?.ephemeral && tryOut?.files && tryOut.told !== m.seq && m.ms >= tryOut.files.end + 500) {
     tryOut.told = m.seq;                          // (its input script has played: the machine is the visitor's)
     tell("playing");
@@ -1211,17 +1348,21 @@ function onWorklet(e) {
   perf.add(m);
   const now = performance.now();
   if (!last || now - last.t > 1000) {
-    perf.second(m);
-    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (m.halted ? `${fw.name}: the emulated CPU halted` :
-      `${fw.name} · ${mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
+    // the machine these frames are of: the firmware and the clock picked, but for M-VAVE's entry picked without its
+    // file (boot). Then nothing is judged: a warning and the clock it offers would be of the pick (second() judges
+    // no halted machine).
+    const on = running?.seq === m.seq ? running : { fw, mhz };
+    perf.second(on.fw === fw && on.mhz === mhz ? m : { halted: true });
+    status.textContent = (tryOutError ? `${tryOutError} · ` : "") + (bootFailed ? `${bootFailed} · ` : "") +
+      (m.halted ? `${on.fw.name}: the emulated CPU halted` :
+      `${on.fw.name} · ${on.mhz} MHz · ${perf.speedText()} · load ${perf.loadText()} · ` +
       `${(m.ms / 1000).toFixed(1)} s`);
     // (hover: what the figures mean, the JIT's work in the audio thread, and the audio's health)
     status.title = [`speed: how much faster than real time the emulator runs this firmware on this device ` +
       `(emulated time per time spent emulating; below 1x the sound breaks up)`,
-      `load: render worker time relative to audio duration (over 100% cannot sustain playback)`,
+      `load: the share of the audio thread's time the emulator takes (over 100%: the sound breaks up)`,
       m.jit ? `JIT: ${m.jit.regions} regions compiled, ${m.jit.failed} failed${m.jit.error ? ` (${m.jit.error})` : ""}` : "",
-      `${m.short} short audio quanta (includes boot silence)`,
-      `${m.outputUnderruns ?? 0} output underruns (worker queue ran empty); output queue ${(m.outputQueueMs ?? 128000*4/44100).toFixed(1)} ms`].filter(Boolean).join("\n");
+      `${m.short} short audio quanta (the firmware's audio fell behind its own clock)`].filter(Boolean).join("\n");
     last = { t: now };
   }
 }
@@ -1243,11 +1384,19 @@ async function start(auto = false) {
   // a phone on its side: the synth fills the screen, so bring all of it into view
   if (!auto && matchMedia("(orientation: landscape) and (max-height: 560px)").matches) canvas.scrollIntoView({ block: "center" });
 }
-startBtn.addEventListener("click", () => start());
+// What keeps the audio from starting (worklet.js did not load, the device refuses the context) is said, and Start is
+// there to try again, with a graph of its own.
+const tryStart = (auto) => start(auto).catch((error) => {
+  if (!node && ac) { ac.close().catch(() => {}); ac = null; }
+  startBtn.disabled = false;
+  status.textContent = `the audio did not start: ${error.message}`;
+  if (tryOut) tell("error", error.message);
+});
+startBtn.addEventListener("click", () => tryStart());
 if (tryOutError) status.textContent = tryOutError;
 else if (tryOut) {
   saveMessage("A try-out: it starts from the firmware's own flash and is not saved in this browser");
-  start(true);
+  tryStart(true);
 }
 
 // Persistence controls use the running machine's identity, even while another firmware is selected.
@@ -1357,51 +1506,3 @@ document.getElementById("open-saved-version").addEventListener("click", action(a
   if (node) await boot();
   else status.textContent = `${record.name} saved version ready: click Start`;
 }));
-
-
-// Studio's narrow same-origin bridge. The core/panel/audio path remains upstream.
-// No hardware operations, arbitrary commands, cross-origin input or automatic audio start.
-if (STUDIO && window.parent !== window) {
-  const report = (type, fields = {}) => window.parent.postMessage({source:"fm1-device",type,...fields},location.origin);
-  const reportStatus = () => report("status", {text:status.textContent,running:!!running});
-  new MutationObserver(reportStatus).observe(status,{childList:true,subtree:true,characterData:true});
-  let bridgeQueue = Promise.resolve();
-  addEventListener("message", event => {
-    if (event.origin !== location.origin || event.source !== window.parent || event.data?.source !== "fm1-studio") return;
-    const message = event.data;
-    bridgeQueue = bridgeQueue.then(async () => {
-      if (message.type === "load") {
-        if (!(message.bytes instanceof Uint8Array) || message.bytes.length > 16 << 20 || typeof message.name !== "string" || message.name.length > 256) throw new Error("Invalid Studio import");
-        if (message.kind === "save") {
-          let record = await importSave(new TextDecoder().decode(message.bytes),async hash =>
-            message.package instanceof Uint8Array && await packageHash(message.package) === hash ? message.package : null);
-          await bootQueue;
-          await flushRunning();
-          const old = await saveStore.load(record.hash);
-          if (old) record = old; // Resume this setup’s working copy after reopening.
-          record.revision = memoryRecords.get(record.hash)?.revision || old?.revision || 0;
-          memoryRecords.set(record.hash,record);
-          localFw = {id:"local",name:record.name,version:"",bytes:record.package};
-          let opt = [...fwSel.options].find(o=>o.value === "local");
-          if (!opt) fwSel.add(opt = new Option("","local"),0);
-          opt.text = record.name; fw = localFw; fwSel.value = "local";
-          bank = null; loadedUrl = null; showFirmware();
-          if (node) await boot({imported:record});
-          else status.textContent = record.name + " setup ready: click Start on the device";
-        } else if (message.kind === "firmware") {
-          await openLocal(new File([message.bytes],message.name + ".fwsc"));
-        } else throw new Error("Unsupported Studio item");
-        reportStatus();
-      } else if (message.type === "flush") {
-        await bootQueue;
-        await flushRunning();
-        report("flushed",{request:message.request});
-      } else if (message.type === "export") {
-        if (!running) throw new Error("Start a firmware before exporting its saved flash.");
-        await flushRunning();
-        report("export",{name:running.record.name,text:exportSave(running.record)});
-      }
-    }).catch(error => report("error",{text:error.message,request:message.request}));
-  });
-  report("ready");
-}

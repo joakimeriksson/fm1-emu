@@ -1,6 +1,6 @@
 // Test the real browser codec against the real plugin engine in both directions.
 // node tools/check_plugin_save_interop.mjs [browser-persistence-module] [firmware.fwsc]
-// Until browser PR #9 is merged, pass a copy of that branch's web/persistence.js.
+// (the module: web/persistence.js, or another build's copy of it)
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

@@ -156,9 +156,10 @@ Locally, `SIGN_IDENTITY="Developer ID Application: …" tools/build_plugin.sh` t
   - on the SMK-37 the pads, faders and wheels work too.
 - **Record** writes the FM-1's output to a WAV (44.1 kHz, 16-bit) in your Music folder's
   `fm1-emu`, until you press Stop.
-- **The status bar** shows the emulation's speed against real time, and counts output underrun episodes when the computer could not supply audio in time.
+- **The status bar** shows the emulation's speed against real time, and counts the frames that
+  came late when the computer couldn't keep up.
 - **Lead** is how far ahead of the host the firmware runs beyond one host block, 23, 12 or
-  6 ms. New instances default to 12 ms; existing projects retain their saved choice. See "Latency" below.
+  6 ms. See "Latency" below.
 
 ## How it runs
 
@@ -177,8 +178,8 @@ plus the time the firmware itself takes. At a 512-frame host buffer and the 23 m
 about 35 ms (lead and block) + 12 ms (the host's output block) + the firmware's own, 50 ms or
 more. Three things bring it down:
 - the host's buffer size: 128 frames takes the host's share from 24 ms to 6 ms;
-- the lead: 6 ms instead of 23 takes off 17 ms, when the emulation keeps up; "underruns" in
-  the status bar says when it does not, and you can increase Lead. The machine takes a new
+- the lead: 6 ms instead of 23 takes off 17 ms, when the emulation keeps up; "frames late" in
+  the status bar says when it does not, and the lead goes back up. The machine takes a new
   lead at once; the host is told the new latency through a restart request, which the AU
   wrapper does not act on, so an AU host (Logic, GarageBand) keeps compensating by the old
   figure for sequenced notes until the plugin is loaded again. VST3 and CLAP hosts take it
@@ -187,8 +188,6 @@ more. Three things bring it down:
   emulator at 240 MHz, a note to its first sample: Felucca 6–8 ms, Melodee 7 ms, Golana and
   Caravel 4–5 ms, FOMAJAM 38 ms, CS-1 and 386DX 45–60 ms (their own attack included).
 With a 128-frame buffer and the 6 ms lead a Felucca note sounds about 20 ms after the key.
-
-Playback uses a preallocated stereo ring without callback locks or allocation. On starvation it fades to zero, waits for prefill and fades back in, rather than holding a nonzero sample indefinitely. Recording writes run on a separate bounded worker queue and stop with an error if storage cannot keep up. These changes do not establish offline-bounce correctness or hardware sound equivalence.
 
 **A host that takes no audio:** some hosts show the window without processing audio, such as
 Steinberg's test host, or a track that isn't playing. If the host hasn't taken any frames for

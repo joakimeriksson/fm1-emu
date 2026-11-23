@@ -6,13 +6,14 @@
 //! A hot block becomes a region: the block and the blocks reachable from it over fixed edges
 //! (fall-through, branch, goto and call targets), compiled together as one function in a small
 //! wasm module of its own (blocks average three or four instructions: one call per block cost
-//! as much as the interpreter saved). The module imports the emulator's memory and function
-//! table, and exports `run(cpu, ctx, limit, start) -> instructions`; any block of the region
-//! can be the start, and inside it a `loop` + `br_table` dispatches from block to block. The host (JavaScript)
-//! compiles it synchronously and puts `run` into the emulator's exported function table
-//! (`fm1_jit_compile`, see web/jit.js); Rust then calls it through that table index, so running
-//! compiled code involves no JavaScript at all. The generated code reaches back into Rust the
-//! same way: the helpers' table indices are `call_indirect` targets.
+//! as much as the interpreter saved). The module imports the emulator's memory and the three
+//! helpers as functions, and exports `run(cpu, ctx, limit, start) -> instructions`; any block of
+//! the region can be the start, and inside it a `loop` + `br_table` dispatches from block to
+//! block. The host (JavaScript) compiles it synchronously, hands it the helpers out of the
+//! emulator's exported function table and puts `run` into that table (`fm1_jit_compile`, see
+//! web/jit.js); Rust then calls it through that table index, so running compiled code involves
+//! no JavaScript at all. Nor does the generated code's way back into Rust: the helpers are the
+//! emulator's own functions, called directly (not through the table: `module` says why).
 //!
 //! Timing is kept exact as in jit.rs: a block runs only when all its ticks fit before anything
 //! is due; RAM / XIP accesses are inline (as are the register ops, the FPU's included: wasm's own
@@ -69,8 +70,6 @@ pub struct Jit {
     /// blocks compiled into regions, all told (with the copies: a block reachable from several
     /// hot blocks is in each one's region)
     pub blocks: u32,
-    /// compile helper calls that count themselves (`Cpu::profile` when the JIT was made)
-    pub profile: bool,
     /// compile the checks of a runner's stretch at each block's entry (`Cpu::stop_checks`:
     /// core 1, whose runner probes for polling loops)
     pub(crate) stops: bool,
@@ -90,8 +89,11 @@ impl std::fmt::Debug for Jit {
 }
 
 impl Jit {
-    pub fn new(profile: bool) -> Option<Jit> {
-        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, bytes_max: 0, drops: 0, resets: 0, blocks: 0, profile, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
+    /// (`_profile`: as `jit::Jit::new` takes it, so `Cpu::run_fast` makes either the same way.
+    /// Here a region's helper calls count themselves when the core profiles as the region is
+    /// compiled: `install`.)
+    pub fn new(_profile: bool) -> Option<Jit> {
+        Some(Jit { state: Vec::new(), rinfo: Vec::new(), regions: 0, bytes: 0, bytes_max: 0, drops: 0, resets: 0, blocks: 0, stops: false, cache: vec![(0, 0, 0, 0); CACHE].into_boxed_slice() })
     }
 
     fn at(&mut self, id: usize) -> &mut Entry {
@@ -221,7 +223,8 @@ pub struct Ctx {
 /// instructions, as far as whole blocks go (the caller's budget, as the interpreter keeps it).
 ///
 /// # Safety
-/// `f` must come from `Jit::entry` for this bus type and memory map.
+/// `f` and `start` must be a region's as `Jit::lookup` or `Jit::cached` gives them (or a module
+/// the host just installed), compiled for this bus type and memory map.
 pub(crate) unsafe fn run<B: Bus>(f: u32, start: u32, cpu: &mut Cpu, bus: &mut B, extra: u32, cap: u32) -> u32 {
     // instructions this call may run: their ticks ((k - 1) + extra) must all fit tick_room
     let limit = (bus.tick_room() + 1).saturating_sub(extra as u64).min(1 << 30).min(cap as u64) as u32;
@@ -320,8 +323,10 @@ extern "C" fn h_op<B: Bus, const PROF: bool>(ctx: *mut Ctx, op: *const Fast, idx
     if PROF {
         cpu.profile_helper(unsafe { &*op });
     }
+    let code = bus.code_writes();
     let j = cpu.exec_fast(bus, unsafe { *op }, next_pc);
-    if bus.next_tick_due() {
+    // (a store of the op's to a word of RAM code: leave, as after `h_write`'s)
+    if bus.next_tick_due() || bus.code_writes() != code {
         ctx.brk = 1;
     }
     match j {
@@ -503,6 +508,9 @@ pub const EXIT_NAMES: [&str; 10] = ["none", "limit", "stop", "stop_io", "goto_ou
 
 struct Gen<'a> {
     c: Vec<u8>,
+    /// the bus's memory map (`Bus::jit_mem`) as the module holds it: the pointers, bases and
+    /// lengths all as constants in its code, so none of them may change, nor the memory move,
+    /// while a Cpu with regions compiled on that bus runs on it
     mem: &'a JitMem,
     /// the region's blocks by start pc -> index
     index: std::collections::HashMap<u32, u32>,
@@ -796,7 +804,7 @@ impl Gen<'_> {
         self.end();
     }
 
-    /// push alu(op, local a, local b) (wasm shifts take the count mod 32, as `alu`)
+    /// push alu(op, local a, local b)
     fn alu(&mut self, op: Op) {
         match op {
             Op::RSub => {
@@ -813,6 +821,36 @@ impl Gen<'_> {
                 self.op(I32_AND);
                 return;
             }
+            // the count is b's low 8 bits, and 32 and up shift everything out (`shift32`); wasm
+            // takes it mod 32, so a larger count gives 0, or for >>> shifts by 31
+            Op::Shl | Op::Shr => {
+                self.get(L_A);
+                self.get(L_B);
+                self.op(if matches!(op, Op::Shl) { I32_SHL } else { I32_SHR_U });
+                self.i32c(0);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(32);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                return;
+            }
+            Op::Sar => {
+                self.get(L_A);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.get(L_B);
+                self.i32c(0xff);
+                self.op(I32_AND);
+                self.i32c(31);
+                self.op(I32_LT_U);
+                self.op(SELECT);
+                self.op(I32_SHR_S);
+                return;
+            }
             _ => {}
         }
         self.get(L_A);
@@ -824,10 +862,7 @@ impl Gen<'_> {
             Op::Or => I32_OR,
             Op::Xor => I32_XOR,
             Op::Mul => I32_MUL,
-            Op::Shl => I32_SHL,
-            Op::Shr => I32_SHR_U,
-            Op::Sar => I32_SHR_S,
-            Op::RSub | Op::AndNot => unreachable!(),
+            Op::RSub | Op::AndNot | Op::Shl | Op::Shr | Op::Sar => unreachable!(),
         });
     }
     /// local b = an A4 / BitBr right-hand side: rk 0 register, 1 immediate, 2 `1 << reg`
@@ -904,8 +939,11 @@ impl Gen<'_> {
                 self.op(I32_AND);
             }
             self.tee(L_OFF);
+            // (a window shorter than the access holds none of it: no offset is below the 0 the
+            // length less the width then gives. `<=` there let offset 0 in, to read past the
+            // window's end, or at the null base of a window that is not there)
             self.i32c(len.saturating_sub(w as u32));
-            self.op(I32_LE_U);
+            self.op(if len < w as u32 { I32_LT_U } else { I32_LE_U });
             self.if_();
             self.count(if gbase == mem.ram_base { 0 } else { 1 });
             self.get(L_OFF);
@@ -937,8 +975,9 @@ impl Gen<'_> {
         self.i32c(mem.ram_base);
         self.op(I32_SUB);
         self.tee(L_OFF);
+        // (RAM shorter than the access: none of it inline, as `load`)
         self.i32c(mem.ram_len.saturating_sub(w as u32));
-        self.op(I32_LE_U);
+        self.op(if mem.ram_len < w as u32 { I32_LT_U } else { I32_LE_U });
         if w == 2 {
             // an odd halfword goes the Soc's merging way
             self.get(L_ADDR);
@@ -948,11 +987,17 @@ impl Gen<'_> {
             self.op(I32_AND);
         }
         self.if_();
-        self.get(L_OFF);
-        self.i32c(2);
-        self.op(I32_SHR_U);
-        self.mem_op(I32_LOAD8_U, 0, mem.ram_code as u32);
-        self.op(I32_EQZ);
+        if mem.ram_code.is_null() {
+            // (a bus without code flags: no word is one, as the native JITs take it; a load
+            // at the null table would read whatever lies at the offset's quarter)
+            self.i32c(1);
+        } else {
+            self.get(L_OFF);
+            self.i32c(2);
+            self.op(I32_SHR_U);
+            self.mem_op(I32_LOAD8_U, 0, mem.ram_code as u32);
+            self.op(I32_EQZ);
+        }
         self.if_();
         self.count(3);
         self.get(L_OFF);
@@ -996,18 +1041,18 @@ impl Gen<'_> {
     }
 }
 
-/// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
-/// first.
 /// The helpers' indices in the function table (the host imports them into a region's module:
 /// `fm1_jit_compile`), as a region compiled with `profile` calls them.
 fn helpers<B: Bus>(profile: bool) -> [u32; 3] {
     [
-        h_read::<B> as usize as u32,
-        h_write::<B> as usize as u32,
-        if profile { h_op::<B, true> as usize as u32 } else { h_op::<B, false> as usize as u32 },
+        h_read::<B> as *const () as usize as u32,
+        h_write::<B> as *const () as usize as u32,
+        if profile { h_op::<B, true> as *const () as usize as u32 } else { h_op::<B, false> as *const () as usize as u32 },
     ]
 }
 
+/// The module for a region: blocks (id, start pc, plain micro-ops: none careful), the hot one
+/// first.
 fn compile<B: Bus>(blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem, stops: bool, prof: bool) -> Vec<u8> {
     let n = blocks.len() as u32;
     let mut g = Gen {
@@ -1257,22 +1302,22 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 g.ld_reg(s);
                 g.i32c(p);
                 g.op(I32_SHR_U);
-                if signed {
-                    if l != 0 {
-                        g.i32c(32 - l);
-                        g.op(I32_SHL);
-                        g.i32c(32 - l);
-                        g.op(I32_SHR_S);
-                    }
+                // (a width of 0 gives 0, `bit_extract`)
+                if signed && l != 0 {
+                    g.i32c(32 - l);
+                    g.op(I32_SHL);
+                    g.i32c(32 - l);
+                    g.op(I32_SHR_S);
                 } else {
-                    g.i32c(if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) });
+                    g.i32c((1u32 << l).wrapping_sub(1));
                     g.op(I32_AND);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
             Fast::BitIns { d, s, p, l } => {
+                // (a width of 0 changes nothing, `bit_insert`)
                 let (p, l) = (p as u32 & 31, l as u32 & 31);
-                let mask = if l == 0 { u32::MAX } else { (1u32 << l).wrapping_sub(1) };
+                let mask = (1u32 << l).wrapping_sub(1);
                 g.get(L_CPU);
                 g.ld_reg(d);
                 g.i32c(!(mask << p));
@@ -1373,33 +1418,6 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(F32_REINTERPRET_I32);
                         g.op(match op { 0 => F32_ADD, 1 => F32_SUB, 2 => F32_MUL, _ => F32_DIV });
                     }
-                    5 | 6 => {
-                        // a' = a != a ? b : a; b' = b != b ? a' : b; a' < b' ? a' : b' (max: >)
-                        g.ld_reg(a);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FA);
-                        g.ld_reg(b);
-                        g.op(F32_REINTERPRET_I32);
-                        g.set(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FA);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FA);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.get(L_FB);
-                        g.op(F32_NE);
-                        g.op(SELECT);
-                        g.tee(L_FB);
-                        g.get(L_FA);
-                        g.get(L_FB);
-                        g.op(if op == 5 { F32_LT } else { F32_GT });
-                        g.op(SELECT);
-                    }
                     0x8f | 0x9f => {
                         g.ld_reg(a);
                         g.op(if op == 0x8f { F32_CONVERT_I32_S } else { F32_CONVERT_I32_U });
@@ -1422,6 +1440,36 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                 }
                 if !to_int {
                     g.op(I32_REINTERPRET_F32);
+                }
+                // NaNs as `fpu` has them: arithmetic gives 0x7f800001, ftof the input's sign |
+                // 0x7fc00000, ftoi / ftou the range's end on the input's side
+                if !matches!(op, 0x8f | 0x9f) {
+                    g.set(L_A);
+                    match op {
+                        0..=3 => g.i32c(0x7f80_0001),
+                        _ if !to_int => {
+                            g.ld_reg(a);
+                            g.i32c(0x8000_0000);
+                            g.op(I32_AND);
+                            g.i32c(0x7fc0_0000);
+                            g.op(I32_OR);
+                        }
+                        _ => {
+                            g.ld_reg(a);
+                            g.i32c(31);
+                            g.op(I32_SHR_S);
+                            g.i32c(if k < 4 { 0x7fff_ffff } else { u32::MAX });
+                            g.op(I32_XOR);
+                        }
+                    }
+                    g.get(L_A);
+                    // the NaN test: on the result for arithmetic, on the input otherwise
+                    if matches!(op, 0..=3) { g.get(L_A); } else { g.ld_reg(a); }
+                    g.i32c(0x7fff_ffff);
+                    g.op(I32_AND);
+                    g.i32c(0x7f80_0000);
+                    g.op(I32_GT_U);
+                    g.op(SELECT);
                 }
                 g.mem_op(I32_STORE, 2, off_reg(d));
             }
@@ -1596,7 +1644,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_SUB);
                     }
                     2 => {
-                        // |x| = (x ^ m) - m, m = x >> 31 (wrapping: the minimum stays)
+                        // |x| = (x ^ m) - m, m = x >> 31; saturating: the minimum gives the maximum
+                        // (^ its own sign)
                         g.get(L_A);
                         g.i32c(31);
                         g.op(I32_SHR_S);
@@ -1606,6 +1655,12 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_XOR);
                         g.get(L_B);
                         g.op(I32_SUB);
+                        g.set(L_A);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(31);
+                        g.op(I32_SHR_S);
+                        g.op(I32_XOR);
                     }
                     3 => {
                         // rev8: the bytes reversed
@@ -1634,7 +1689,15 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
                         g.op(I32_CLZ);
                     }
                     5 => g.clamp(-32768, 32767),
-                    _ => g.clamp(0, 65535),
+                    // sat16 (u): an unsigned value into 0..65535
+                    _ => {
+                        g.i32c(65535);
+                        g.get(L_A);
+                        g.get(L_A);
+                        g.i32c(65535);
+                        g.op(I32_GT_U);
+                        g.op(SELECT);
+                    }
                 }
                 g.set(L_VAL);
                 g.st_reg_from(d, L_VAL);
@@ -1943,7 +2006,7 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
             Fast::PopRets => {
                 g.ld_field(off_sp()); g.set(L_ADDR);
                 g.load(4, false, idx);
-                g.get(L_CPU); g.get(L_VAL); g.mem_op(I32_STORE, 2, off_rets());
+                g.get(L_CPU); g.get(L_VAL); g.i32c(crate::RETS_MASK); g.op(I32_AND); g.mem_op(I32_STORE, 2, off_rets());
                 g.get(L_CPU); g.get(L_ADDR); g.i32c(4); g.op(I32_ADD);
                 g.mem_op(I32_STORE, 2, off_sp());
                 bus_used = true;
@@ -2017,7 +2080,8 @@ fn block_ops<B: Bus>(g: &mut Gen<'_>, pc0: u32, ops: &[crate::BOp], probe: bool)
 /// ftou in every rounding, itof, utof, and ftof in every rounding (fm1-isa's fpu.rs). Not the
 /// multiply-accumulates 7 / 8 (the executor, as jit.rs), nor an op the table does not decode.
 fn fop_inline(op: u8) -> bool {
-    matches!(op, 0..=3 | 5 | 6 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
+    // (fmin / fmax, `fminmax`, go through the interpreter)
+    matches!(op, 0..=3 | 0x0f | 0x1f | 0x2f | 0x3f | 0x4f | 0x5f | 0x6f | 0x7f | 0x8f | 0x9f | 0xcf | 0xdf | 0xef | 0xff)
 }
 
 static mut SELFTEST_DETAIL: String = String::new();
@@ -2038,15 +2102,18 @@ fn no_mem() -> JitMem {
     JitMem { ram: std::ptr::null_mut(), ram_base: 0, ram_len: 0, ram_code: std::ptr::null(), xip: std::ptr::null(), xip_base: 0, xip_len: 0 }
 }
 
-/// The integer ops computed inline since the float ones (`Un`, `Div`) against the executor:
-/// every kind on the edge values (zero, the signs, the extremes, the halfword bounds) and
-/// random words, four register choices. The mismatches, 0 when all agree; the detail follows
+/// The integer ops computed inline since the float ones (`Un`, `Div`), the shifts by a register
+/// (its low 8 bits: 32 and up shift everything out) and the bit fields (`BitExt` / `BitIns`, with
+/// a width of 0 among them) against the executor: every kind on the edge values (zero, the signs,
+/// the extremes, the halfword bounds, shift counts about 32 and 256) and random words, four
+/// register choices. The mismatches, 0 when all agree; the detail follows
 /// `fop_selftest`'s in `SELFTEST_DETAIL`.
 pub fn int_selftest() -> u32 {
     let mem = no_mem();
     let specials: [u32; 28] = [0, 1, 2, 3, 0xffff_ffff, 0xffff_fffe, 0x8000_0000, 0x7fff_ffff, 0x8000_0001, 0x7fff_fffe,
         0x8000, 0x7fff, 0xffff, 0x1_0000, 0xffff_8000, 0xffff_7fff, 0xffff_0000, 0x0102_0304, 0x8070_6050, 0x00ff_ff00,
         0xdead_beef, 10, 0xffff_fff6, 7, 0xffff_fff9, 0x4000_0000, 0xc000_0000, 0x12345678];
+    let specials: Vec<u32> = specials.iter().copied().chain([31, 32, 33, 63, 255, 256, 0x1_0020, 0xffff_ff1f]).collect();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut rnd = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed as u32 };
     let n = specials.len();
@@ -2067,6 +2134,15 @@ pub fn int_selftest() -> u32 {
         for k in 0..4u8 {
             ops.push(Fast::Div { d, a, b, k });
         }
+        for op in [Op::Shl, Op::Shr, Op::Sar] {
+            ops.push(Fast::Alu3 { d, a, b, op });
+            ops.push(Fast::A4 { d, s: a, op, rk: 0, rv: b as u32 });
+        }
+        for (p, l) in [(0u8, 0u8), (7, 0), (31, 0), (0, 1), (0, 8), (4, 12), (16, 16), (31, 1), (1, 31)] {
+            ops.push(Fast::BitExt { d, s: a, p, l, signed: false });
+            ops.push(Fast::BitExt { d, s: a, p, l, signed: true });
+            ops.push(Fast::BitIns { d, s: a, p, l });
+        }
     }
     for fast in ops {
         let bop = crate::BOp { fast, len: 2, careful: false, pair_head: false, glue: false };
@@ -2081,7 +2157,7 @@ pub fn int_selftest() -> u32 {
         for i in 0..n * n + 256 {
             let (x, y) = if i < n * n { (specials[i / n], specials[i % n]) } else { (rnd(), rnd()) };
             let mut cpu = Cpu::new(0x0200_0000);
-            for r in 0..16 { cpu.regs[r] = rnd(); }
+            for r in &mut cpu.regs { *r = rnd(); }
             cpu.regs[1] = x;
             cpu.regs[2] = y;
             let mut want = Cpu::new(0x0200_0000);
@@ -2091,12 +2167,16 @@ pub fn int_selftest() -> u32 {
             // SAFETY: `f` is the module just installed, built for NoBus
             let k = unsafe { run::<NoBus>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) };
             if k != 1 || cpu.regs != want.regs || cpu.pc != want.pc {
-                let d = match fast { Fast::Un { d, .. } | Fast::Div { d, .. } => d as usize, _ => 0 };
+                let d = match fast {
+                    Fast::Un { d, .. } | Fast::Div { d, .. } | Fast::Alu3 { d, .. } | Fast::A4 { d, .. }
+                    | Fast::BitExt { d, .. } | Fast::BitIns { d, .. } => d as usize,
+                    _ => 0,
+                };
                 fail(format!("{fast:?}"), x, y, format!("ran {k}, r{d} {:08x}, the executor {:08x}", cpu.regs[d], want.regs[d]));
             }
         }
     }
-    fails
+    fails + exits_selftest()
 }
 
 /// The mismatches `fop_selftest` and `int_selftest` found, the first of each op and register
@@ -2161,7 +2241,7 @@ pub fn fop_selftest() -> u32 {
                     else if i < n { (specials[i], rnd()) }
                     else { (rnd(), rnd()) };
                 let mut cpu = Cpu::new(0x0200_0000);
-                for r in 0..16 { cpu.regs[r] = rnd(); }
+                for r in &mut cpu.regs { *r = rnd(); }
                 cpu.regs[1] = x;
                 cpu.regs[2] = y;
                 let init = cpu.regs;
@@ -2195,17 +2275,142 @@ pub fn fop_selftest() -> u32 {
     fails
 }
 
+/// The self-tests' RAM: 64 bytes at `Probe::RAM` with a code flag per word, and a count of the
+/// writes to flagged words (`Bus::code_writes`); 8 bytes of XIP at `Probe::XIP`. Every read
+/// through the bus gives `0xbb` bytes and no write through it lands, so a test tells an inline
+/// access from one that took the bus.
+struct Probe { ram: [u8; 64], xip: [u8; 8], code: [u8; 17], writes: u64, stores: u32 }
+impl Probe {
+    const RAM: u32 = 0x0100_0000;
+    const XIP: u32 = 0x0300_0000;
+    fn new() -> Self { Probe { ram: [0x11; 64], xip: [0x22; 8], code: [0; 17], writes: 0, stores: 0 } }
+    fn wrote(&mut self, a: u32) {
+        self.stores += 1;
+        if self.code.get((a.wrapping_sub(Self::RAM) >> 2) as usize).is_some_and(|&f| f != 0) {
+            self.writes += 1;
+        }
+    }
+    /// (the inline windows: the first `len` bytes of the RAM, the first `xip` of the XIP; a
+    /// test may take the flags away: `JitMem::ram_code` null)
+    fn mem(&mut self, len: u32, xip: u32) -> JitMem {
+        JitMem { ram: self.ram.as_mut_ptr(), ram_base: Self::RAM, ram_len: len, ram_code: self.code.as_ptr(), xip: self.xip.as_ptr(), xip_base: Self::XIP, xip_len: xip }
+    }
+}
+impl Bus for Probe {
+    fn read8(&mut self, _: u32) -> u8 { 0xbb }
+    fn read16(&mut self, _: u32) -> u16 { 0xbbbb }
+    fn read32(&mut self, _: u32) -> u32 { 0xbbbb_bbbb }
+    fn write8(&mut self, a: u32, _: u8) { self.wrote(a) }
+    fn write16(&mut self, a: u32, _: u16) { self.wrote(a) }
+    fn write32(&mut self, a: u32, _: u32) { self.wrote(a) }
+    fn tick_room(&self) -> u64 { 1 << 40 }
+    fn next_tick_due(&self) -> bool { false }
+    fn code_writes(&self) -> Option<u64> { Some(self.writes) }
+}
+
+/// Where compiled code leaves, in the engine at hand (`int_selftest` adds its count): a store
+/// through the executor's helper to a word of RAM code ends the run after its instruction, as
+/// one through `h_write` does, and to any other word does not; a return to a pc that is no
+/// block's goes back to Rust (to 1 too: no free slot of the jump table holds its own pc), to a
+/// block of the region goes on there; a load or store at the base of an inline window shorter
+/// than it takes the bus, of one just long enough is made in place. The mismatches, described
+/// in `SELFTEST_DETAIL`.
+#[allow(static_mut_refs)]
+fn exits_selftest() -> u32 {
+    let mut fails = 0u32;
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            fails += 1;
+            unsafe { SELFTEST_DETAIL += &format!("{what}\n"); }
+        }
+    };
+    let bop = |fast| crate::BOp { fast, len: 2, careful: false, pair_head: false, glue: false };
+    let build = |blocks: &[(usize, u32, Vec<crate::BOp>)], mem: &JitMem| {
+        let m = compile::<Probe>(blocks, mem, false, false);
+        let [r, w, o] = helpers::<Probe>(false);
+        // SAFETY: a plain byte slice; the host copies it before returning
+        unsafe { fm1_jit_compile(m.as_ptr(), m.len(), r, w, o) }
+    };
+    const PC: u32 = 0x0200_0000;
+    // `w[r2 ++= r3] = r1` (the executor's: no code of its own here), then `r4 = 99`
+    for flagged in [false, true] {
+        let mut bus = Probe::new();
+        bus.code[2] = flagged as u8;
+        let mem = bus.mem(64, 0);
+        let f = build(&[(0, PC, vec![bop(Fast::StPostR { s: 1, b: 2, i: 3, w: 4 }), bop(Fast::MovI { d: 4, v: 99 })])], &mem);
+        let mut cpu = Cpu::new(PC);
+        (cpu.regs[1], cpu.regs[2], cpu.regs[3]) = (0x1234, Probe::RAM + 8, 4);
+        // SAFETY: `f` is the module just installed (0: the host could not), built for Probe
+        let k = if f == 0 { 0 } else { unsafe { run::<Probe>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) } };
+        let want = if flagged { (1, PC + 2, 0) } else { (2, PC + 4, 99) };
+        check((k, cpu.pc, cpu.regs[4]) == want && cpu.regs[2] == Probe::RAM + 12 && bus.stores == 1,
+            format!("a helper's store to a {} word: ran {k} to pc {:08x}, r4 {}, {} stores", if flagged { "code" } else { "data" }, cpu.pc, cpu.regs[4], bus.stores));
+    }
+    // `rts` at PC + 2, `r4 = 99` at PC + 4 (the table's slots 1 and 2 of 8: slot 0, where pc 0
+    // and 1 are looked up, is free)
+    for size in [8usize, 64, 4096] {
+        check((0..size).all(|h| ((jump_free(h) >> 1) as usize & (size - 1)) != h), format!("a free slot of {size} holds a pc of its own"));
+    }
+    let mut bus = Probe::new();
+    let mem = bus.mem(64, 0);
+    let f = build(&[(0, PC + 2, vec![bop(Fast::Rts)]), (1, PC + 4, vec![bop(Fast::MovI { d: 4, v: 99 })])], &mem);
+    for (rets, want) in [(1, (1, 1, 0)), (0, (1, 0, 0)), (2, (1, 2, 0)), (PC, (1, PC, 0)), (PC + 4, (2, PC + 6, 99))] {
+        let mut cpu = Cpu::new(PC + 2);
+        cpu.rets = rets;
+        // SAFETY: as above
+        let k = if f == 0 { 0 } else { unsafe { run::<Probe>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) } };
+        check((k, cpu.pc, cpu.regs[4]) == want, format!("a return to {rets:08x}: ran {k} to pc {:08x}, r4 {}", cpu.pc, cpu.regs[4]));
+    }
+    // `r0 = [r2]`, `r0 = [r3]`, `[r2] = r1`: r2 the RAM's base, r3 the XIP's, the windows one
+    // byte short of the access, then just long enough
+    for w in [1u8, 2, 4] {
+        let all = u32::MAX >> (32 - 8 * w as u32);
+        for (len, inline, flags) in [(w as u32 - 1, false, true), (w as u32, true, true), (w as u32, true, false)] {
+            let mut bus = Probe::new();
+            let mut mem = bus.mem(len, len);
+            if !flags {
+                mem.ram_code = std::ptr::null();
+            }
+            let ops = [Fast::Ld { d: 0, b: Base::Reg(2), off: 0, w, signed: false }, Fast::Ld { d: 0, b: Base::Reg(3), off: 0, w, signed: false },
+                Fast::St { s: 1, b: Base::Reg(2), off: 0, w }];
+            let mut got = [0u32; 3];
+            for (fast, g) in ops.into_iter().zip(&mut got) {
+                let f = build(&[(0, PC, vec![bop(fast)])], &mem);
+                let mut cpu = Cpu::new(PC);
+                (cpu.regs[1], cpu.regs[2], cpu.regs[3]) = (0x4433_2211, Probe::RAM, Probe::XIP);
+                // SAFETY: as above
+                let k = if f == 0 { 0 } else { unsafe { run::<Probe>(f, 0, &mut cpu, &mut bus, 0, 1 << 20) } };
+                check(k == 1, format!("{fast:?} with windows of {len}: ran {k}"));
+                *g = cpu.regs[0];
+            }
+            let stored = u32::from_le_bytes([bus.ram[0], bus.ram[1], bus.ram[2], bus.ram[3]]);
+            let want = if inline { (all & 0x1111_1111, all & 0x2222_2222, (0x1111_1111 & !all) | (0x4433_2211 & all), 0) } else { (all & 0xbbbb_bbbb, all & 0xbbbb_bbbb, 0x1111_1111, 1) };
+            check((got[0], got[1], stored, bus.stores) == want,
+                format!("windows of {len}, {w} wide: loads {:08x} {:08x}, RAM {stored:08x} after {} stores through the bus", got[0], got[1], bus.stores));
+        }
+    }
+    fails
+}
+
+/// The pc a free slot `h` of a region's jump table holds: one of another slot (h ^ 1), so no
+/// pc looked up there matches it, as `jit::itab_empty`'s. (A pc no block starts at, such as 1,
+/// still matches a guest that jumps there, through a trashed rets or a null pointer's field:
+/// it went on in the region's code instead of back to Rust.)
+fn jump_free(h: usize) -> u32 {
+    ((h as u32) ^ 1) << 1
+}
+
 /// A region's blocks as a table for `Gen::jump_local`: the smallest power-of-two size (at least
-/// twice the blocks) where (pc >> 1) & mask sets them all apart. Free slots hold pc 1 (no
-/// block starts at an odd pc). Lives as long as the program (as the regions' code does).
+/// twice the blocks) where (pc >> 1) & mask sets them all apart. Free slots hold `jump_free`'s
+/// pc. Lives as long as the program (as the regions' code does).
 fn jump_table(blocks: &[(usize, u32, Vec<crate::BOp>)]) -> Option<(u32, u32)> {
     let mut size = (2 * blocks.len()).next_power_of_two().max(8);
     while size <= 4096 {
         let mask = size as u32 - 1;
-        let mut t = vec![1u32; 2 * size];
+        let mut t: Vec<u32> = (0..size).flat_map(|h| [jump_free(h), 0]).collect();
         let fits = blocks.iter().enumerate().all(|(k, b)| {
             let h = ((b.1 >> 1) & mask) as usize;
-            let free = t[2 * h] == 1;
+            let free = t[2 * h] == jump_free(h);
             t[2 * h] = b.1;
             t[2 * h + 1] = k as u32;
             free

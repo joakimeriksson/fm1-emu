@@ -1,35 +1,27 @@
 ---
-load_when: "building, testing, installation or verification evidence"
-last_verified: 2026-11-22
+load_when: "builds, upstream updates, scope and verification"
+last_verified: 2026-11-23
 source_refs:
-  - context/icons.md
-  - assets/icons/README.md
-  - tools/generate-icons.swift
-  - package.json
-  - tools/build_studio.sh
-  - tools/package-studio.mjs
-  - tools/serve-studio.mjs
-  - tools/build_plugin.sh
+  - UPSTREAM_REVISION
   - tools/package_macos_app.sh
-  - Cargo.toml
-  - tools/check_firmware_alignment.sh
-  - crates/fm1-host/src/lib.rs
-  - crates/fm1-host/src/audio.rs
-  - crates/fm1-host/tests/audio_callback.rs
+  - tools/check_upstream.sh
+  - .github/workflows/standalone.yml
 ---
 # Development
 
-The canonical fork is under the selected account’s GitHub directory. Follow the root account instructions before git/gh work; never move a cloned repository to the old research workspace.
-
-Build native targets with locked dependencies. Build plugin bundles with NO_INSTALL=1 so a local development build cannot overwrite an existing installation. The script ad-hoc signs local bundles; this does not establish public distribution or DAW compatibility.
-
-Studio requires only Node built-ins; npm install is unnecessary. npm run build:web first invokes the upstream WASM build, then packages Studio and creates a content-derived offline cache manifest. It does not download firmware. npm run serve binds to 127.0.0.1 and serves only real files inside web/dist, with explicit WASM/JS MIME types and traversal checks.
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo test --release --locked -p fm1-live -p fm1-map -p fm1-core -p fm1-soc
+tools/check_upstream.sh
+npm run check:context
+tools/package_macos_app.sh
+```
 
 ## Rebuild after changes
 
-After every change, including merges, rebuild all local targets before handing the project back for testing. Incremental builds are sufficient; do not delete build caches. Run from the repository root and stop on a failed command:
+Rebuild the standalone macOS app and every other local target after each change or merge, including documentation-only edits, before handoff. Stop on a failed command and report unavailable targets. Incremental builds are sufficient; do not delete caches.
 
-```bash
+```sh
 export PATH="$HOME/.cargo/bin:$PATH"
 set -e
 tools/package_macos_app.sh
@@ -38,52 +30,39 @@ npm run build:web
 cargo build --release --locked -p fm1-live -p fm1-emu
 ```
 
-| Target | Local output |
-|---|---|
-| macOS app | `target/apps/FM-1 Studio.app` |
-| CLAP, AU and VST3 | `target/plugin/FM-1.clap`, `target/plugin/FM-1.component`, `target/plugin/FM-1.vst3` |
-| Browser and offline Studio | `web/dist/`, `web/dist/studio/` |
-| Native CLI | `target/release/fm1-live`, `target/release/fm1-emu` |
+Verify each app/CLAP/AU/VST3 bundle with `codesign --verify --deep --strict`. Output is under target/apps/, target/plugin/, target/release/ and web/dist/. The old browser Studio is deliberately absent; build:web produces upstream browser assets only. Never install plugins as a build side effect. A build does not establish interactive app, browser, DAW or hardware acceptance.
 
-Verify native bundle signatures with `codesign --verify --deep --strict` for each app/plugin bundle. Report any failed or unavailable target explicitly. Builds do not replace the tests required for the change or establish interactive app, browser, DAW or hardware acceptance. Relaunch the rebuilt app for testing; close old browser service-worker tabs before checking the new web build. Plugin installation remains a separate, intentional action.
+No npm install is needed. The app is target/apps/FM-1 Studio.app, ad-hoc signed for local use. Packaging does not install anything or download firmware. It registers only the built app with Launch Services to refresh its icon; public notarization is not implied. Open a local .fwsc through the file picker. CLI example:
 
-## Verification ladder
+```sh
+target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3 MIDI" --map "MiniLab FM-1 User"
+```
 
-1. Node tests exercise import rejection, collection validation, hashes and real-package round trips.
-2. Rust CPU/SoC tests protect the execution foundation.
-3. Real firmware smoke runs prove a specific package boots/renders.
-4. Browser checks cover import, device boot, collection export/restore, persistence, responsive layout and a network-disabled cold reopening.
-5. Plugin validators and real DAW checks are separate. A build alone earns no host-compatibility label.
-6. Hardware acceptance remains pending until a physical unit is available.
+This upstream baseline accepts update packages (.fwsc), not the previous fork's plain .area inputs. SLOOP .area compatibility remains a migration gap; do not treat the retained app bundle as evidence that the old loader extensions survived. Failed saved-session validation returns to the firmware picker.
 
-Useful local fixture: node tools/fetch_firmwares.mjs felucca. All downloaded firmware belongs in ignored `reference/firmwares/`, including manually obtained packages and versioned subfolders for multi-file releases; do not create a separate top-level firmware folder or commit downloads. Run FM1_TEST_FWSC=reference/firmwares/felucca.fwsc npm run test:studio to enable the package roundtrip test.
+Firmware stays ignored under reference/. Tests with optional upstream fixtures can skip internally when files are missing; report actual firmware smoke runs separately. Default native audio remains upstream's implementation and latency policy. The previous fork's audio refactor is not ported without a separate comparison against this newer engine. This branch makes no new audio-latency guarantee.
 
-Native diagnostic: target/release/fm1-emu --fwsc reference/firmwares/felucca.fwsc --steps 1000000000 --ms 4000 --keys '2000-3500:n7' --wav target/felucca-smoke.wav --quiet. Keep diagnostic output in ignored target/, not tracked context.
+## Updating upstream
 
-The supplied ez-context helper can check staleness from source_refs. npm run check:context checks routing, metadata and local Markdown targets without depending on git history. Neither checker proves a document’s prose correct; manually reconcile the design doc for every visual change.
+1. Start with a clean worktree. Follow the account rules and run gh-whoami.
+2. Fetch upstream/master and create an update branch from the maintained product branch.
+3. Record the candidate hash, then merge that exact upstream commit. Resolve only the small host adapters and any genuine custom interface changes. Do not replace upstream engine files with old versions.
+4. Update UPSTREAM_REVISION to the merged candidate. Run tools/check_upstream.sh; protected engine, mapping, shared panel, browser and plugin runtime sources must exactly match the candidate.
+5. Run native tests, context checks and app packaging. Smoke-test a real firmware, MIDI mapping, open/cancel, recording, reset backup and Finder recall. Check upstream API changes against custom renderer/overlay geometry.
+6. Commit and push the update branch, then open a PR. Do not rebase or force-push the public product history. No automatic production merges.
 
-Standalone macOS app packaging: tools/package_macos_app.sh. It builds the native executable, creates target/apps/FM-1 Studio.app and ad-hoc signs the bundle. Public distribution/notarization is not implied.
+The boundary check also requires the recorded baseline to be an ancestor of HEAD. New upstream changes can still require adapter work; the goal is a small, inspectable difference, not a conflict-free promise.
 
-The MiniLab diagnostic example accepts an optional monitoring duration: `cargo run --release -p fm1-live --example midi_probe -- 120`. It receives only; it never configures or writes to a controller. Studio tests now cover the realtime queue’s bounded prefill/stale-boot/pause behavior and factory and dedicated User controller mappings. Shared Rust tests cover native/plugin policy; plugin worker tests check profile-before-channel routing and default Raw compatibility. Physical MiniLab setup and real DAW routing remain separate acceptance checks. Browser asset packaging includes the render worker/runtime, with worker URLs stamped alongside imports. Keep direct-loop WASM benchmarks separate from end-to-end worker/output-underrun verification.
+## Migration scope
 
-## Cross-host firmware acceptance
+Carry forward the standalone Mac app, the full icon family and editable sources, mandatory rebuild instructions, visual styling, standalone menus/shortcuts, session recall, Shift-click holds and the MiniLab User program. Leave browser Studio/library, hardware tools, custom plugin UI/state and speculative transport/editor features out. Keep upstream-supported targets intact. Runtime fixes are considered individually; prefer upstream fixes and avoid importing old engine code.
 
-When changing firmware formats, boot, flash persistence or execution, audit all three adapters: `fm1-live`, `fm1-plugin` and `fm1-web`. Put parsing, detection, boot parameters and flash behavior in `fm1-soc`; adapters own UI, threading and transport only. UI allowlists, drag/drop, collection import ordering, export filenames and `.fm1save` recall must also accept the same formats. Do not implement synthesis or an alternate firmware port to work around execution errors.
+The upstream README is retained with a fork notice, and its tests/licensing remain intact. Custom files live under studio/ wherever practical. Keep native adapter edits focused rather than reformatting upstream files.
 
-Run `npm run check:firmware` with local Felucca `.fwsc` and SLOOP 3 `.area` fixtures. Override `FM1_TEST_FWSC`/`FM1_TEST_AREA` if stored elsewhere. Missing fixtures fail clearly; this command never downloads binaries. It runs all Rust host tests (plugin workspace separately), JS collection/save tests, a browser build, actual WASM display/audio smoke and flash recall for both formats, and browser/plugin portable-save interoperability. SLOOP’s plugin test boots the original bytes, checks display output and saved-flash recall. Downloaded fixtures remain ignored.
+## Icon maintenance
 
-After acceptance, rebuild `tools/package_macos_app.sh` and `NO_INSTALL=1 tools/build_plugin.sh`. Verify browser import/start after closing old service-worker tabs and exercise the plugins in actual DAWs when available. Headless engine checks do not establish real DAW or hardware acceptance. Update user-guide, architecture and status together; document any intentional surface difference and its verification limit before considering the task done.
+Read [the icon contract](icons.md). Keep source and generated exports together; use `python3 tools/check_icon_artwork.py` and `python3 tools/package_icons.py` to validate and export them. `npm run build:web` uses the branding wrapper; direct `web/build.sh` keeps upstream output. Verify the app and every plugin bundle (including nested CLAP copies) contain the expected ICNS/catalog bytes and icon metadata before signature checks. Windows resource build hooks and Linux window artwork are preserved, with runtime presentation unverified on those platforms.
 
-For hardware work, read [hardware-library.md](hardware-library.md). Run `npm run test:hardware` and the `fm1-host` tests; `check:firmware` includes both. Keep new firmware protocols behind explicit capabilities/version checks. Test transfer failures without hardware, then record physical acceptance separately. Shared companion changes require rebuilding all native bundles as well as the browser assets because native hosts embed the same sources.
+## Scope gate
 
-Session lifecycle: standalone Finder recall is a host preference, never a global instrument override for plugins. Browser selection belongs to its instance URL; sound still needs a gesture. Reset must mean current firmware's initial persistent state on every host, with explicit confirmation and no physical-device writes. Standalone archives its previous flash after orderly shutdown; plugin/browser users export a setup before reset. Do not describe saved-flash recall as complete CPU/RAM session recovery.
-
-## App identity and icons
-
-Follow [the icon platform contract](icons.md) for source/generated assets, platform-specific commands and acceptance. Regenerate on macOS with full Xcode, validate, then rebuild standalone, plugins and web because the native companion embeds its favicon. Windows/Linux builds consume committed exports. Use NO_INSTALL=1 for plugin verification. The standalone macOS app and command-line release archives are separate packaging paths.
-
-## Realtime playback checks
-
-`cargo test --release --locked -p fm1-host -p fm1-live` covers stereo order, ring wraparound, conversion phase at 32/44.1/48/96 kHz, prefill, dropout fades, allocation-free playback and bounded recording overflow/finalization. `node --test web/studio/audio-buffer.test.mjs` covers queue bounds, stale boots, pause flush, recovery and latency decay. These deterministic tests do not establish device latency or sustained zero-underrun operation. Use `FM1_TEST_FWSC` with the plugin engine tests to exercise a local Felucca fixture rather than skipping it.
-
-For actual output-device playback without changing open sessions or saved flash, run `cargo run --release --locked -p fm1-live --example audio_probe -- reference/firmwares/sloop/sloop3-3.3.7.area 30 12`. The diagnostic holds three keys after four seconds, requests 128 device frames, uses the standalone adaptive queue from the specified starting target and reports output underruns, device errors and worst emulation chunk duration. It separates the first ten seconds from later underruns but does not establish perceptual equivalence. Do not run concurrent playback probes when comparing settings.
+Read [the fork policy](fork-policy.md) before every change. `tools/check_upstream.sh` checks all changed and untracked source paths, rejects upstream-file deletion, preserves the upstream README, and enforces the shared runtime boundary. CI uses the same gate. New scope and additional upstream hooks need explicit authorization; do not loosen the check to pass a patch.

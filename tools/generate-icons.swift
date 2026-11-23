@@ -28,11 +28,11 @@ func png(_ relative: String, _ size: Int, opaque: Bool = false, maskable: Bool =
 }
 
 for size in [16, 20, 24, 32, 40, 48, 64, 96, 128, 256, 512, 1024] { try png("assets/icons/png/fm1-\(size).png", size) }
-for size in [16,32,48] { try png("web/icons/favicon-\(size).png",size) }
-for size in [120,152,167,180] { try png("web/icons/apple-touch-icon-\(size).png",size,opaque:true) }
+for size in [16,32,48] { try png("assets/icons/web/icons/favicon-\(size).png",size) }
+for size in [120,152,167,180] { try png("assets/icons/web/icons/apple-touch-icon-\(size).png",size,opaque:true) }
 for size in [192,512] {
- try png("web/icons/icon-\(size).png",size)
- try png("web/icons/maskable-\(size).png",size,opaque:true,maskable:true)
+ try png("assets/icons/web/icons/icon-\(size).png",size)
+ try png("assets/icons/web/icons/maskable-\(size).png",size,opaque:true,maskable:true)
 }
 for size in [16,32,128,256,512] {
  for scale in [1,2] {
@@ -54,7 +54,7 @@ func ico(_ path: String, _ sizes: [Int]) throws {
  frames.forEach { output.append($0) }; try output.write(to: root.appendingPathComponent(path))
 }
 try ico("assets/icons/FM1.ico",[16,20,24,32,40,48,64,96,128,256])
-try ico("web/favicon.ico",[16,32,48])
+try ico("assets/icons/web/favicon.ico",[16,32,48])
 let process = Process(); process.executableURL = URL(fileURLWithPath:"/usr/bin/iconutil")
 process.arguments = ["-c","icns","assets/icons/FM1.iconset","-o","assets/icons/FM1.icns"]
 try process.run(); process.waitUntilExit(); precondition(process.terminationStatus == 0)
@@ -66,7 +66,7 @@ for y in 0..<64 { for x in 0..<64 {
  argb.append(contentsOf: [UInt8((c.blueComponent*255).rounded()), UInt8((c.greenComponent*255).rounded()), UInt8((c.redComponent*255).rounded()), UInt8((c.alphaComponent*255).rounded())])
 } }
 try argb.write(to: root.appendingPathComponent("assets/icons/linux-64.argb"))
-let favicon = try Data(contentsOf: root.appendingPathComponent("web/icons/favicon-32.png"))
+let favicon = try Data(contentsOf: root.appendingPathComponent("assets/icons/web/icons/favicon-32.png"))
 try ("data:image/png;base64," + favicon.base64EncodedString()).write(to: root.appendingPathComponent("assets/icons/favicon-data-uri.txt"), atomically: true, encoding: .utf8)
 print("Generated native, favicon, Apple touch and maskable icons.")
 

@@ -11,4 +11,3 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
-ab_glyph = "0.2.32"

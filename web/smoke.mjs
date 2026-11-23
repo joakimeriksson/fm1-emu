@@ -22,12 +22,11 @@ if (x.fm1_boot_fwsc(p, bytes.length, 0, 0, 100) !== 0) {
   process.exit(1);
 }
 const app = bytes;
-const seconds = Number(process.env.FM1_SMOKE_SECONDS || 3);
 let real = 0;
-for (let n = 0; n < seconds * 44100; n += 128) real += x.fm1_render(128, 50_000_000);
+for (let n = 0; n < 3 * 44100; n += 128) real += x.fm1_render(128, 50_000_000);
 const lcd = new Uint16Array(x.memory.buffer, x.fm1_lcd(), 240 * 240);
 const lit = lcd.reduce((n, v) => n + (v ? 1 : 0), 0);
-console.log(`${url}: ${app.length} bytes of package; ${seconds} s -> ${real} audio frames, ${lit} lit pixels, halted ${x.fm1_halted()}`);
+console.log(`${url}: ${app.length} bytes of package; 3 s -> ${real} audio frames, ${lit} lit pixels, halted ${x.fm1_halted()}`);
 // the output level over `s` seconds
 const level = (s) => {
   let sum = 0, n = 0;

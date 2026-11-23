@@ -1,19 +1,15 @@
 ---
-load_when: "always — foundation; first orientation for any task"
-last_verified: 2026-11-16
+load_when: "always — project scope and upstream baseline"
+last_verified: 2026-11-23
 source_refs:
-  - Cargo.toml
-  - package.json
+  - UPSTREAM_REVISION
+  - crates/fm1-live/src/studio/**
   - AGENTS.md
 ---
 # Overview
 
-Faithful original-binary FM-1 emulation is the product’s defining requirement. The intended user composes in a standalone Mac instrument and DAW plugins, keeps more firmware/content on the computer than fits the device, and later uses the same workspace as a physical FM-1 companion.
+This branch rebuilds FM-1 Studio from upstream fm1-emu, retaining the original firmware execution model. The initial custom product is the Mac standalone instrument: complete app icon family and sources, approved graphite panel, native application menus and shortcuts, remembered launch settings and firmware flash, and the dedicated MiniLab 3 User program.
 
-The target is Apple Silicon, with standalone/VST3 first and an offline static browser version. The user reports an M5 Pro with 64 GB and macOS 27.2. Both native and browser must work offline once chosen assets are saved. Personal use comes first; possible public open-source distribution remains a future decision.
+The lean standalone is the canonical implementation in the fm-1 checkout. The previous Studio implementation remains recoverable in Git history and retained branches. Its browser Studio, hardware companion and custom plugin behavior are outside this scope. Upstream browser, plugins, diagnostic tools and other platforms remain in the tree; preserving them avoids needless divergence. They retain upstream behavior.
 
-Rust CPU/SoC code, the native panel, WASM runtime and plugin infrastructure come from fm1-emu. Studio adds a dependency-free browser interface and local library. The first implementation deliberately keeps the original device page as a same-origin runtime surface, avoiding a second audio engine.
-
-Hardware-sized memory remains the default; larger emulated capacity is later work. Performance MIDI and saved-flash recall are implemented with host-specific storage: standalone remembers its last firmware/launch options, plugins recall DAW project state, and browser Studio reselects within a bookmarked instance. Complete CPU/RAM recall remains unfinished. The shared SLOOP 3 project librarian has simulated transfer coverage; physical-device verification is pending. Never equate persisted flash with full volatile-state snapshots.
-
-Research/specification preceded implementation and remain available as on-demand references. Day-to-day progress and verification live in status.md; do not rewrite research history to imply it included runtime testing.
+The user authorized this narrower scope and delivery through a branch and PR. Use the existing account-owned repository rather than creating another fork. UPSTREAM_REVISION records the exact foundation; never reset or force-push a published branch to update it.

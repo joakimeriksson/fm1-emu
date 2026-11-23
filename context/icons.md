@@ -1,19 +1,19 @@
 ---
 load_when: "icon artwork, platform icon assets, native bundle branding, favicon or home-screen icons"
-last_verified: 2026-11-16
+last_verified: 2026-11-23
 source_refs:
-  - assets/icons/README.md
-  - assets/icons/FM1.icon/icon.json
+  - assets/icons/**
   - tools/generate-icons.swift
   - tools/check_icon_artwork.py
   - tools/package_icons.py
   - tools/package_macos_app.sh
   - tools/build_plugin.sh
   - tools/windows-icon.rs
-  - crates/fm1-live/src/app_icon.rs
+  - crates/fm1-live/src/studio/app_icon.rs
+  - crates/fm1-plugin/build.rs
   - crates/fm1-plugin/wrap/CMakeLists.txt
-  - web/site.webmanifest
-  - tools/package-studio.mjs
+  - tools/build_web.sh
+  - tools/package_web_icons.py
 ---
 # Icon identity and platform contract
 
@@ -34,7 +34,7 @@ Modern macOS supplies its own outer enclosure. Its artwork must fill the entire 
 - `assets/icons/source.png`: generated full-bleed preview; not a second editable master.
 - `assets/icons/FM1.icon`: real Icon Composer document. Its raster image is the generated opaque full-canvas composition; opacity preserves layout bounds and prevents automatic cropping of isolated controls. No glass effect is baked into the layer.
 - `assets/icons/macos/Assets.car`: native macOS compiled catalog. Commit this and other generated exports so Windows/Linux/web builds do not require Xcode.
-- `assets/icons/FM1.icns`, `FM1.iconset`, `FM1.ico`, `png/`, `linux-64.argb`, and `web/icons/`: platform exports, not independent designs. Exact dimensions are listed in [the asset inventory](../assets/icons/README.md).
+- `assets/icons/FM1.icns`, `FM1.iconset`, `FM1.ico`, `png/`, `linux-64.argb`, and `assets/icons/web/icons/`: platform exports, not independent designs. Exact dimensions are listed in [the asset inventory](../assets/icons/README.md).
 
 ## Regenerate, validate and package
 
@@ -46,7 +46,7 @@ python3 tools/check_icon_artwork.py
 python3 tools/package_icons.py
 ```
 
-The packager writes `target/FM-1-icons.zip` and refreshes `target/FM-1-icons/`. Neither step publishes or installs anything. Commit source and generated exports together. Regeneration also changes the native companion's embedded favicon, so rebuild the native hosts as well as the browser.
+The packager writes `target/FM-1-icons.zip` and refreshes `target/FM-1-icons/`. Neither step publishes or installs anything. Commit source and generated exports together. The companion favicon export is retained as an asset; there is no companion runtime in this branch. After every change, rebuild the standalone app and all other local targets using [the mandatory rebuild checklist](development.md#rebuild-after-changes).
 
 ## Build each platform
 
@@ -61,7 +61,7 @@ The packager writes `target/FM-1-icons.zip` and refreshes `target/FM-1-icons/`. 
 
 `tools/package_apps.sh` packages command-line program releases, not the standalone macOS `.app`; those are separate paths. Windows program archives can be packaged with `tools/package_apps.sh windows-x86_64` from the supported Windows release shell. Linux desktop installation details are in the asset inventory; packaging does not change system folders. Wayland and DAW plugin browsers control their own presentation. Mobile support here means browser/home-screen assets, not native iOS/Android binaries.
 
-`npm run build:web` copies icons into the static build and includes them in Studio's content-derived offline cache. Direct `web/build.sh` copies icons too. FM-1, Studio and Hardware Library share the identity; SMK-37 and test/demo pages are separate products/surfaces. Keep URLs relative for subdirectory deployments.
+`npm run build:web` calls tools/build_web.sh: the unmodified upstream build runs first, then tools/package_web_icons.py applies committed icons and relative HTML links to web/dist/. Source browser exports and manifest live under assets/icons/web/. Direct web/build.sh produces upstream output without this overlay. Browser Studio and Hardware Library remain outside this fork's scope; their icon exports are retained for reuse. SMK-37 and test/demo pages keep their upstream identity.
 
 ## Acceptance and known limits
 
@@ -69,4 +69,4 @@ The artwork check validates uniform body pixels, a blank screen and the full-ble
 
 Standalone packaging derives a bundle revision from the catalog digest, touches the signed bundle and re-registers only that app with Launch Services. This refreshes artwork caches without restarting Finder/Dock or clearing global caches. Already-running app copies may need reopening.
 
-Local macOS builds, signature checks, generated asset checks and Finder appearance have been verified for earlier revisions. Recheck after each refinement and record the current evidence in [status](status.md). Windows/Linux runtime presentation, mobile home-screen appearance and real DAW plugin-list artwork remain unverified. Do not describe a Mac build or raster preview as acceptance on those hosts.
+Earlier revisions established Finder appearance. Recheck this branch after refinements and record current build, signature and resource checks in [status](status.md); historical Finder acceptance does not establish the current bundle's display. Windows/Linux runtime presentation, mobile home-screen appearance and real DAW plugin-list artwork remain unverified. Do not describe a Mac build or raster preview as acceptance on those hosts.

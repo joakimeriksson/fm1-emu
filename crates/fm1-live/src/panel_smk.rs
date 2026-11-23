@@ -1,6 +1,6 @@
 //! The SMK-37's front panel, drawn after the unit itself (M-VAVE's product photos) on the map of
 //! fm1-to-smk37's panel (assets/smk37-panel.png): a near-black body; the pitch and mod wheels, the
-//! M-VAVE logo and the six small buttons on the left; the screen (2x here, small on the unit);
+//! model's name (not M-VAVE's logo: this is not their product) and the six small buttons on the left; the screen (2x here, small on the unit);
 //! K1..K8 over two rows of eight dark pads that glow their RGB colour from below; the four faders
 //! and twelve buttons on the right; the 37 keys C3..C6 across the bottom, their shifted functions
 //! printed above them. Ids are fm1_soc::smk's: keys 0..36, buttons 37..54.
@@ -241,8 +241,8 @@ pub fn base() -> Vec<u32> {
     }
     text(&mut b, WHEELS[0].0 as f32 + 34.0, 40.0, "PITCH", 2, INK);
     text(&mut b, WHEELS[1].0 as f32 + 34.0, 40.0, "MOD", 2, INK);
-    // the logo, and PAD BANK over the left buttons
-    text(&mut b, 138.0, 312.0, "M-VAVE", 4, 0xe4e5e8);
+    // the model's name where the unit has M-VAVE's logo, and PAD BANK over the left buttons
+    text(&mut b, 138.0, 312.0, "SMK-37", 4, 0xe4e5e8);
     text(&mut b, 138.0, 364.0, "PAD BANK", 1, INK);
     rrect(&mut b, 52.0, 367.0, 46.0, 1.0, 0.5, INK_DIM, INK_DIM);
     rrect(&mut b, 178.0, 367.0, 46.0, 1.0, 0.5, INK_DIM, INK_DIM);
@@ -341,7 +341,7 @@ pub fn draw(buf: &mut [u32], base: &[u32], st: &State) {
     for y in 0..240 {
         for x in 0..240 {
             let p = st.lcd[y * 240 + x] as u32;
-            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | (p & 31) * 255 / 31;
+            let c = ((p >> 11) * 255 / 31) << 16 | (((p >> 5) & 63) * 255 / 63) << 8 | ((p & 31) * 255 / 31);
             let o = (LCD_Y + 2 * y) * W + LCD_X + 2 * x;
             buf[o] = c;
             buf[o + 1] = c;

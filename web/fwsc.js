@@ -16,6 +16,7 @@
 // Written for the emulator's web page; on 2026-10-10 it gave byte for byte the apps Felucca's
 // own package code (web/fm1pkg.js, GPL-3.0, not used here) extracts, for every package in
 // web/firmwares.json.
+import { MAX_PACKAGE } from "./persistence.js";
 
 function unmask(buf, off, len, key = 0xffff) {
   for (let i = 0; i < len; i++) {
@@ -81,22 +82,7 @@ function rawFlash(file) {
   throw new Error("no flash image in the package");
 }
 
-export function isApplicationArea(file) {
-  return String.fromCharCode(...file.subarray(16, 29)) === "app_area_head";
-}
-
 export function appFromPackage(file) {
-  if (isApplicationArea(file)) {
-    const fail = () => { throw new Error("Invalid FM-1 application area (.area)"); };
-    if (file.length < 64 || file.length > 0xfc000) fail();
-    for (const at of [0, 32]) if (crc16(file, at+2, 30) !== u16(file, at)) fail();
-    const off = u32(file, 36), len = u32(file, 40);
-    if (file[12] !== 0x83 || file[44] !== 0x82 || name(file, 48, 16) !== "app.bin" ||
-        u32(file, 8) !== file.length || off < 64 || off+len !== file.length ||
-        u32(file, 4) !== 0x02000000+off || (off & 1) ||
-        crc16(file, off, len) !== u16(file, 34) || u16(file, 2) !== u16(file, 34)) fail();
-    return file.slice(off);
-  }
   const flash = rawFlash(file);   // a copy: unpacking works on it in place
 
   // the JLFS directory: the chip key and where the app area starts
@@ -136,6 +122,16 @@ export function appFromPackage(file) {
 // fetch; a test's its own.)
 const HUB = "https://thefirmwarehub.com/";
 const hubCatalogs = new WeakMap();
+// A URL from the Hub's catalog (a firmware's site, its package; `base` for a relative one), which the page fetches or
+// makes a link of: an https one, else null. A "javascript:" URL as a link's href would run in the page when clicked.
+export function httpsUrl(u, base) {
+  try {
+    const url = new URL(u, base);
+    return url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 // A Hub package's version from its name, <id>-<version>.fwsc (a build id after "+" left off).
 // The Hub's own "version" is its latest release tag, which runs ahead of the package it hosts
 // when it has not taken a release's package yet. Null when the name is not of that form.
@@ -155,9 +151,10 @@ function hubCatalog(fetchFn) {
 async function hubPackage(id, fetchFn) {
   try {
     const h = (await hubCatalog(fetchFn))?.firmwares?.find((h) => h.id === id);
-    if (!h?.pkg) return null;
+    const url = h?.pkg && httpsUrl(h.pkg, HUB);
+    if (!url) return null;
     const version = packageVersion(h.id, h.pkg) ?? (h.version == null ? null : String(h.version));
-    return { url: new URL(h.pkg, HUB).href, version };
+    return { url, version };
   } catch {
     return null;
   }
@@ -182,8 +179,12 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
     return [];
   }
   const out = [];
-  for (const h of hub?.firmwares || []) {
-    if (!h.pkg || known.has(h.id) || skipped[h.id]) continue;
+  // (a catalog of another shape than the one known here: what in it is a firmware with an id, or none; the page
+  // waits for this list while it loads)
+  for (const h of Array.isArray(hub?.firmwares) ? hub.firmwares : []) {
+    if (!h || typeof h.id !== "string") continue;
+    const pkg = h.pkg && httpsUrl(h.pkg, HUB);
+    if (!pkg || known.has(h.id) || skipped[h.id]) continue;
     out.push({
       id: h.id,
       name: h.name,
@@ -191,8 +192,8 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
       author: h.author || "",
       license: h.lic || "see the repository",
       about: h.what || "",
-      repo: h.repo ? `https://github.com/${h.repo}` : h.site || hubCardUrl(h.id),
-      package: new URL(h.pkg, HUB).href,
+      repo: h.repo ? `https://github.com/${h.repo}` : httpsUrl(h.site) || hubCardUrl(h.id),
+      package: pkg,
       hub: h.id,
       untested: true,
     });
@@ -200,6 +201,38 @@ export async function hubNewcomers(catalog, fetchFn = fetch) {
   return out;
 }
 export const hubCardUrl = (hubId) => `${HUB}#fw-${hubId}`;
+
+// A fetched package's bytes, refused when it is larger than a package can be (MAX_PACKAGE, what the page keeps of one;
+// the devices' flash is 1 MB, and so about a package's most): by the length the server gives, else while reading, so
+// that a link to something huge (?package= takes any https URL) is not read into memory.
+async function packageBytes(r, url) {
+  const large = () => new Error(`${url}: larger than ${MAX_PACKAGE >> 20} MB, not a firmware package`);
+  if (Number(r.headers?.get("content-length")) > MAX_PACKAGE) {
+    r.body?.cancel?.()?.catch(() => {});       // (not left to be read: the connection is given up)
+    throw large();
+  }
+  const reader = r.body?.getReader?.();
+  if (!reader) {
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (bytes.length > MAX_PACKAGE) throw large();
+    return bytes;
+  }
+  const parts = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if ((n += value.length) > MAX_PACKAGE) {
+      reader.cancel().catch(() => {});
+      throw large();
+    }
+    parts.push(value);
+  }
+  const bytes = new Uint8Array(n);
+  let at = 0;
+  for (const p of parts) { bytes.set(p, at); at += p.length; }
+  return bytes;
+}
 
 // Fetch a catalog entry's package (web/firmwares.json): its `package` URL, or when that has
 // gone (a newer version replaced it) the package the Hub lists now (an entry with `hub`), or
@@ -222,19 +255,19 @@ export async function fetchPackage(entry, fetchFn = fetch) {
     return { bytes, url: entry.installer };
   }
   let r = await fetchFn(entry.package);
-  if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url: entry.package };
+  if (r.ok) return { bytes: await packageBytes(r, entry.package), url: entry.package };
   if (entry.hub) {
     const now = await hubPackage(entry.hub, fetchFn);
     if (now && now.url !== entry.package) {
       const h = await fetchFn(now.url);
-      if (h.ok) return { bytes: new Uint8Array(await h.arrayBuffer()), url: now.url, ...(now.version && { version: now.version }) };
+      if (h.ok) return { bytes: await packageBytes(h, now.url), url: now.url, ...(now.version && { version: now.version }) };
     }
   }
   if (entry.manifest) {
     const m = await (await fetchFn(entry.manifest)).json();
     const url = new URL(m.package || m.file, entry.manifest).href;
     r = await fetchFn(url);
-    if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url };
+    if (r.ok) return { bytes: await packageBytes(r, url), url };
   }
   if (!entry.installer) throw new Error(`${entry.package}: ${r.status}`);
   const find = (text) => [...text.matchAll(/[\w./-]+\.fwsc/g)].map((m) => m[0]).filter((n) => !/(^|\/)FM-1\.fwsc$/i.test(n));
@@ -249,7 +282,7 @@ export async function fetchPackage(entry, fetchFn = fetch) {
   for (const n of names) {
     const url = new URL(n, base).href;
     r = await fetchFn(url);
-    if (r.ok) return { bytes: new Uint8Array(await r.arrayBuffer()), url };
+    if (r.ok) return { bytes: await packageBytes(r, url), url };
   }
   throw new Error(`${entry.package}: ${r.status}, and ${entry.installer} names no package that loads`);
 }

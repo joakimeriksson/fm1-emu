@@ -152,7 +152,7 @@
  "clatter": {
   "package": "4d661dae90380138",
   "bytes": 1315328,
-  "audio": "9a8925e37ec0f578"
+  "audio": "49b3caa98ab52a88"
  },
  "clipper": {
   "package": "b29d53498a7bc40e",
@@ -217,7 +217,7 @@
  "demake": {
   "package": "b496d0efdfc403db",
   "bytes": 1377280,
-  "audio": "659a253cced1918a"
+  "audio": "96003f1c0966f747"
  },
  "dinghy": {
   "package": "139da045ea20eb5e",
@@ -381,8 +381,8 @@
  },
  "frodhes": {
   "package": "9524a3cff24aae8b",
-  "bytes": 524800,
-  "audio": "3f5acc4d73df7197"
+  "bytes": 1377280,
+  "audio": "0e3c8948a2fd3157"
  },
  "fumi": {
   "package": "211db1c2efc379b0",
@@ -617,7 +617,7 @@
  "mono2k": {
   "package": "4fb65f626d079539",
   "bytes": 1377280,
-  "audio": "990998999dfb9b56"
+  "audio": "83fdd3e831ea1989"
  },
  "monohull": {
   "package": "6ed6e01d76066f1e",
@@ -648,6 +648,11 @@
   "package": "35b0764f1291b321",
   "bytes": 1378304,
   "audio": "89f269a11d5ff574"
+ },
+ "mvave-v15": {
+  "package": "db1642b2b6fa5c2c",
+  "bytes": 1378816,
+  "audio": "b9998d5714f67111"
  },
  "mycelium": {
   "package": "9aa2802a0ac07f41",
@@ -827,7 +832,7 @@
  "sid": {
   "package": "30fbbeb839e34eb9",
   "bytes": 1378304,
-  "audio": "b8747c47661ce694"
+  "audio": "526d2a04e8178347"
  },
  "sid1": {
   "package": "22b9e3d7f517da61",

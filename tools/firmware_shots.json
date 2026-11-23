@@ -1,0 +1,14 @@
+{
+  "note": "tools/firmware_shots.py: per firmware, its own keys (fm1_soc::script syntax, as FM1_BENCH_KEYS), run length (ms) and first frame considered (from), or wall: false to keep its picture off the page's wall, with why. By device: fm1 (web/firmwares.json), smk37 (web/smk37/firmwares.json).",
+  "fm1": {
+    "choralroot": { "wall": false, "why": "shows PRESETS MISSING: its presets come from its installer" },
+    "chipbox": { "wall": false, "why": "asks for a sound disk, which its own page sends" },
+    "carnac": { "wall": false, "why": "shows WAVES MISSING: its waves come from its installer" },
+    "fmdj": { "wall": false, "why": "shows NO LSDJ ROM: the ROM is the user's, added on its install page" },
+    "fm1dock": { "wall": false, "why": "an almost empty screen" },
+    "midimon": { "wall": false, "why": "an almost empty screen until MIDI arrives" },
+    "pulhra": { "wall": false, "why": "an almost empty screen" },
+    "mvave-v15": { "keys": "1500:C4,1500:E4,1500:G4,4500:C4^,4500:E4^,4500:G4^", "why": "PLAY brings up its \"Enable SEQ first\" pop-up: the chord alone" }
+  },
+  "smk37": {}
+}

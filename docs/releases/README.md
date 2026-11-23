@@ -43,8 +43,9 @@ refreshes the copy committed in the pages (optional: the build writes its own).
 
 The workflow refuses a tag that isn't the version, or a version without its notes.
 
-By hand before the tag (not in CI): M-VAVE's stock firmware and FM1 Open, which are not in the
-catalog, and the speed against the last release (CI machines are too noisy for it):
+By hand before the tag (not in CI): M-VAVE's current stock firmware, which the catalog has no
+package of (bring your own `FM-1.fwsc`; V15, the recovery image of FM1 Open, is in the catalog and
+played with the rest), and the speed against the last release (CI machines are too noisy for it):
 `tools/catalog_check.py` plays the catalog in about a minute on an Apple silicon Mac.
 
 A change to the emulator that moves a firmware's sound (timing, an instruction's meaning)

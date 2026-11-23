@@ -1,0 +1,249 @@
+{
+  "name": "MiniLab FM-1 User",
+  "device": "Minilab3 MIDI",
+  "pass_unmapped": true,
+  "keys_mode": "panel",
+  "notes": "Select explicitly after configuring the MiniLab User program; see context/minilab.md.",
+  "bindings": [
+    {
+      "src": {
+        "ch": 1,
+        "notes": [
+          0,
+          127
+        ]
+      },
+      "to": "keys"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 74
+      },
+      "to": "MASTER",
+      "mode": "absolute"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 71
+      },
+      "to": "SELECT",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 76
+      },
+      "to": "PRESETS",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 77
+      },
+      "to": "ALGORITHM",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 93
+      },
+      "to": "KNOB1",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 18
+      },
+      "to": "KNOB2",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 19
+      },
+      "to": "KNOB3",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 16
+      },
+      "to": "KNOB4",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 114
+      },
+      "to": "SELECT",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 112
+      },
+      "to": "PRESETS",
+      "mode": "relative-64"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 20
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 21
+      },
+      "to": "FX",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 22
+      },
+      "to": "EDIT",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 23
+      },
+      "to": "SEQ",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 24
+      },
+      "to": "SCL",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 25
+      },
+      "to": "PLAY",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 26
+      },
+      "to": "REC",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 27
+      },
+      "to": "GLO",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 28
+      },
+      "to": "ENV",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 29
+      },
+      "to": "LFO",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 30
+      },
+      "to": "ARP",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 31
+      },
+      "to": "SAVE",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 32
+      },
+      "to": "OCT-",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 33
+      },
+      "to": "OCT+",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 34
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 16,
+        "cc": 35
+      },
+      "to": "SCL",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 115
+      },
+      "to": "HOME",
+      "mode": "momentary"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 9
+      },
+      "to": "ignore"
+    },
+    {
+      "src": {
+        "ch": 1,
+        "cc": 113
+      },
+      "to": "ignore"
+    }
+  ]
+}

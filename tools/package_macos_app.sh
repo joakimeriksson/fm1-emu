@@ -36,4 +36,4 @@ lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 if [ -x "$lsregister" ]; then
   "$lsregister" -f "$PWD/$app_bundle" || echo "Warning: macOS app registration refresh failed." >&2
 fi
-echo "Built $app_bundle (local ad-hoc signature; upstream native device UI)."
+echo "Built $app_bundle (local ad-hoc signature; standalone Studio panel)."

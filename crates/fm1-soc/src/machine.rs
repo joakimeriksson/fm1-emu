@@ -18,7 +18,9 @@
 //! this, most of its slow-path instructions were `lockset` retries). cpu0's interrupts wait up
 //! to a slice meanwhile.
 
-use crate::{p33, Soc, Wait, RAM_BASE, VEC_BASE};
+use crate::flaky::FlakyCore1;
+use crate::fwsc::{self, UsrLayout};
+use crate::{p33, stock_boot, stock_from_package, FlashPart, Soc, Stock, Wait, XipCache, FLASH_SIZE, RAM_BASE, VEC_BASE};
 use fm1_core::{Bus, Cpu, PlainState};
 
 /// cpu0 runs in slices of this many instructions once cpu1 is running, cpu1 after each.
@@ -49,6 +51,10 @@ impl Core1Bus<'_> {
     }
 }
 
+// Every method of `Bus` is spelled out here, none left to its default. Not passed on to the SoC:
+// the clock (`tick`, `tick_room`, `add_ticks`, `next_tick_due`: the budget instead, time stands
+// still while core 1 runs), `irq_window` and `service` (they end the run; the SoC's `next_due` is
+// cpu0's to zero) and `idle` (core 1's sleep, not cpu0's idle skip).
 impl Bus for Core1Bus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.soc.core1_read8(a)
@@ -57,7 +63,11 @@ impl Bus for Core1Bus<'_> {
         self.soc.core1_read16(a)
     }
     fn read32(&mut self, a: u32) -> u32 {
-        self.soc.core1_read32(a)
+        let v = self.soc.core1_read32(a);
+        if self.soc.periph.core1_polls {
+            self.budget = self.budget.min(1); // (`run_cpu1` ends the run there)
+        }
+        v
     }
     fn fetch32(&mut self, a: u32) -> u32 {
         self.soc.fetch32(a)
@@ -142,6 +152,9 @@ impl Bus for Core1Bus<'_> {
 /// the SoC as it is, but for a flaky core 1's misreads (`Soc::flaky_core1`).
 pub struct Core1Loads<'a>(pub &'a mut Soc);
 
+// The SoC's own answers but for the loads. Not passed on: `jit_mem` (None, see there) and
+// `fetch_cost` (its default, nothing: the flash cache it would charge is FM1_STRICT's, and a
+// runner with that clock runs core 1 through `Core1Bus`).
 impl Bus for Core1Loads<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         self.0.core1_read8(a)
@@ -362,6 +375,10 @@ impl ProbeBus<'_> {
     }
 }
 
+// Left to `Bus`'s defaults on purpose: `tick` (`probe_loop` ticks the SoC itself, between steps),
+// `jit_mem`, `tick_room`, `add_ticks`, `next_tick_due`, `code_writes` and `code_mark` (a probe
+// steps: no compiled code, no blocks built, and a store into code ends it) and `fetch_cost` (no
+// probe runs with the cost model: `run_blocks`).
 impl Bus for ProbeBus<'_> {
     fn read8(&mut self, a: u32) -> u8 {
         if self.load(a & !3) { self.soc.read8(a) } else { 0 }
@@ -458,6 +475,11 @@ fn probe_loop(cpu: &mut Cpu, soc: &mut Soc, budget: u32) -> u32 {
             }
         }
         if i >= budget || i >= PROBE_MAX {
+            break Err(false);
+        }
+        // (code outside the PC limits is the block loop's: it raises the guard where a block out
+        // there is entered, and a step checks no limits)
+        if cpu.pc_win.is_some_and(|w| w.iter().all(|&(lo, hi)| !(lo..=hi).contains(&cpu.pc))) {
             break Err(false);
         }
         // (the first instruction's tick is paid; with something due the block loop goes on)
@@ -598,7 +620,12 @@ pub fn run_blocks(cpu: &mut Cpu, soc: &mut Soc, n: u32, pending_tick: &mut bool)
         let now = soc.periph.cycles;
         // not while a release is latched: run_fast's return must break below where it would
         // without the skip (lib.rs latches again on any later 0 -> 1 of 0x10008 bit 3)
-        if soc.loop_skip.enabled && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
+        // nor on FM1_STRICT's clock, whichever part of it is on: a probe counts an instruction as one
+        // tick (the cost model: each its own), its loads from XIP would move the flash cache and
+        // charge its misses, and a misaligned access raised in a probe that is then undone would
+        // stay raised
+        let exact = soc.xip_cache.is_none() && !soc.strict_align && !cpu.cost_model;
+        if soc.loop_skip.enabled && exact && !soc.cpu1_release && n - done >= PROBE_MIN && !soc.periph.any_pending() && soc.loop_skip.may_probe(now) {
             if soc.periph.next_due < soc.periph.cycles + PROBE_MIN as u64 {
                 soc.loop_skip.next_try = soc.periph.next_due; // too close to the next event
             } else {
@@ -676,7 +703,8 @@ pub fn released_cpu1(soc: &mut Soc, ram_size: usize) -> Option<Cpu> {
 /// where it finds a lock cpu0 holds (`Soc::waits`: cpu0's slice is next, the rest of this run
 /// forfeited, as a polling loop's) and, given `until` (what cpu0 spins on: `run_dual`), once
 /// cpu0 would get it. Returns the instructions run, `cycles` at most (a stretch may run on a
-/// little past them).
+/// little past them) and 2^20 at most: what a run that used all of those was due beyond them is
+/// counted in `Soc::core1_dropped` and not run.
 pub fn run_cpu1(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     if soc.core_paused(1) || soc.reset_due() || soc.cpu1_fault.is_some() {
         return Ok(0);
@@ -781,12 +809,19 @@ fn run_cpu1_in(c1: &mut Cpu, soc: &mut Soc, cycles: u64, probe: (u32, [u32; 16],
         if soc.cpu1_idle {
             break; // asleep (`Core1Bus::idle`)
         }
+        if std::mem::take(&mut soc.periph.core1_polls) {
+            break; // polling TIMER4, which stands still while core 1 runs
+        }
         if c1.pc == probe.0 && c1.sp == probe.2 && c1.regs == probe.1 {
             break; // polling with nothing to do
         }
         if until.is_some_and(|w| !soc.still_waits(0, w)) {
             break; // cpu0 would get what it spins on now: back to it
         }
+    }
+    // (a run that used its whole budget, cut by the cap: the rest of what it was due is not run)
+    if left == 0 {
+        soc.core1_dropped += cycles - budget;
     }
     Ok(budget - left)
 }
@@ -917,12 +952,11 @@ fn run_dual_from(
     Ok(done)
 }
 
-/// `run_cpu1`, with a fault stopping core 1 for good: the chip's core 1 faults there and stops;
-/// cpu0 goes on alone (a firmware built for a core 1 that fails falls back to one core:
-/// felucca-bsp's cpu2_fallback).
 /// `run_cpu1` for `run_dual`: a fault on core 1 halts the machine, unless the core survives
-/// (`Soc::cpu1_survives`): then it stops alone and cpu0 goes on, and the hardware lock it
-/// held is released (cpu0 would spin on `lockset` for ever, nothing to hand the machine to).
+/// (`Soc::cpu1_survives`): then it stops alone, as the chip's core 1 faults there and stops, and
+/// cpu0 goes on (a firmware built for a core 1 that fails falls back to one core: felucca-bsp's
+/// cpu2_fallback), and the hardware lock it held is released (cpu0 would spin on `lockset` for
+/// ever, nothing to hand the machine to).
 fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) -> Result<u64, String> {
     match run_cpu1(c1, soc, cycles, until) {
         Ok(k) => Ok(k),
@@ -936,6 +970,236 @@ fn run_cpu1_on(c1: &mut Cpu, soc: &mut Soc, cycles: u64, until: Option<Wait>) ->
             Ok(0)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// The FM-1's RAM: 1 MiB from `RAM_BASE`.
+pub const RAM_SIZE: usize = 1 << 20;
+/// A flash sector: what a save holds of the chip, and what `Machine::changed_sectors` compares.
+pub const SECTOR: usize = 4096;
+/// Where the boot parameters go (r0 at cpu0's entry): near the top of the FM-1's RAM, so what the
+/// CRT reads through them stays inside memory.
+pub const BOOT_PARAMS: u32 = RAM_BASE + 0x7fc00;
+
+/// How a machine is set up: what a front end chooses, from its command line, its page or its host.
+/// None of it is read from the environment here: a front end that has a variable for one of these
+/// reads it itself.
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// The CPU clock in MHz (the chip's nominal 240): the timers count its cycles.
+    pub mhz: u64,
+    /// RAM in bytes (`RAM_SIZE` on an FM-1).
+    pub ram_size: usize,
+    /// Hot code runs compiled, on cpu0 and on cpu1 once it is released (`run_dual`).
+    pub jit: bool,
+    /// A firmware waiting on a timer costs nothing to emulate (`Periph::skip_idle`).
+    pub skip_idle: bool,
+    /// cpu0 starts in user mode, as the SPL hands it over (fm1-core's `Cpu::user`); off: in supervisor
+    /// mode, the old single stack.
+    pub user: bool,
+    /// As an FM-1 is timed (fm1-live's FM1_STRICT): each instruction its measured cost (fm1_core's
+    /// op_cost8) on a clock in eighths of a cycle (the HW units' jobs too), the flash cache, misaligned
+    /// RAM accesses fault; the interpreter only, and no loop skip (it counts instructions).
+    pub strict: bool,
+    /// The LCD's transfers take their time at the SPI clock, as on an FM-1 (`Soc::lcd_timed`).
+    pub lcd_timed: bool,
+    /// Which part the FM-1's flash is.
+    pub flash_part: FlashPart,
+    /// A fault on core 1 stops that core alone and cpu0 goes on (`Soc::cpu1_survives`).
+    pub cpu1_survives: bool,
+    /// A flaky core 1 (flaky.rs): the chance that one of its RAM loads misreads, and its generator's seed.
+    pub flaky_core1: Option<(f64, u64)>,
+    /// A package boot gives the SFC the chip key, and SFCENC as the loader leaves it (`Soc::sfc_boot`):
+    /// what the chip holds below the plain window then shows decrypted through XIP. fm1-live boots
+    /// so; the page, the plugin and fm1-emu boot without, and their window shows the chip as stored.
+    /// That is how each front end has it today, not a design: the switch keeps each as it is.
+    pub sfc: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            mhz: 240,
+            ram_size: RAM_SIZE,
+            jit: false,
+            skip_idle: true,
+            user: true,
+            strict: false,
+            lcd_timed: false,
+            flash_part: FlashPart::P25q80,
+            cpu1_survives: false,
+            flaky_core1: None,
+            sfc: false,
+        }
+    }
+}
+
+/// An FM-1 as a front end runs it: the cores and the SoC, and what booting, running, halting and
+/// saving the flash keep between calls. fm1-live, the page, the plugin and fm1-emu each had these
+/// written out; here they are once, and a front end keeps around it only what is its own.
+pub struct Machine {
+    pub cpu: Cpu,
+    /// The second core, from when cpu0 releases it (`run_dual`).
+    pub cpu1: Option<Cpu>,
+    pub soc: Soc,
+    /// The package's USR area (the firmware's patch bank), if it has one, and how its board's stock
+    /// firmware lays the bank out in it (`load_syx`).
+    pub usr: Option<usize>,
+    pub usr_layout: UsrLayout,
+    /// a tick already spent on cpu0's next instruction (`run_blocks`)
+    pending_tick: bool,
+    /// why it halted, once it has
+    halt: Option<String>,
+    /// the flash chip as booted: what `changed_sectors` compares it with
+    flash0: Vec<u8>,
+}
+
+impl Machine {
+    /// The chip and cpu0 as every boot starts them: the image in the XIP window, cpu0 at `entry`
+    /// with r0 at an empty boot-parameter pair.
+    fn start(xip: Vec<u8>, entry: u32, o: &Options) -> (Cpu, Soc) {
+        let mut soc = Soc::new(o.ram_size, xip);
+        // (before the boot: the board sets the flash chip's id from it)
+        soc.set_flash_part(o.flash_part);
+        soc.periph.cycle_ticks = if o.strict { 8 } else { 1 };
+        soc.periph.hz = o.mhz * 1_000_000 * soc.periph.cycle_ticks;
+        soc.strict_align = o.strict;
+        soc.lcd_timed = o.lcd_timed;
+        if o.strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(XipCache::default());
+        }
+        soc.periph.skip_idle = o.skip_idle;
+        soc.flaky_core1 = o.flaky_core1.map(|(rate, seed)| FlakyCore1::new(rate, seed));
+        soc.cpu1_survives = o.cpu1_survives;
+        let mut cpu = Cpu::new(entry);
+        // (cpu1 follows cpu0's setting: run_dual)
+        cpu.jit_on = o.jit && !o.strict;
+        cpu.cost_model = o.strict;
+        cpu.user = o.user;
+        // The SPL enters the app with r0 -> its boot-parameter struct, whose first word points at a
+        // chip-info block (the stock app's boot_hwinfo_save copies both): an all-zero pair, until a
+        // package's boot writes the real ones there (`stock_boot`).
+        soc.write32(BOOT_PARAMS, BOOT_PARAMS + 0x40);
+        cpu.regs[0] = BOOT_PARAMS;
+        (cpu, soc)
+    }
+
+    fn booted(cpu: Cpu, soc: Soc, usr: Option<usize>, usr_layout: UsrLayout) -> Machine {
+        let flash0 = soc.flash.mem.clone();
+        Machine { cpu, cpu1: None, soc, usr, usr_layout, pending_tick: false, halt: None, flash0 }
+    }
+
+    /// A bare image mapped at the XIP base and entered at `entry`: a blank flash chip, no board
+    /// but the FM-1's, r0 at the empty boot parameters.
+    pub fn from_image(xip: Vec<u8>, entry: u32, o: &Options) -> Machine {
+        let (cpu, soc) = Self::start(xip, entry, o);
+        Self::booted(cpu, soc, None, UsrLayout::FM1)
+    }
+
+    /// A firmware from its update package (`stock_from_package`: its XIP window, its flash chip, its
+    /// board), with a DX7 bank for its patch area if one is given. Err: not a package, or not a bank.
+    pub fn from_package(pkg: &[u8], syx: Option<&[u8]>, o: &Options) -> Result<Machine, String> {
+        Ok(Self::from_stock(stock_from_package(pkg, syx)?, o))
+    }
+
+    /// The same from a package already unpacked: its board and flash chip, the SPL's boot parameters
+    /// (`stock_boot`) and, with `Options::sfc`, the SFC as the loader leaves it.
+    pub fn from_stock(st: Stock, o: &Options) -> Machine {
+        let (mut cpu, mut soc) = Self::start(st.xip, st.entry, o);
+        cpu.regs[0] = stock_boot(&mut soc, &st.flash, BOOT_PARAMS, st.board);
+        if o.sfc {
+            soc.sfc_boot(st.key, st.app_end);
+        }
+        Self::booted(cpu, soc, st.usr, st.usr_layout)
+    }
+
+    /// Run n instructions of cpu0 in blocks (`run_blocks`), and cpu1 alongside once the firmware
+    /// releases it (`run_dual`). An error is why the machine halted, for good: an instruction the
+    /// emulator cannot run, and where. It is kept (`halted`), and a halted machine runs no more:
+    /// it gives the same error again.
+    #[inline]
+    pub fn run(&mut self, n: u32) -> Result<(), String> {
+        if let Some(why) = &self.halt {
+            return Err(why.clone());
+        }
+        let jit = self.cpu.jit_on;
+        // (cpu1's compiled code counts its helper calls when cpu0's does: `Cpu::profile`)
+        if let Some(c1) = self.cpu1.as_mut() {
+            c1.profile = self.cpu.profile;
+        }
+        let Machine { cpu, cpu1, soc, pending_tick, .. } = self;
+        let ram_size = soc.ram.len();
+        let ran = run_dual(cpu1, soc, n, ram_size, jit, |soc, k| run_blocks(cpu, soc, k, pending_tick));
+        if let Err(why) = &ran {
+            self.halt = Some(why.clone());
+        }
+        ran
+    }
+
+    /// Why the machine halted, if it has.
+    pub fn halted(&self) -> Option<&str> {
+        self.halt.as_deref()
+    }
+
+    /// Halt the machine from outside, with why: a front end that caught a failure of its own around
+    /// `run` (the plugin, a panic). The first reason stays.
+    pub fn halt(&mut self, why: String) {
+        self.halt.get_or_insert(why);
+    }
+
+    /// The flash chip as booted (the package's, with what the boot laid on it).
+    pub fn flash_base(&self) -> &[u8] {
+        &self.flash0
+    }
+
+    /// The sectors of the flash chip that differ from the booted one, each with its flash offset: what
+    /// the firmware wrote (its patches, its settings) and what was put over the boot (`restore_sectors`,
+    /// `load_syx`). What a save keeps.
+    pub fn changed_sectors(&self) -> Vec<(u32, Vec<u8>)> {
+        let (now, then) = (&self.soc.flash.mem, &self.flash0);
+        (0..now.len().min(then.len()) / SECTOR)
+            .filter(|s| now[s * SECTOR..(s + 1) * SECTOR] != then[s * SECTOR..(s + 1) * SECTOR])
+            .map(|s| ((s * SECTOR) as u32, now[s * SECTOR..(s + 1) * SECTOR].to_vec()))
+            .collect()
+    }
+
+    /// Saved sectors (a run's `changed_sectors`) over the flash: each replaces its whole sector on
+    /// the chip and, as the firmware's own erases and programs do, in the XIP window
+    /// (`Soc::restore_sector`). The base stays the booted chip. All or nothing: with an offset that
+    /// is no sector's, a length that is not a sector's or a sector given twice, nothing is written.
+    pub fn restore_sectors(&mut self, sectors: &[(u32, &[u8])]) -> Result<(), String> {
+        let mut seen = [false; FLASH_SIZE / SECTOR];
+        for &(at, data) in sectors {
+            let at = at as usize;
+            if at >= FLASH_SIZE || at & (SECTOR - 1) != 0 || data.len() != SECTOR {
+                return Err("invalid flash sector offset or length".into());
+            }
+            if std::mem::replace(&mut seen[at / SECTOR], true) {
+                return Err("duplicate flash sector".into());
+            }
+        }
+        for &(at, data) in sectors {
+            self.soc.restore_sector(at as usize, data);
+        }
+        Ok(())
+    }
+
+    /// A DX7 32-voice bank into the package's patch area (slots 1-32), over the flash as it is now
+    /// (restored sectors too). Only the sectors it changes are written, as `restore_sectors` writes
+    /// them: the window keeps the installed code elsewhere, the base stays the booted chip, and the
+    /// bank is among the changed sectors. Err: this package has no patch area, or the bank is not
+    /// one; nothing is written then.
+    pub fn load_syx(&mut self, bank: &[u8]) -> Result<(), String> {
+        let usr = self.usr.ok_or("this firmware has no patch area")?;
+        let mut flash = self.soc.flash.mem.clone();
+        fwsc::usr_load_syx(&mut flash, usr, self.usr_layout, bank, 0)?;
+        for at in (0..flash.len()).step_by(SECTOR) {
+            if flash[at..at + SECTOR] != self.soc.flash.mem[at..at + SECTOR] {
+                self.soc.restore_sector(at, &flash[at..at + SECTOR]);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1013,15 +1277,21 @@ mod tests {
     #[test]
     fn code_outside_the_pc_limits_raises_the_exception() {
         // the PC limits as Dinghy's fm1_guard_enable sets them, around code that is not in them
-        // (harbor's probes from RAM on an FM-1, 2026-10-24): DBG_MSG bit 12 and the exception pend
+        // (harbor's probes from RAM on an FM-1, 2026-10-24): DBG_MSG bit 12 and the exception pend.
+        // Both windows start at 0..0x07FFFFFF (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 6), so
+        // code keeps running between the writes of window 0 and window 1, as felucca-bsp's
+        // fm1_guard_enable needs (FM1 Audio Router and DUB-BOX run from RAM through that gap)
         let code = [0x20u8, 0x00].repeat(32); // csync x 32
         let (mut cpu, mut soc) = machine(&code, &[], false);
+        assert_eq!(soc.pc_windows(), Some([(0, 0x07ff_ffff); 2]));
         soc.write32(0x1eef100, 0xf << 4); // IRQ 1 enabled, priority 7 (as fm1_irq.h)
         soc.write32(0x1eee384, XIP_BASE + 0x1000); // window 0 (low, high): past the code
         soc.write32(0x1eee380, XIP_BASE + 0x2000);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 4, &mut t).unwrap();
+        assert_eq!(soc.dbg_cause, 0, "window 1 as at power-on holds the code");
         soc.write32(0x1eee38c, RAM_BASE); // window 1: RAM
         soc.write32(0x1eee388, RAM_BASE + 0xfff);
-        let mut t = false;
         run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
         assert_ne!(soc.read32(0x1eee244) & 1 << 12, 0);
         assert!(soc.periph.exc_pending);
@@ -1067,6 +1337,35 @@ mod tests {
     }
 
     #[test]
+    fn misaligned_words_move_the_aligned_down_word() {
+        // an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, group 1): a misaligned word load gives the aligned-down word, a misaligned
+        // word store writes the whole word there; a halfword load at +1 the aligned-down halfword
+        let (_, mut soc) = machine(&[0x20, 0x00], &[], false);
+        soc.strict_align = true;
+        soc.write32(RAM_BASE + 0x100, 0x1122_3344);
+        soc.write32(RAM_BASE + 0x104, 0x5566_7788);
+        assert_eq!(soc.read32(RAM_BASE + 0x103), 0x1122_3344);
+        assert_eq!(soc.read16(RAM_BASE + 0x101), 0x3344);
+        soc.write32(RAM_BASE + 0x106, 0xa1b2_c3d4);
+        assert_eq!((soc.read32(RAM_BASE + 0x100), soc.read32(RAM_BASE + 0x104)), (0x1122_3344, 0xa1b2_c3d4));
+        assert_eq!(soc.emu_cause, 1);
+        // RAM's last word as well
+        let end = RAM_BASE + soc.ram.len() as u32 - 4;
+        soc.write32(end, 0x1122_3344);
+        assert_eq!(soc.read32(end + 1), 0x1122_3344);
+        soc.write32(end + 3, 0x5566_7788);
+        assert_eq!(soc.read32(end), 0x5566_7788);
+    }
+
+    /// Both PC limit windows to `lo..=hi`
+    fn pc_limits(soc: &mut Soc, lo: u32, hi: u32) {
+        for high in [0x1eee380, 0x1eee388] {
+            soc.write32(high + 4, lo);
+            soc.write32(high, hi);
+        }
+    }
+
+    #[test]
     fn a_chip_reset_clears_the_guards() {
         // after a watchdog or PR_PWR reset the PC limits and the causes are as at power-on: a boot
         // into code outside the old windows takes no exception
@@ -1075,8 +1374,7 @@ mod tests {
         soc.write32(0x1eef100, 0xf << 4);
         let mut t = false;
         run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap(); // (the boot state taken)
-        soc.write32(0x1eee384, XIP_BASE + 0x1000);
-        soc.write32(0x1eee380, XIP_BASE + 0x2000);
+        pc_limits(&mut soc, XIP_BASE + 0x1000, XIP_BASE + 0x2000);
         run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
         assert!(cpu.pc_win.is_some() && soc.dbg_cause != 0);
         soc.emu_cause = 1;
@@ -1084,7 +1382,7 @@ mod tests {
         run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
         assert_eq!(soc.resets, 1);
         assert_eq!((soc.dbg_cause, soc.emu_cause, soc.periph.exc_pending), (0, 0, false));
-        assert!(cpu.pc_win.is_none() && soc.pc_windows().is_none());
+        assert!(cpu.pc_win.is_none() && soc.pc_windows() == Some([(0, 0x07ff_ffff); 2]));
         run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
         assert_eq!(soc.dbg_cause, 0, "the boot runs outside the old windows: no exception");
     }
@@ -1099,8 +1397,7 @@ mod tests {
         let (mut cpu, mut soc) = machine(&code, &[], false);
         soc.write32(0x1eef100, 0xf << 4);
         soc.write32(VEC_BASE + 4, XIP_BASE + 0x80);
-        soc.write32(0x1eee384, XIP_BASE + 0x80); // window 0: the handler only
-        soc.write32(0x1eee380, XIP_BASE + 0xff);
+        pc_limits(&mut soc, XIP_BASE + 0x80, XIP_BASE + 0xff); // the handler only
         cpu.ie = true;
         cpu.sreg_store[0] |= 0x100;
         let mut taken = 0;
@@ -1115,6 +1412,37 @@ mod tests {
         assert_eq!(taken, 1, "the exception after the first instruction outside the limits");
         assert_ne!(soc.dbg_cause & 1 << 12, 0);
         assert!(!soc.periph.exc_pending, "taken once");
+    }
+
+    #[test]
+    fn the_pc_limits_trip_once_until_dbg_con_bit_18() {
+        // an FM-1 (pi32v2-isa hw/fm1-2026-11-15-excprobe, groups 6 and 8 to 11): after a trip, code outside the limits sets DBG_MSG bit 12 again but
+        // raises nothing until DBG_CON bit 18 is written (it reads back 0)
+        let code = [0x20u8, 0x00].repeat(32); // csync x 32
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        soc.write32(0x1eef100, 0xf << 4);
+        pc_limits(&mut soc, XIP_BASE + 0x1000, XIP_BASE + 0x2000);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert!(soc.periph.exc_pending, "the first trip");
+        // (the code inside the windows for a while, then the limits narrowed again)
+        let trip_again = |cpu: &mut fm1_core::Cpu, soc: &mut Soc| {
+            (soc.periph.exc_pending, soc.dbg_cause) = (false, 0);
+            cpu.pc = XIP_BASE;
+            soc.write32(0x1eee384, XIP_BASE);
+            let mut t = false;
+            run_blocks(cpu, soc, 4, &mut t).unwrap();
+            cpu.pc = XIP_BASE;
+            soc.write32(0x1eee384, XIP_BASE + 0x1000);
+            run_blocks(cpu, soc, 4, &mut t).unwrap();
+            (soc.periph.exc_pending, soc.dbg_cause & 1 << 12 != 0)
+        };
+        assert_eq!(trip_again(&mut cpu, &mut soc), (false, true), "spent: the cause only");
+        soc.write32(0x1eee344, 1 << 17);
+        assert_eq!(trip_again(&mut cpu, &mut soc), (false, true), "bit 17 alone does not re-arm");
+        soc.write32(0x1eee344, 1 << 18);
+        assert_eq!(soc.read32(0x1eee344), 0, "bit 18 reads back 0");
+        assert_eq!(trip_again(&mut cpu, &mut soc), (true, true), "re-armed");
     }
 
     #[test]
@@ -1598,13 +1926,14 @@ mod tests {
         assert_eq!(&cpu1[18..20], &testset(2));
         let regs = [(2, WORD), (3, PASSES), (6, XIP_BASE)];
         let mut last = None;
-        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0x80)], false, 8, |s, cpu, c1, soc| {
+        // (a taken byte is 0xff: testset leaves 0xff, an FM-1)
+        two_cores_in_lockstep(&cpu0, &regs, &cpu1, &[(WORD, 0xff)], false, 8, |s, cpu, c1, soc| {
             if let Some((i0, i1)) = last {
                 assert_eq!(cpu.insn_count - i0, SLICE as u64, "cpu0's instructions in slice {s}");
                 assert!(c1.insn_count - i1 >= SLICE as u64 - 64, "cpu1 ran {} instructions in slice {s}", c1.insn_count - i1);
             }
             last = Some((cpu.insn_count, c1.insn_count));
-            assert_eq!(word(soc, WORD) & 0xff, 0x80, "the byte stays taken");
+            assert_eq!(word(soc, WORD) & 0xff, 0xff, "the byte stays taken");
         });
     }
 
@@ -1817,6 +2146,29 @@ mod tests {
         assert_eq!(bus.read32(RAM_BASE), MISREAD_BIT);
         assert_eq!(bus.fetch32(RAM_BASE), 0, "an instruction fetch is right");
         assert_eq!(soc.flaky_core1.as_ref().unwrap().loads, 1);
+    }
+
+    #[test]
+    fn core_1_polling_timer4_ends_its_run() {
+        // the count stands still within core 1's run: a deadline loop on it gets nowhere before
+        // the next run, and would spin through the whole budget (Frodhes' c1_pause)
+        let mut soc = Soc::new(1 << 20, vec![0; 0x1000]);
+        soc.periph.skip_idle = true;
+        soc.write32(0x10800, 1);
+        let c = soc.periph.cycles;
+        let mut bus = Core1Bus { soc: &mut soc, budget: 1 << 20, until: None, spent: 0 };
+        bus.read32(0x10804);
+        bus.read32(0x10804);
+        assert!(bus.budget > 1, "two reads are not a poll");
+        bus.read32(0x10804);
+        assert!(bus.budget <= 1, "the run goes on polling");
+        assert_eq!(bus.soc.periph.cycles, c);
+        // the next run (the clock moved on, `run_cpu1` took the poll) starts counting again
+        assert!(std::mem::take(&mut bus.soc.periph.core1_polls));
+        bus.soc.periph.cycles += 1000;
+        bus.budget = 1 << 20;
+        bus.read32(0x10804);
+        assert!(bus.budget > 1);
     }
 
     #[test]
@@ -2062,6 +2414,355 @@ mod tests {
             run_dual(&mut a1, &mut sa, 8192, 1 << 20, false, |s, k| run_blocks(&mut a, s, k, &mut ta)).unwrap();
             run_dual(&mut b1, &mut sb, 8192, 1 << 20, false, |s, k| run_blocks(&mut b, s, k, &mut tb)).unwrap();
             assert_eq!((a.pc, a.insn_count, sa.periph.cycles), (b.pc, b.insn_count, sb.periph.cycles), "call {i}");
+        }
+    }
+
+    #[test]
+    fn a_chip_reset_clears_the_hw_units() {
+        // the FFT / vector unit, the EQ and the sample-rate converter with a job done and their
+        // registers set: after a reset they read as at power-on (JL_FFT's CON 0, not the 0x10100
+        // it reads between jobs), the EQ's RAM as the firmware left it, and their jobs still count
+        let code = [0x20u8, 0x00].repeat(32);
+        let (mut cpu, mut soc) = machine(&code, &[], false);
+        let mut t = false;
+        run_blocks(&mut cpu, &mut soc, 1, &mut t).unwrap(); // (the boot state taken)
+        let d = RAM_BASE + 0x100;
+        soc.write32(d, (64 << 16) | 2); // a 64-point real FFT
+        soc.write32(d + 4, RAM_BASE + 0x1000);
+        soc.write32(d + 8, RAM_BASE + 0x2000);
+        soc.write32(0x1ee0404, d);
+        soc.write32(0x1ee0408, 0x1234);
+        soc.write32(0x1ee0400, (1 << 8) | (1 << 6) | 1);
+        soc.write32(crate::hweq::RAM + 4, 0x3f80_0000);
+        soc.write32(crate::hweq::BASE + 0x10, RAM_BASE + 0x3000);
+        soc.write32(crate::hweq::BASE + 0x14, RAM_BASE + 0x3800);
+        soc.write32(crate::hweq::BASE, 1);
+        soc.write32(crate::hwsrc::BASE + 4, 48_000 << 16 | 44_100);
+        soc.write32(crate::hwsrc::BASE + 0x20, RAM_BASE + 0x4000);
+        soc.write32(crate::hwsrc::BASE, 8);
+        soc.periph.cycles += 1_000_000;
+        assert_eq!(soc.read32(0x1ee0400), 0x1_0180, "JL_FFT: a job done");
+        assert_eq!(soc.read32(crate::hweq::BASE), 0x8000_0000, "JL_EQ: a run done");
+        assert_eq!(soc.read32(crate::hwsrc::BASE), 0x80, "JL_SRC: a run done");
+        soc.reset_req = Some(crate::p33::P33::RST_SOFT);
+        run_blocks(&mut cpu, &mut soc, 8, &mut t).unwrap();
+        assert_eq!(soc.resets, 1);
+        assert_eq!((soc.read32(0x1ee0400), soc.read32(0x1ee0404), soc.read32(0x1ee0408)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hweq::BASE), soc.read32(crate::hweq::BASE + 0x10), soc.read32(crate::hweq::BASE + 0x14)), (0, 0, 0));
+        assert_eq!((soc.read32(crate::hwsrc::BASE), soc.read32(crate::hwsrc::BASE + 4), soc.read32(crate::hwsrc::BASE + 0x20)), (0, 0, 0));
+        assert_eq!(soc.read32(crate::hweq::RAM + 4), 0x3f80_0000, "the EQ's RAM stays, as RAM does");
+        assert_eq!((soc.hwdsp.jobs, soc.hweq.runs, soc.hwsrc.runs), (1, 1, 1));
+    }
+
+    #[test]
+    fn core_1s_time_past_a_runs_cap_is_counted() {
+        // core 1 busy (`r5 += 1; goto r6` back to it: never where it started): a run it is due more
+        // than 2^20 instructions of runs 2^20, and the rest is counted as dropped
+        let code = [&add1(5)[..], &goto_r(6)].concat();
+        let busy = |soc: &mut Soc, cycles: u64| {
+            let mut c1 = Cpu::new(XIP_BASE);
+            c1.core_id = 1;
+            c1.regs[6] = XIP_BASE;
+            let ran = run_cpu1(&mut c1, soc, cycles, None).unwrap();
+            assert_eq!(c1.regs[5] as u64, c1.insn_count.div_ceil(2), "it ran them");
+            ran
+        };
+        let (_, mut soc) = machine(&code, &[], false);
+        assert_eq!((busy(&mut soc, 1 << 20), soc.core1_dropped), (1 << 20, 0), "all of a run of 2^20");
+        assert_eq!((busy(&mut soc, (1 << 20) + 5000), soc.core1_dropped), (1 << 20, 5000));
+        assert_eq!((busy(&mut soc, 3 << 20), soc.core1_dropped), (1 << 20, 5000 + (2 << 20)), "it adds up");
+        // a core 1 on the spot (`goto -2`) ends its run where it started: it gave up the rest
+        // itself, nothing was cut
+        let (_, mut soc) = machine(&[0xf7, 0x9f], &[], false);
+        let mut c1 = Cpu::new(XIP_BASE);
+        c1.core_id = 1;
+        assert!(run_cpu1(&mut c1, &mut soc, 3 << 20, None).unwrap() < 1024);
+        assert_eq!(soc.core1_dropped, 0);
+    }
+
+    #[test]
+    fn a_probe_leaves_a_round_outside_the_pc_limits_to_the_block_loop() {
+        // a round that leaves the PC limits (XIP alone here) for code in RAM and comes back: the
+        // block loop sets the guard's cause where the block out there is entered. A probe steps,
+        // which checks no limits: it must not run such a round, let alone skip its repeats.
+        let code = [LOAD.as_slice(), &goto_r(6)].concat();
+        let both = |skip: bool| {
+            let (cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544), (6, RAM_BASE + 0x8000), (7, XIP_BASE)], skip);
+            soc.ram.load(0x8000, &[&NOP[..], &goto_r(7)].concat());
+            pc_limits(&mut soc, XIP_BASE, XIP_BASE + 0xfff);
+            (cpu, soc, false)
+        };
+        let (mut a, mut b) = (both(true), both(false));
+        for i in 0..8 {
+            let ran = [&mut a, &mut b].map(|(cpu, soc, t)| run_blocks(cpu, soc, 8192, t).unwrap());
+            assert_eq!(ran[0], ran[1], "call {i}");
+            assert_eq!((a.0.pc, a.0.insn_count, a.1.periph.cycles, a.1.dbg_cause), (b.0.pc, b.0.insn_count, b.1.periph.cycles, b.1.dbg_cause), "call {i}");
+        }
+        assert_eq!(b.1.dbg_cause, 1 << 12, "the round does leave the limits");
+        assert!(a.1.loop_skip.probes > 0 && a.1.loop_skip.hits == 0, "probed, and left alone");
+    }
+
+    #[test]
+    fn no_probe_on_the_strict_clock() {
+        // a loop a probe finds; with the flash cache, the cost model or strict alignment on
+        // (FM1_STRICT's parts) none is made, whether or not the runner switched the skip off
+        let code = [LOAD.as_slice(), &[0x60, 0xff, 0x00, 0x20, 0xfb, 0xff]].concat();
+        let probes = |set: fn(&mut Cpu, &mut Soc)| {
+            let (mut cpu, mut soc) = machine(&code, &[(1, RAM_BASE + 0x1000 + 544)], true);
+            set(&mut cpu, &mut soc);
+            let mut t = false;
+            run_blocks(&mut cpu, &mut soc, 100_000, &mut t).unwrap();
+            (soc.loop_skip.probes, soc.loop_skip.hits)
+        };
+        assert!(probes(|_, _| {}).1 > 0, "found and skipped on the plain clock");
+        assert_eq!(probes(|_, s| s.xip_cache = Some(crate::XipCache::default())), (0, 0));
+        assert_eq!(probes(|c, _| c.cost_model = true), (0, 0));
+        assert_eq!(probes(|_, s| s.strict_align = true), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+    use crate::periph::Action;
+    use crate::{Board, XIP_BASE, XIP_FLASH_OFFSET};
+
+    /// A package booted as the front ends each had it written out before `Machine` (fm1-live's
+    /// lines; the page's and the plugin's were these without the strict clock and `sfc_boot`): the
+    /// oracle for `Machine`'s boot.
+    fn by_hand(pkg: &[u8], jit: bool, strict: bool, sfc: bool) -> (Cpu, Soc) {
+        let st = stock_from_package(pkg, None).unwrap();
+        let mut soc = Soc::new(1 << 20, st.xip.clone());
+        soc.set_flash_part(FlashPart::P25q80);
+        soc.periph.cycle_ticks = if strict { 8 } else { 1 };
+        soc.periph.hz = 240 * 1_000_000 * soc.periph.cycle_ticks;
+        soc.strict_align = strict;
+        if strict {
+            soc.loop_skip.enabled = false;
+            soc.xip_cache = Some(XipCache::default());
+        }
+        soc.periph.skip_idle = true;
+        let mut cpu = Cpu::new(st.entry);
+        cpu.jit_on = jit && !strict;
+        cpu.cost_model = strict;
+        cpu.user = true;
+        let params = RAM_BASE + 0x7fc00;
+        soc.write32(params, params + 0x40);
+        cpu.regs[0] = stock_boot(&mut soc, &st.flash, params, st.board);
+        if sfc {
+            soc.sfc_boot(st.key, st.app_end);
+        }
+        (cpu, soc)
+    }
+
+    /// FM-1 SID's package (in the tree as a submodule: skipped where that is not checked out, but
+    /// not in CI, which checks it out and must not pass on nothing), booted and run through
+    /// `Machine` and by hand, with the JIT and interpreted, with the chip key and without, and on
+    /// the strict clock: the same machine after the same chunks, to the last byte of RAM and audio.
+    #[test]
+    fn a_package_boots_and_runs_as_the_recipe_written_out() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fm1-sid/web/sidplayer.fwsc");
+        let pkg = match std::fs::read(path) {
+            Ok(p) => p,
+            Err(_) if std::env::var_os("CI").is_none() => return eprintln!("no fm1-sid/web/sidplayer.fwsc: skipped"),
+            Err(e) => panic!("{path}: {e}"),
+        };
+        let flash = stock_from_package(&pkg, None).unwrap().flash;
+        // (the JIT, the strict clock, the chip key, emulated ms)
+        let runs = [(true, false, true, 600), (true, false, false, 600), (false, false, true, 600), (false, false, false, 600)];
+        for (jit, strict, sfc, ms) in runs.into_iter().chain([(false, true, true, 60)]) {
+            let what = format!("jit {jit}, strict {strict}, sfc {sfc}");
+            let mut m = Machine::from_package(&pkg, None, &Options { jit, strict, sfc, ..Options::default() }).unwrap();
+            let (mut cpu, mut soc) = by_hand(&pkg, jit, strict, sfc);
+            assert!(m.flash_base() == &flash[..] && m.changed_sectors().is_empty(), "{what}: the base is the package's chip");
+            for s in [&mut m.soc, &mut soc] {
+                let at = s.periph.cycle_of_ms(ms / 2);
+                s.periph.script.push_back((at, Action::Key { id: 12, down: true }));
+            }
+            let (mut c1, mut tick) = (None, false);
+            while soc.periph.ms() < ms {
+                m.run(20_000).unwrap();
+                let jit = cpu.jit_on;
+                run_dual(&mut c1, &mut soc, 20_000, 1 << 20, jit, |s, k| run_blocks(&mut cpu, s, k, &mut tick)).unwrap();
+            }
+            assert_eq!(m.soc.periph.cycles, soc.periph.cycles, "{what}");
+            assert_eq!((m.cpu.pc, m.cpu.regs, m.cpu.sp, m.cpu.insn_count), (cpu.pc, cpu.regs, cpu.sp, cpu.insn_count), "{what}");
+            assert_eq!((m.cpu1.is_some(), m.halted(), m.soc.resets), (c1.is_some(), None, soc.resets), "{what}");
+            assert!(m.soc.periph.audio == soc.periph.audio, "{what}: the audio");
+            assert!(strict || m.soc.periph.audio.len() > 20_000, "{what}: {} samples", m.soc.periph.audio.len());
+            assert!(m.soc.periph.keys_down[12] && soc.periph.keys_down[12], "{what}: the scripted key");
+            assert!(m.soc.flash.mem == soc.flash.mem && m.soc.xip == soc.xip, "{what}: the chip, the window");
+            assert!(m.soc.lcd.fb == soc.lcd.fb, "{what}: the screen");
+            assert!((0..1 << 20).step_by(4).all(|a| m.soc.ram.read32(a) == soc.ram.read32(a)), "{what}: RAM");
+        }
+    }
+
+    /// A machine whose chip (0xaa) and installed window (0x55) differ, as a scrambled package's
+    /// do; its app area ends at flash 0x7000.
+    fn blank(o: &Options) -> Machine {
+        let st = Stock { xip: vec![0x55; 0x80000], flash: vec![0xaa; FLASH_SIZE], entry: XIP_BASE + 0x120, board: Board::Fm1,
+                         identity: String::new(), key: 0x980f, app_end: 0x7000, usr: None, usr_layout: UsrLayout::FM1 };
+        Machine::from_stock(st, o)
+    }
+
+    #[test]
+    fn the_options_set_the_chip_and_cpu0() {
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &Options::default());
+        assert_eq!((m.soc.periph.hz, m.soc.periph.cycle_ticks, m.soc.periph.skip_idle), (240_000_000, 1, true));
+        assert!(m.cpu.user && !m.cpu.jit_on && !m.cpu.cost_model && !m.soc.strict_align && m.soc.xip_cache.is_none());
+        assert_eq!((m.cpu.pc, m.cpu.regs[0], m.soc.ram.read32(BOOT_PARAMS - RAM_BASE)), (XIP_BASE, BOOT_PARAMS, BOOT_PARAMS + 0x40));
+        assert!(m.flash_base().iter().all(|&b| b == 0xff) && m.usr.is_none() && m.cpu1.is_none() && m.halted().is_none());
+        assert_eq!((m.soc.ram.len(), m.soc.board, m.soc.flash.jedec), (RAM_SIZE, Board::Fm1, FlashPart::P25q80.jedec()));
+        // the strict clock: eighths of a cycle and the interpreter only, whatever was asked
+        let o = Options { mhz: 120, ram_size: 2 << 20, jit: true, skip_idle: false, user: false, strict: true, lcd_timed: true,
+                          flash_part: FlashPart::Uc25hq80, cpu1_survives: true, flaky_core1: Some((0.5, 7)), sfc: false };
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &o);
+        assert_eq!((m.soc.periph.hz, m.soc.periph.cycle_ticks, m.soc.periph.skip_idle), (960_000_000, 8, false));
+        assert!(!m.cpu.jit_on && m.cpu.cost_model && m.soc.strict_align && m.soc.xip_cache.is_some() && !m.soc.loop_skip.enabled);
+        assert!(!m.cpu.user && m.soc.lcd_timed && m.soc.cpu1_survives && m.soc.flaky_core1.is_some());
+        assert_eq!((m.soc.ram.len(), m.soc.flash.jedec), (2 << 20, FlashPart::Uc25hq80.jedec()));
+        let m = Machine::from_image(vec![0; 64], XIP_BASE, &Options { jit: true, ..Options::default() });
+        assert!(m.cpu.jit_on);
+        // a package's boot: its chip, the SPL's parameters in place of the empty pair
+        let m = blank(&Options::default());
+        assert!(m.flash_base().iter().all(|&b| b == 0xaa) && m.soc.flash.mem == m.flash_base());
+        assert_eq!((m.cpu.pc, m.cpu.regs[0], m.soc.ram.read32(BOOT_PARAMS - RAM_BASE)), (XIP_BASE + 0x120, BOOT_PARAMS, BOOT_PARAMS + 24));
+    }
+
+    #[test]
+    fn a_run_that_cannot_go_on_halts_with_its_reason_and_runs_no_more() {
+        let mut m = Machine::from_image(vec![0xff; 0x1000], XIP_BASE + 0x120, &Options::default()); // (no instruction)
+        let why = m.run(100).unwrap_err();
+        assert!(why.contains("UnknownInstruction") && why.contains("0x02000120"), "{why}");
+        assert_eq!(m.halted(), Some(&why[..]));
+        let was = (m.soc.periph.cycles, m.cpu.insn_count, m.cpu.pc);
+        assert_eq!(m.run(100), Err(why.clone()));
+        assert_eq!((m.soc.periph.cycles, m.cpu.insn_count, m.cpu.pc), was, "it ran no more");
+        m.halt("a panic".into());
+        assert_eq!(m.halted(), Some(&why[..]), "the first reason stays");
+        // halted from outside (a front end that caught its own failure around a run)
+        let mut m = Machine::from_image([0x20, 0x00].repeat(64), XIP_BASE, &Options::default()); // csync x 64
+        m.run(8).unwrap();
+        assert_eq!((m.cpu.insn_count, m.halted()), (8, None));
+        m.halt("the emulator failed".into());
+        assert_eq!(m.run(8), Err("the emulator failed".into()));
+        assert_eq!(m.cpu.insn_count, 8);
+    }
+
+    #[test]
+    fn a_tick_spent_on_the_next_instruction_is_carried_to_the_next_run() {
+        // cpu0 stops short where it finds a lock core 1 holds (`Soc::waits`, set by hand here); a key
+        // came due there (cycle 5), so the tick of the instruction it stopped before is spent
+        let boot = || {
+            let mut m = Machine::from_image([0x20, 0x00].repeat(64), XIP_BASE, &Options::default()); // csync x 64
+            m.soc.periph.script.push_back((5, Action::Key { id: 12, down: true }));
+            m.soc.waits[0] = Some(Wait::Lock);
+            m
+        };
+        let (mut m, mut hand, mut tick) = (boot(), boot(), false);
+        m.run(32).unwrap();
+        run_dual(&mut None, &mut hand.soc, 32, RAM_SIZE, false, |s, k| run_blocks(&mut hand.cpu, s, k, &mut tick)).unwrap();
+        assert!(m.pending_tick && tick);
+        assert_eq!((m.cpu.insn_count, m.soc.periph.cycles), (4, 5));
+        assert_eq!((hand.cpu.insn_count, hand.soc.periph.cycles), (4, 5));
+        // the next run does not tick again for its first instruction: a cycle an instruction, as before
+        (m.soc.waits[0], hand.soc.waits[0]) = (None, None);
+        m.run(8).unwrap();
+        run_dual(&mut None, &mut hand.soc, 8, RAM_SIZE, false, |s, k| run_blocks(&mut hand.cpu, s, k, &mut tick)).unwrap();
+        assert_eq!((m.cpu.insn_count, m.soc.periph.cycles, m.pending_tick), (12, 12, false));
+        assert_eq!((hand.cpu.insn_count, hand.soc.periph.cycles, tick), (12, 12, false));
+        assert!(m.soc.periph.keys_down[12]);
+    }
+
+    #[test]
+    fn a_restored_sector_replaces_its_whole_sector_in_the_window() {
+        let mut m = blank(&Options::default());
+        // one byte is not the chip's; the others are the chip's, which the window does not show
+        let mut saved = vec![0xaa; SECTOR];
+        saved[0] = 0x12;
+        m.restore_sectors(&[(0x74000, &saved)]).unwrap();
+        assert_eq!(m.soc.read32(0x0207_0000), 0xaaaa_aa12);
+        assert_eq!(m.soc.read32(0x0207_0ffc), 0xaaaa_aaaa, "also where the saved byte is the chip's");
+        assert_eq!(m.soc.read32(0x0207_1000), 0x5555_5555, "the next sector as installed");
+        assert_eq!((m.soc.flash.mem[0x74000], m.flash_base()[0x74000], m.soc.flash.revision), (0x12, 0xaa, 1));
+        // a sector that is all the chip's is written through as well, and is not a change
+        m.restore_sectors(&[(0x75000, &[0xaa; SECTOR])]).unwrap();
+        assert_eq!((m.soc.read32(0x0207_1000), m.soc.flash.revision), (0xaaaa_aaaa, 2));
+        assert_eq!(m.changed_sectors(), vec![(0x74000, saved)]);
+    }
+
+    #[test]
+    fn a_restored_sector_reads_as_the_firmwares_own_erase_and_program_left_it() {
+        let (mut live, mut restored) = (blank(&Options::default()), blank(&Options::default()));
+        // write enable, sector erase at 0x74000, write enable, page program of two bytes there
+        for cmd in [&[0x06][..], &[0x20, 0x07, 0x40, 0x00], &[0x06], &[0x02, 0x07, 0x40, 0x00, 0x12, 0x34]] {
+            live.soc.write32(0x500c0, 0); // PD0 low: chip select
+            for &b in cmd {
+                live.soc.write32(crate::spiflash::SPI0_BASE + 8, b as u32);
+            }
+            live.soc.write32(0x500c0, 1);
+        }
+        let saved = live.changed_sectors();
+        assert_eq!((saved.len(), saved[0].0, &saved[0].1[..4]), (1, 0x74000, &[0x12, 0x34, 0xff, 0xff][..]));
+        restored.restore_sectors(&[(saved[0].0, &saved[0].1)]).unwrap();
+        assert!(restored.soc.flash.mem == live.soc.flash.mem && restored.changed_sectors() == saved);
+        for a in (0x0207_0000..0x0207_2000).step_by(4) {
+            assert_eq!(restored.soc.read32(a), live.soc.read32(a), "XIP at {a:#x}");
+        }
+        assert_eq!((live.soc.read32(0x0207_0000), live.soc.read32(0x0207_1000)), (0xffff_3412, 0x5555_5555));
+    }
+
+    #[test]
+    fn an_invalid_restore_writes_nothing() {
+        let mut m = blank(&Options::default());
+        let (good, short) = (vec![0u8; SECTOR], vec![0u8; 10]);
+        // not on a sector, past the chip, not a sector long, a sector twice (after one that is fine)
+        for bad in [vec![(1, &good[..])], vec![(1 << 20, &good[..])], vec![(0, &short[..])], vec![(0x1000, &good[..]), (7, &good[..])],
+                    vec![(0, &good[..]), (0x1000, &good[..]), (0, &good[..])]] {
+            assert!(m.restore_sectors(&bad).is_err());
+            assert!(m.soc.flash.mem == m.flash_base() && m.soc.flash.revision == 0 && m.changed_sectors().is_empty());
+            assert_eq!(m.soc.read32(XIP_BASE), 0x5555_5555);
+        }
+        m.restore_sectors(&[(0, &good), (0xff000, &good)]).unwrap();
+        assert_eq!(m.changed_sectors(), vec![(0, good.clone()), (0xff000, good)]);
+    }
+
+    #[test]
+    fn a_bank_goes_over_the_flash_as_it_is_and_the_base_stays_the_booted_chip() {
+        let mut m = blank(&Options::default());
+        let bank = vec![0x23; 4096];
+        assert!(m.load_syx(&bank).is_err() && m.changed_sectors().is_empty(), "no patch area in this package");
+        m.usr = Some(0xe0000);
+        m.restore_sectors(&[(0x74000, &[0x17; SECTOR])]).unwrap();
+        let mut expected = m.soc.flash.mem.clone();
+        fwsc::usr_load_syx(&mut expected, 0xe0000, UsrLayout::FM1, &bank, 0).unwrap();
+        m.load_syx(&bank).unwrap();
+        assert!(m.soc.flash.mem == expected && expected != m.flash_base());
+        assert_eq!(m.soc.read32(XIP_BASE), 0x5555_5555, "the installed code stays in the window");
+        assert_eq!(m.soc.flash.mem[0x74000], 0x17, "over the restored flash, not in its place");
+        assert!(m.flash_base().iter().all(|&b| b == 0xaa));
+        let changed: Vec<u32> = m.changed_sectors().iter().map(|s| s.0).collect();
+        assert!(changed[0] == 0x74000 && changed.len() > 1 && changed[1..].iter().all(|&at| at >= 0xe0000), "{changed:x?}");
+        assert!(m.load_syx(&[1, 2, 3]).is_err());
+        assert!(m.soc.flash.mem == expected, "what is not a bank writes nothing");
+    }
+
+    #[test]
+    fn with_the_chip_key_a_restored_sector_of_the_app_area_shows_decrypted() {
+        // a sector as an updater stores it, scrambled for flash 0x5000 (fwsc::unscramble's cipher, its
+        // own inverse): restored there, below the app area's end (`blank`: 0x7000), and at 0x9000
+        let plain: Vec<u8> = (0..SECTOR as u32).map(|i| (i * 7 + 3) as u8).collect();
+        let mut stored = plain.clone();
+        for blk in (0..SECTOR).step_by(32) {
+            fwsc::unmask(&mut stored[blk..blk + 32], 0x980f ^ ((0x5000 + blk - XIP_FLASH_OFFSET) >> 2) as u16);
+        }
+        for sfc in [true, false] {
+            let mut m = blank(&Options { sfc, ..Options::default() });
+            assert_eq!(m.soc.read8(0x40300), if sfc { 3 } else { 0 }, "SFCENC as the loader leaves it, or as the chip starts");
+            m.restore_sectors(&[(0x5000, &stored), (0x9000, &stored)]).unwrap();
+            assert_eq!(m.soc.xip[0x1000..0x2000] == plain[..], sfc, "the app area: decrypted with the key, as stored without");
+            assert!(m.soc.xip[0x5000..0x6000] == stored[..], "past the app area: as stored");
+            assert!(m.soc.flash.mem[0x5000..0x6000] == stored[..], "the chip holds what was saved");
         }
     }
 }

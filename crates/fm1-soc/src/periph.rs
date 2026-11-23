@@ -120,16 +120,36 @@ const TMR_DIV: [u64; 16] = [1, 4, 16, 64, 2, 8, 32, 128, 256, 1024, 4096, 16384,
 /// crystal, bits 4-7 the prescaler, bit 15 pending, written bit 14 clears it), CNT (where it
 /// counts from), PRD (the count that raises the interrupt and restarts). The stock firmware
 /// runs its usr_timer engine (the 2 ms ADC scan, key scan) on TIMER1.
+/// A running timer is kept as the cycle it was armed on and counts since then, so its periods
+/// add up exactly at any CPU clock: each interrupt falls on the cycle its count is reached on,
+/// with no rounding carried from one period to the next.
 #[derive(Clone, Copy, Default)]
 struct Tmr {
     con: u32,
     prd: u32,
+    /// the count at `start` (0 after an interrupt)
     cnt0: u32,
+    /// the cycle it was armed on
     start: u64,
+    /// counts from `start` to the last interrupt (0 before the first)
+    done: u64,
+    /// counts from `start` to the next interrupt
+    due: u64,
     next: u64,
     pending: bool,
 }
 pub const VEC_BASE: u32 = 0x01C7_FE00;
+
+/// How long an eye takes in a LED, in seconds (`led_shown`). A firmware that dims a LED pulses it
+/// faster than this, and a 16 ms frame catches a varying number of the pulses: a dim LED drawn
+/// from one frame's fraction flickers. Raise it if a dim LED still flickers, lower it if a LED
+/// that blinks on the beat looks smeared.
+const LED_SEEN_S: f32 = 0.04;
+
+/// A change in a LED's lit fraction bigger than this shows at once (`led_shown`), so a button
+/// lights and goes out as it is pressed: a lit LED is on for 1 matrix column in 11 (about
+/// 0.09), while a dim LED's fraction only wobbles from frame to frame (DX747's: 0.027..0.041).
+const LED_STEP: f32 = 0.03;
 
 /// Key id at (packed row bit, physical column), -1 = none
 /// (hal/fm1_input.h FM1_KEYMAP). Ids 0..13 are buttons, 14..40 note keys
@@ -167,6 +187,14 @@ pub struct Periph {
     pub skip_idle: bool,
     /// Set by the runner while cpu0 is inside an ISR (no skipping there).
     pub in_isr: bool,
+    /// Set while core 1 loads (`Soc::core1_read32`): its polls never skip. Its run is paced by
+    /// core 0's cycles, so a skip would run the shared clock ahead of core 0.
+    pub core1_load: bool,
+    /// Core 1's TIMER4 reads in its current run (the clock stands still within one: `c1_cnt_at`);
+    /// the third sets `core1_polls`, and `run_cpu1` ends the run.
+    c1_cnt_at: u64,
+    c1_cnt_reads: u32,
+    pub core1_polls: bool,
     last_cnt_read: u64,
     /// Consecutive close TIMER4 reads outside ISRs (a poll needs 3).
     cnt_streak: u32,
@@ -262,6 +290,7 @@ pub struct Periph {
     led_pend: u64,
     led_last: u64,
     led_since: u64,
+    led_avg: [f32; 41],
     pub keys_down: [bool; 41],
     /// The keys' force (the module notes): a ramp from `from` to `to` over `dur` cycles from `t0`
     key_force: [Ramp; 41],
@@ -350,6 +379,10 @@ impl Default for Periph {
             cycle_ticks: 1,
             skip_idle: false,
             in_isr: false,
+            core1_load: false,
+            c1_cnt_at: u64::MAX,
+            c1_cnt_reads: 0,
+            core1_polls: false,
             last_cnt_read: 0,
             cnt_streak: 0,
             next_due: 0,
@@ -408,6 +441,7 @@ impl Default for Periph {
             led_pend: 0,
             led_last: 0,
             led_since: 0,
+            led_avg: [0.0; 41],
             keys_down: [false; 41],
             key_force: [Ramp::default(); 41],
             key_vel: 100,
@@ -440,7 +474,6 @@ pub struct Due {
     pub usb_frame: bool,
     /// The watchdog ran out (the SoC resets the chip).
     pub wdt: bool,
-    pub actions: Vec<Action>,
 }
 
 impl Periph {
@@ -467,11 +500,28 @@ impl Periph {
         (self.t5_prd.max(1) as u64 * self.hz / T5_HZ).max(1)
     }
 
-    /// CPU cycles per count of TIMER0..3 `i` (the crystal through the prescaler).
-    fn tmr_cycles_per_count(&self, i: usize) -> u64 {
-        TMR_DIV[((self.tmr[i].con >> 4) & 15) as usize] * self.hz / T4_HZ
+    fn tmr_div(&self, i: usize) -> u64 {
+        TMR_DIV[((self.tmr[i].con >> 4) & 15) as usize]
     }
 
+    /// The CPU cycles until TIMER0..3 `i` has counted `counts` (the crystal through the
+    /// prescaler), rounded up to the cycle the count is reached on. Multiplied out before the one
+    /// division, since at most clocks a count is not a whole number of cycles.
+    fn tmr_cycles(&self, i: usize, counts: u64) -> u64 {
+        (counts as u128 * self.tmr_div(i) as u128 * self.hz as u128).div_ceil(T4_HZ as u128) as u64
+    }
+
+    /// TIMER0..3 `i`'s count now (CNT).
+    fn tmr_count(&self, i: usize) -> u32 {
+        let t = self.tmr[i];
+        if t.next == u64::MAX {
+            return t.cnt0;
+        }
+        let counts = (self.cycles - t.start) as u128 * T4_HZ as u128 / (self.tmr_div(i) as u128 * self.hz as u128);
+        t.cnt0.wrapping_add((counts as u64 - t.done) as u32)
+    }
+
+    /// Start counting from `cnt0`, now.
     fn tmr_arm(&mut self, i: usize) {
         let t = self.tmr[i];
         if t.con & 3 == 0 || t.prd == 0 {
@@ -480,7 +530,9 @@ impl Periph {
         }
         let left = t.prd.saturating_sub(t.cnt0).max(1) as u64;
         self.tmr[i].start = self.cycles;
-        self.tmr[i].next = self.cycles + left * self.tmr_cycles_per_count(i).max(1);
+        self.tmr[i].done = 0;
+        self.tmr[i].due = left;
+        self.tmr[i].next = self.cycles + self.tmr_cycles(i, left);
     }
 
     /// The OS tick: 10 ms however the period register is scaled (os_start writes clk/100).
@@ -548,11 +600,14 @@ impl Periph {
             if self.cycles >= self.tmr[i].next {
                 self.tmr[i].pending = true;
                 self.tmr[i].cnt0 = 0;
-                let per = self.tmr[i].prd.max(1) as u64 * self.tmr_cycles_per_count(i).max(1);
-                self.tmr[i].start = self.tmr[i].next;
-                self.tmr[i].next += per;
-                if self.tmr[i].next <= self.cycles {
-                    self.tmr[i].next = self.cycles + per;
+                let t = &mut self.tmr[i];
+                t.done = t.due;
+                t.due += t.prd.max(1) as u64;
+                let next = t.start + self.tmr_cycles(i, self.tmr[i].due);
+                self.tmr[i].next = next;
+                if next <= self.cycles {
+                    // (a whole period behind: count again from now)
+                    self.tmr_arm(i);
                 }
             }
         }
@@ -615,7 +670,6 @@ impl Periph {
             }
             let (_, a) = self.script.pop_front().unwrap();
             self.apply(&a);
-            due.actions.push(a);
         }
         self.next_due = self.next_event();
         due
@@ -650,6 +704,7 @@ impl Periph {
             led_acc: old.led_acc,
             led_last: old.led_last,
             led_since: old.led_since,
+            led_avg: old.led_avg,
             keys_down: old.keys_down,
             key_force: old.key_force,
             key_vel: old.key_vel,
@@ -662,6 +717,13 @@ impl Periph {
             script: old.script,
             ..Default::default()
         };
+    }
+
+    /// Apply `a` at cycle `at`, after the actions already scheduled for that cycle.
+    pub fn schedule(&mut self, at: u64, a: Action) {
+        let i = self.script.partition_point(|(c, _)| *c <= at);
+        self.script.insert(i, (at, a));
+        self.next_due = 0;
     }
 
     pub fn apply(&mut self, a: &Action) {
@@ -735,7 +797,7 @@ impl Periph {
             u.dropped += 1;
             return None;
         }
-        let at = u.rxsadr + u.wr % len;
+        let at = u.rxsadr.wrapping_add(u.wr % len); // (a ring across the top of the address space wraps)
         u.wr = (u.wr + 1) % len;
         u.since += 1;
         if u.rxcnt != 0 && u.since >= u.rxcnt {
@@ -832,7 +894,7 @@ impl Periph {
             let nib = (icfg(n) >> ((n & 7) * 4)) & 0xf;
             if nib & 1 != 0 {
                 let prio = ((nib >> 1) & 7) as u8;
-                if best.map_or(true, |(_, p)| prio > p) {
+                if best.is_none_or(|(_, p)| prio > p) {
                     best = Some((n, prio));
                 }
             }
@@ -864,8 +926,8 @@ impl Periph {
         if self.usb_ctrl_irq {
             consider(IRQ_USB_CTRL);
         }
-        for i in 0..4 {
-            if self.tmr[i].pending {
+        for (i, t) in self.tmr.iter().enumerate() {
+            if t.pending {
                 consider(4 + i as u8);
             }
         }
@@ -882,58 +944,60 @@ impl Periph {
 
     // ---- registers ------------------------------------------------------
 
+    pub(crate) fn read_t4_count(&mut self) -> u32 {
+        if self.t4_con & 1 == 0 {
+            return 0;
+        }
+        // three reads close together outside ISRs: a polling loop.
+        // (Reads inside an ISR neither count nor trigger: a single
+        // main-loop read right after the tick ISR's own read once
+        // skipped time in ui_input and the notes went silent.)
+        if self.skip_idle && self.core1_load {
+            // a third read in one run of core 1 reads the same count: a poll that gets
+            // nowhere before its next run
+            self.c1_cnt_reads = if self.cycles == self.c1_cnt_at { self.c1_cnt_reads + 1 } else { 0 };
+            self.c1_cnt_at = self.cycles;
+            self.core1_polls |= self.c1_cnt_reads >= 2;
+        } else if self.skip_idle && !self.in_isr {
+            if self.cycles - self.last_cnt_read < 64 {
+                self.cnt_streak += 1;
+            } else {
+                self.cnt_streak = 0;
+            }
+            if self.cnt_streak >= 2 {
+                // never past the next event, and at most 20 us at a
+                // time: the loop re-checks its own deadline (an
+                // uncapped jump once crossed a whole boot delay)
+                let next = self.next_event().min(self.cycles + self.hz / 50_000);
+                if next > self.cycles + 1 {
+                    self.skipped += next - 1 - self.cycles;
+                    self.cycles = next - 1;
+                    self.next_due = 0;
+                }
+            }
+            self.last_cnt_read = self.cycles;
+        }
+        mul_div(self.cycles - self.t4_base, T4_HZ, self.hz)
+    }
+
     /// Reads handled here; `None` = plain SFR storage.
     pub fn read(&mut self, addr: u32) -> Option<u32> {
         Some(match addr {
             0x10800 => self.t4_con,
-            0x10804 => {
-                if self.t4_con & 1 == 0 {
-                    return Some(0);
-                }
-                // three reads close together outside ISRs: a polling loop.
-                // (Reads inside an ISR neither count nor trigger: a single
-                // main-loop read right after the tick ISR's own read once
-                // skipped time in ui_input and the notes went silent.)
-                if self.skip_idle && !self.in_isr {
-                    if self.cycles - self.last_cnt_read < 64 {
-                        self.cnt_streak += 1;
-                    } else {
-                        self.cnt_streak = 0;
-                    }
-                    if self.cnt_streak >= 2 {
-                        // never past the next event, and at most 20 us at a
-                        // time: the loop re-checks its own deadline (an
-                        // uncapped jump once crossed a whole boot delay)
-                        let next = self.next_event().min(self.cycles + self.hz / 50_000);
-                        if next > self.cycles + 1 {
-                            self.skipped += next - 1 - self.cycles;
-                            self.cycles = next - 1;
-                            self.next_due = 0;
-                        }
-                    }
-                    self.last_cnt_read = self.cycles;
-                }
-                mul_div(self.cycles - self.t4_base, T4_HZ, self.hz)
-            }
+            0x10804 => self.read_t4_count(),
             0x10400 | 0x10500 | 0x10600 | 0x10700 => {
                 let t = &self.tmr[((addr - 0x10400) >> 8) as usize];
                 t.con | if t.pending { 0x8000 } else { 0 }
             }
-            0x10404 | 0x10504 | 0x10604 | 0x10704 => {
-                let i = ((addr - 0x10400) >> 8) as usize;
-                let t = self.tmr[i];
-                if t.next == u64::MAX {
-                    t.cnt0
-                } else {
-                    t.cnt0 + ((self.cycles - t.start) / self.tmr_cycles_per_count(i).max(1)) as u32
-                }
-            }
+            0x10404 | 0x10504 | 0x10604 | 0x10704 => self.tmr_count(((addr - 0x10400) >> 8) as usize),
             0x10408 | 0x10508 | 0x10608 | 0x10708 => self.tmr[((addr - 0x10400) >> 8) as usize].prd,
             0x10900 => self.t5_con | if self.t5_pending { 0x8000 } else { 0 },
             0x10904 => {
                 if self.t5_con & 1 != 0 && self.t5_next != u64::MAX {
                     let period = self.t5_period();
-                    let into = period - (self.t5_next - self.cycles).min(period);
+                    // (a tick the clock has run past before it is serviced, FM1_STRICT's fetch
+                    // costs: the difference wraps to more than a period, the count has started over)
+                    let into = period - self.t5_next.wrapping_sub(self.cycles).min(period);
                     ((into * T5_HZ / self.hz) % self.t5_prd.max(1) as u64) as u32
                 } else {
                     0
@@ -1032,8 +1096,13 @@ impl Periph {
                 if v & 0x4000 != 0 {
                     self.tmr[i].pending = false;
                 }
-                self.tmr[i].con = v & !0xc000;
-                self.tmr_arm(i);
+                // (the interrupt handler's CON |= 1 << 14 changes nothing else: the count goes on.
+                // A new mode or prescaler counts on from where it is.)
+                if v & !0xc000 != self.tmr[i].con {
+                    self.tmr[i].cnt0 = self.tmr_count(i);
+                    self.tmr[i].con = v & !0xc000;
+                    self.tmr_arm(i);
+                }
             }
             0x10404 | 0x10504 | 0x10604 | 0x10704 => {
                 let i = ((addr - 0x10400) >> 8) as usize;
@@ -1042,6 +1111,7 @@ impl Periph {
             }
             0x10408 | 0x10508 | 0x10608 | 0x10708 => {
                 let i = ((addr - 0x10400) >> 8) as usize;
+                self.tmr[i].cnt0 = self.tmr_count(i);
                 self.tmr[i].prd = v;
                 self.tmr_arm(i);
             }
@@ -1228,9 +1298,9 @@ impl Periph {
             if latched & (1 << col) != 0 {
                 continue;
             }
-            for row in 1..5usize {
+            for (row, keys) in KEYMAP.iter().enumerate().take(5).skip(1) {
                 if lines & (1 << row) != 0 {
-                    let id = KEYMAP[row][col];
+                    let id = keys[col];
                     if id >= 0 {
                         self.led_acc[id as usize] += dt;
                     }
@@ -1255,6 +1325,19 @@ impl Periph {
         out
     }
 
+    /// The LEDs as an eye sees them, for a panel to draw: each LED's lit fraction since the last
+    /// call (`led_take`), averaged over about LED_SEEN_S of emulated time; a jump of more than
+    /// LED_STEP (a LED lit or put out) shows at once.
+    pub fn led_shown(&mut self) -> [f32; 41] {
+        let span = (self.cycles - self.led_since) as f32 / self.hz as f32;
+        let now = self.led_take();
+        let k = 1.0 - (-span / LED_SEEN_S).exp();
+        for (avg, now) in self.led_avg.iter_mut().zip(now) {
+            *avg = if (now - *avg).abs() > LED_STEP { now } else { *avg + k * (now - *avg) };
+        }
+        self.led_avg
+    }
+
     // ---- key matrix -----------------------------------------------------
 
     /// cpu0 executed `idle` (it sleeps until an interrupt): with `skip_idle` and nothing
@@ -1274,8 +1357,10 @@ impl Periph {
 
     /// An SPI1 transfer of `bytes` started at BAUD `baud` (the clock 60 MHz / (baud + 1): ~12 MHz at 4
     /// for the LCD, 6.67 MHz at 8 for the SMK-37's pad LEDs); with `irq` IRQ 16 at its end.
+    /// BAUD is the firmware's word, kept whole: a divider past 60 M clocks at 1 Hz, the slowest
+    /// (a clock of 0 would divide by it).
     pub fn spi1_start(&mut self, bytes: u32, baud: u32, irq: bool) {
-        let clk = 60_000_000 / (baud as u64 + 1);
+        let clk = (60_000_000 / (baud as u64 + 1)).max(1);
         let dur = (bytes.max(1) as u64 * 8 * self.hz / clk).max(1);
         self.spi1_done_at = self.cycles + dur;
         self.spi1_wire += dur;
@@ -1297,8 +1382,14 @@ impl Periph {
     pub fn spi2_start(&mut self, bytes: u32, baud: u32, irq: bool) {
         self.next_due = 0;
         if irq {
-            let clocks = bytes.max(1) as u64 * 16 * (baud as u64 + 1);
-            self.spi2_next = self.cycles + (clocks * self.hz / 48_000_000).max(1);
+            // (the count and BAUD are the firmware's words, any 32 bits: past what 64 hold, the
+            // transfer's end is never)
+            let clocks = (bytes.max(1) as u64 * 16).saturating_mul(baud as u64 + 1);
+            let dur = match clocks.checked_mul(self.hz) {
+                Some(p) => p / 48_000_000,
+                None => (clocks as u128 * self.hz as u128 / 48_000_000).min(u64::MAX as u128) as u64,
+            };
+            self.spi2_next = self.cycles.saturating_add(dur.max(1));
         }
     }
 
@@ -1349,8 +1440,7 @@ impl Periph {
         };
         let t = self.cycles;
         let mut v = 1023.0f32;
-        for col in 0..11usize {
-            let id = KEYMAP[row][col];
+        for (col, &id) in KEYMAP[row].iter().enumerate() {
             if self.sr_latched & (1 << col) == 0 && id >= 0 {
                 v = v.min(pill_reading(self.key_force[id as usize].at(t), rs));
             }
@@ -1367,8 +1457,8 @@ impl Periph {
             if self.sr_latched & (1 << col) != 0 {
                 continue; // column not selected (active low)
             }
-            for row in 0..6usize {
-                let id = KEYMAP[row][col];
+            for (row, keys) in KEYMAP.iter().enumerate() {
+                let id = keys[col];
                 if id >= 0 && self.keys_down[id as usize] {
                     rows |= 1 << row;
                 }
@@ -1592,11 +1682,72 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_keeps_the_crystals_time_at_any_cpu_clock() {
+        // TIMER1 from the 24 MHz crystal, PRD 48000: the stock firmware's 2 ms engine tick
+        for hz in [60_000_000, 80_000_000, 100_000_000, 120_000_000, 160_000_000, 200_000_000, 240_000_000] {
+            for prescaler in [0, 4, 1] {
+                let div = TMR_DIV[prescaler as usize] as u32;
+                let mut p = Periph { hz, ..Periph::default() };
+                p.write(0x10508, 48_000 / div);
+                p.write(0x10500, prescaler << 4 | 1);
+                let period = 2 * hz / 1000;
+                p.advance(period / 2);
+                assert_eq!(p.read(0x10504), Some(24_000 / div), "{hz} Hz / {div}: the count half way");
+                p.advance(period / 2 - 1);
+                assert!(!p.tmr[1].pending, "{hz} Hz / {div}: early");
+                p.advance(1);
+                assert!(p.tmr[1].pending, "{hz} Hz / {div}: on time");
+                p.tmr[1].pending = false;
+                p.advance(period);
+                assert!(p.tmr[1].pending, "{hz} Hz / {div}: the next period on time");
+            }
+        }
+    }
+
+    #[test]
+    fn a_timer_s_periods_add_up_exactly_through_late_pending_clears() {
+        // TIMER1 at one 44.1 kHz sample (PRD 544): at 100 MHz a period is 2266.67 cycles. Each
+        // interrupt is cleared 300 cycles late, as a handler does (CON |= 1 << 14), and the
+        // N-th still falls on the cycle N periods' counts are reached on, 10000 periods on.
+        let hz = 100_000_000u64;
+        let mut p = Periph { hz, ..Periph::default() };
+        p.write(0x10508, 544);
+        p.write(0x10500, 1);
+        let con = p.read(0x10500).unwrap();
+        for n in 1..=10_000u64 {
+            let want = ((n * 544) as u128 * hz as u128).div_ceil(T4_HZ as u128) as u64;
+            p.advance(want - 1 - p.cycles);
+            assert!(!p.tmr[1].pending, "interrupt {n}: early");
+            p.advance(1);
+            assert!(p.tmr[1].pending, "interrupt {n}: on cycle {want}");
+            p.advance(300);
+            assert_eq!(p.read(0x10504), Some((300 * T4_HZ / hz) as u32), "interrupt {n}: the count went on");
+            p.write(0x10500, con | 0x4000);
+            assert!(!p.tmr[1].pending);
+        }
+    }
+
+    #[test]
+    fn a_timer_counts_on_through_a_new_prescaler_or_period() {
+        let mut p = Periph { hz: 240_000_000, ..Periph::default() };
+        p.write(0x10508, 48_000);
+        p.write(0x10500, 1);
+        p.advance(240_000); // 1 ms: 24000 counts
+        assert_eq!(p.read(0x10504), Some(24_000));
+        p.write(0x10500, 4 << 4 | 1); // the prescaler /2: on from 24000, at half the rate
+        p.advance(240_000);
+        assert_eq!(p.read(0x10504), Some(36_000));
+        p.write(0x10508, 40_000); // a shorter period: 4000 counts from here (8000 crystal ticks)
+        p.advance(80_000 - 1);
+        assert!(!p.tmr[1].pending);
+        p.advance(1);
+        assert!(p.tmr[1].pending);
+    }
+
+    #[test]
     fn led_peek_reads_the_fractions_without_taking_them() {
-        let mut p = Periph::default();
         // LED 5 lit for half of the 1000 cycles since the last take
-        p.cycles = 1000;
-        p.led_last = 1000;
+        let mut p = Periph { cycles: 1000, led_last: 1000, ..Periph::default() };
         p.led_acc[5] = 500;
         assert_eq!(p.led_peek()[5], 0.5);
         assert_eq!(p.led_peek()[5], 0.5, "a peek leaves the window alone");
@@ -1604,5 +1755,310 @@ mod tests {
         p.cycles = 2000;
         p.led_last = 2000;
         assert_eq!(p.led_take()[5], 0.0, "the take did reset it");
+    }
+
+    /// LED 5 lit `lit(t0, t1)` cycles of each 16 ms frame: (its lit fraction, its `led_shown`)
+    /// for each frame once the average has settled.
+    fn led_frames(lit: impl Fn(u64, u64) -> u64) -> Vec<(f32, f32)> {
+        let mut p = Periph::default();
+        let frame = p.cycle_of_ms(16);
+        (0..2500 / 16)
+            .map(|_| {
+                p.led_acc[5] = lit(p.cycles, p.cycles + frame);
+                p.cycles += frame;
+                p.led_last = p.cycles;
+                (p.led_acc[5] as f32 / frame as f32, p.led_shown()[5])
+            })
+            .skip(500 / 16)
+            .collect()
+    }
+
+    fn swing(v: impl Iterator<Item = f32> + Clone) -> f32 {
+        v.clone().fold(0.0, f32::max) / v.fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn a_dim_led_whose_pulses_fall_unevenly_into_frames_looks_steady() {
+        // a 45 us pulse every 2.4 ms: 6 or 7 pulses in a 16 ms frame
+        let (period, width) = (CPU_HZ * 24 / 10_000, CPU_HZ * 45 / 1_000_000);
+        let f = led_frames(|t0, t1| (t1 / period - t0 / period) * width);
+        assert!(swing(f.iter().map(|x| x.0)) > 1.1, "a frame's fraction swings");
+        assert!(swing(f.iter().map(|x| x.1)) < 1.05, "led_shown holds still");
+        let mean = f.iter().map(|x| x.1).sum::<f32>() / f.len() as f32;
+        assert!((mean / (width as f32 / period as f32) - 1.0).abs() < 0.02, "at the LED's duty");
+    }
+
+    #[test]
+    fn a_led_blinking_on_the_beat_still_blinks() {
+        // lit 64 ms of each 112 ms, at the matrix's full fraction (1 column in 11)
+        let f = led_frames(|t0, t1| if t0 % (CPU_HZ * 112 / 1000) < CPU_HZ * 64 / 1000 { (t1 - t0) / 11 } else { 0 });
+        assert!(swing(f.iter().map(|x| x.1)) > 2.0, "led_shown still goes dark and bright");
+    }
+
+    #[test]
+    fn a_pressed_button_lights_and_goes_out_at_once() {
+        // dark, lit at the matrix's full fraction from 1 s, dark again from 2 s
+        let full = |t0: u64, t1: u64| (t1 - t0) / 11;
+        let f = led_frames(|t0, t1| if (CPU_HZ..2 * CPU_HZ).contains(&t0) { full(t0, t1) } else { 0 });
+        let lit = f.iter().position(|x| x.0 > 0.0).unwrap();
+        assert!(f[lit].1 > 0.08, "fully tinted in its first frame: {}", f[lit].1);
+        let dark = lit + f[lit..].iter().position(|x| x.0 == 0.0).unwrap();
+        assert_eq!(f[dark].1, 0.0, "dark in its first frame");
+    }
+
+    #[test]
+    fn spi1_takes_its_bytes_time_at_any_baud() {
+        // 2 bytes at BAUD 4 (12 MHz): 16 bits, 320 cycles of the 240 MHz clock
+        let mut p = Periph::default();
+        p.spi1_start(2, 4, true);
+        assert_eq!((p.spi1_done_at, p.spi1_irq_at), (320, 320));
+        // the slowest clock for every divider from 60 M on, as for the last one below it
+        for baud in [59_999_999, 60_000_000, 0x7fff_ffff, u32::MAX] {
+            let mut p = Periph::default();
+            p.spi1_start(1, baud, false);
+            assert_eq!(p.spi1_done_at, 8 * CPU_HZ, "BAUD {baud:#x}");
+        }
+    }
+
+    #[test]
+    fn the_firmwares_words_at_their_ends_overflow_nothing() {
+        // SPI2: 2 bytes at BAUD 0 (48 MHz / 16 a byte) end 160 cycles on; a count and a BAUD of all
+        // ones, 2^68 clocks, never
+        let mut p = Periph::default();
+        p.spi2_start(2, 0, true);
+        assert_eq!(p.spi2_next, 160);
+        p.spi2_start(u32::MAX, u32::MAX, true);
+        assert_eq!(p.spi2_next, u64::MAX);
+        p.spi2_start(u32::MAX, 0x1000, true);
+        assert_eq!(p.spi2_next, (u32::MAX as u128 * 16 * 0x1001 * CPU_HZ as u128 / 48_000_000) as u64, "past 64 bits in between only");
+        // UART1's ring across the top of the address space: its bytes wrap to 0
+        let mut p = Periph::default();
+        p.write(0x1211c, 0xffff_fffe);
+        p.write(0x12120, 2);
+        p.write(0x12100, 0x41);
+        let mut at = Vec::new();
+        for b in 0..5 {
+            p.apply(&Action::Midi { b });
+            at.extend(p.advance(CPU_HZ / 1000).uart_rx);
+        }
+        assert_eq!(at, [(0xffff_fffe, 0), (0xffff_ffff, 1), (0, 2), (1, 3), (0xffff_fffe, 4)]);
+        // TIMER5's count read with its tick overdue (the clock past it, the tick not yet taken): 0
+        let mut p = Periph::default();
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.cycles += 12_000;
+        assert_eq!(p.read(0x10904), Some(300), "half a period in");
+        p.cycles += 12_005;
+        assert_eq!(p.read(0x10904), Some(0));
+    }
+
+    /// A Periph with TIMER4 running and the idle skip on, at cycle 1000.
+    fn polled(hz: u64) -> Periph {
+        let mut p = Periph { hz, skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.write(0x10800, 1);
+        p
+    }
+
+    /// TIMER4's count read `gap` cycles after the read before: the cycles that read skipped.
+    fn poll(p: &mut Periph, gap: u64) -> u64 {
+        p.cycles += gap;
+        let (at, skipped) = (p.cycles, p.skipped);
+        p.read(0x10804).unwrap();
+        assert_eq!(p.cycles - at, p.skipped - skipped, "what the clock jumped is counted");
+        p.cycles - at
+    }
+
+    #[test]
+    fn timer4_polls_skip_from_the_third_close_read() {
+        // a delay loop on TIMER4's count: from the third read less than 64 cycles after the one
+        // before, each read jumps the clock to one cycle short of 20 us on (4800 cycles at 240
+        // MHz, 2000 at 100 MHz)
+        for (hz, cap) in [(CPU_HZ, 4800), (100_000_000, 2000)] {
+            let mut p = polled(hz);
+            assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, cap - 1, cap - 1], "{hz} Hz");
+            assert_eq!(p.next_due, 0, "and the run loop looks again");
+            // the count itself is the clock's, jumps included (24 MHz)
+            let (c, before) = (p.cycles, p.read(0x10804).unwrap());
+            assert_eq!(before as u64, (p.cycles - 1000) * 24_000_000 / hz);
+            assert_eq!(p.cycles, c + cap - 1);
+        }
+        // 63 cycles apart is close, 64 is not: reads that far apart never skip
+        let mut p = polled(CPU_HZ);
+        assert_eq!([poll(&mut p, 63), poll(&mut p, 63), poll(&mut p, 63)], [0, 0, 4799]);
+        let mut p = polled(CPU_HZ);
+        assert!((0..20).all(|_| poll(&mut p, 64) == 0));
+        // a read further off starts the count again: two more close ones before the next skip
+        let mut p = polled(CPU_HZ);
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 500), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 4799, 0, 0, 4799]);
+        // not with the skip off, nor with TIMER4 off (its count reads 0)
+        let mut p = polled(CPU_HZ);
+        p.skip_idle = false;
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0));
+        let mut p = polled(CPU_HZ);
+        p.write(0x10800, 0);
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0) && p.read(0x10804) == Some(0));
+    }
+
+    #[test]
+    fn timer4_polls_skip_to_the_next_event_and_not_in_an_isr() {
+        // an event sooner than 20 us on (a key due 1000 cycles after the third read): the clock
+        // stops one cycle short of it, the next tick is its cycle, and the key goes down there
+        let mut p = polled(CPU_HZ);
+        p.script.push_back((1030 + 1000, Action::Key { id: 5, down: true }));
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 999]);
+        assert!(!p.keys_down[5] && p.tick());
+        p.advance(0);
+        assert!(p.keys_down[5]);
+        // with the event the very next cycle, or already due, nothing is skipped
+        let mut p = polled(CPU_HZ);
+        p.script.push_back((1031, Action::Key { id: 5, down: true }));
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10), poll(&mut p, 10)], [0, 0, 0, 0]);
+        // reads in an ISR neither skip nor count as close reads: the two outside it, 20 cycles
+        // apart with the handler's between them, are the first and second
+        let mut p = polled(CPU_HZ);
+        p.in_isr = true;
+        assert!((0..20).all(|_| poll(&mut p, 10) == 0));
+        p.in_isr = false;
+        assert_eq!(poll(&mut p, 10), 0);
+        p.in_isr = true;
+        assert_eq!(poll(&mut p, 10), 0);
+        p.in_isr = false;
+        assert_eq!([poll(&mut p, 10), poll(&mut p, 10)], [0, 4799]);
+    }
+
+    #[test]
+    fn idle_skips_to_one_cycle_short_of_the_next_event() {
+        // cpu0's `idle` with nothing pending: to the cycle before TIMER5's tick (PRD 600: 24000
+        // cycles on), which then comes with the next tick
+        let mut p = Periph { skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.idle();
+        assert_eq!((p.cycles, p.skipped, p.next_due), (1000 + 24_000 - 1, 23_999, 0));
+        assert!(!p.any_pending() && p.tick());
+        p.advance(0);
+        assert!(p.any_pending() && p.pending_irq_for(0).is_none(), "the tick is pending (and not enabled)");
+        // with an interrupt source pending it wakes at once: no skip
+        let at = p.cycles;
+        p.idle();
+        assert_eq!(p.cycles, at);
+        // nor with nothing to wait for (no event at all), nor with the skip off
+        let mut p = Periph { skip_idle: true, cycles: 1000, ..Periph::default() };
+        p.idle();
+        assert_eq!((p.cycles, p.skipped), (1000, 0));
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.skip_idle = false;
+        p.idle();
+        assert_eq!((p.cycles, p.skipped), (1000, 0));
+    }
+
+    #[test]
+    fn timer5_alnk_and_the_os_tick_at_100_mhz() {
+        // their periods are whole cycles of the CPU clock, rounded down, and add up from there.
+        // At 240 MHz every one is exact (40 cycles a TIMER5 count, 5440 a frame); at 100 MHz
+        // TIMER5 is 16.67 cycles a count and a frame 2266.67:
+        let mut p = Periph { hz: 100_000_000, ..Periph::default() };
+        // TIMER5 at PRD 600 (10 kHz): 10000 cycles, exact; its count half way
+        p.write(0x10908, 600);
+        p.write(0x10900, 1);
+        p.advance(5_000);
+        assert_eq!((p.read(0x10904), p.t5_pending), (Some(300), false));
+        p.advance(4_999);
+        assert!(!p.t5_pending);
+        p.advance(1);
+        assert!(p.t5_pending);
+        // at PRD 601: 10016 cycles, not the 10016.67 of 601 counts (67 ppm short)
+        p.write(0x10900, 0x4000);
+        p.write(0x10908, 601);
+        p.write(0x10900, 0x4001);
+        for _ in 0..3 {
+            p.advance(10_015);
+            assert!(!p.t5_pending);
+            p.advance(1);
+            assert!(std::mem::take(&mut p.t5_pending));
+        }
+        p.write(0x10900, 0);
+        // the OS tick: 10 ms, 1,000,000 cycles
+        p.write(0x1eef0ec, 1);
+        p.advance(999_999);
+        assert!(!p.tick_pending);
+        p.advance(1);
+        assert!(p.tick_pending);
+        p.write(0x1eef0ec, 0x40);
+        // ALNK0 with halves of 64 frames (LEN 128 words): a half every 145066 cycles, not the
+        // 145066.67 of 64 frames (4.6 ppm short: after 3000 halves the DAC clock, which
+        // `audio_frames_at` counts exactly, is a frame behind the 192000 played)
+        p.write(0x12e1c, 0x01c1_0000);
+        p.write(0x12e20, 128);
+        p.write(0x12e00, 0x800);
+        let t0 = p.cycles;
+        for n in 0..3000u32 {
+            assert_eq!(p.advance(145_065).audio_half, None, "half {n}");
+            assert_eq!(p.advance(1).audio_half, Some((0x01c1_0000 + (n % 2) * 512, 128)), "half {n}");
+        }
+        assert_eq!(Periph::audio_frames_at(p.cycles - t0, p.hz), 3000 * 64 - 1);
+        // at 240 MHz: 348160 cycles, 64 frames to the cycle
+        let mut p = Periph::default();
+        p.write(0x12e20, 128);
+        p.write(0x12e00, 0x800);
+        for _ in 0..100 {
+            assert_eq!(p.advance(348_159).audio_half, None);
+            assert!(p.advance(1).audio_half.is_some());
+        }
+        assert_eq!(Periph::audio_frames_at(p.cycles, p.hz), 100 * 64);
+    }
+
+    #[test]
+    fn writes_that_leave_compiled_code_running_move_no_event() {
+        // the words `write` does not stop the run for (the port pins but PD0, the FM-1's ADC,
+        // TIMER4's period and TIMER5's count): with every timer, the OS tick and the audio DMA
+        // running, a write there changes neither when the next event is nor, the ADC's interrupt
+        // apart, when the run loop looks next
+        for board in [crate::Board::Fm1, crate::Board::Smk37] {
+            let mut p = Periph { board, ..Periph::default() };
+            p.write(0x10800, 1);
+            p.write(0x10908, 60_000);
+            p.write(0x10900, 1);
+            p.write(0x1eef0f4, 2_400_000);
+            p.write(0x1eef0ec, 1);
+            for i in 0..4u32 {
+                p.write(0x10408 + 0x100 * i, 50_000);
+                p.write(0x10400 + 0x100 * i, 1);
+            }
+            p.write(0x12e20, 256);
+            p.write(0x12e00, 0x800);
+            p.advance(1000);
+            let (event, due) = (p.next_event(), p.next_due);
+            assert!(event != u64::MAX && due == event);
+            let pins = (0x50000..0x50200u32).step_by(4).filter(|&a| a != 0x500c0);
+            for addr in pins.chain([0x10808, 0x10904]) {
+                for v in [0, 1, 0x1a, 0x5a5a_5a5a, !0] {
+                    p.write(addr, v);
+                    assert_eq!((p.next_event(), p.next_due), (event, due), "{board:?}: {addr:#x} = {v:#x}");
+                }
+            }
+            if board == crate::Board::Fm1 {
+                for (addr, v) in [(0x13104, !0), (0x13100, 0x50), (0x13100, 0x40), (0x13100, 0x70), (0x13100, 0x40), (0x13100, 0)] {
+                    p.write(addr, v);
+                    assert_eq!(p.next_event(), event, "{addr:#x} = {v:#x}");
+                }
+            }
+            // and the other way round, for every word `write` knows: one that moves any source's
+            // next event, or makes an interrupt pending, has the run loop look (`next_due` 0)
+            let timed = |p: &Periph| {
+                let t = [p.t5_next, p.alnk_next, p.tick_next, p.spi2_next, p.adc_next, p.spi1_irq_at, p.uart.next, p.uart.ot_next, p.usb_next, p.wdt_at];
+                (t, p.tmr.map(|t| t.next), p.any_pending())
+            };
+            let words = [0x10400..0x10920u32, 0x12100..0x12130, 0x12e00..0x12e40, 0x13100..0x13120, 0x50000..0x50200, 0x1eef000..0x1eef400];
+            for addr in words.into_iter().flatten().step_by(4) {
+                for v in [0, 1, 0x50, 0x800, 0x4001, 0x2_0003, !0, 1] {
+                    p.advance(0);
+                    let before = (timed(&p), p.next_due);
+                    p.write(addr, v);
+                    assert!(p.next_due == 0 || (timed(&p), p.next_due) == before, "{board:?}: {addr:#x} = {v:#x} moved an event unseen");
+                }
+            }
+        }
     }
 }

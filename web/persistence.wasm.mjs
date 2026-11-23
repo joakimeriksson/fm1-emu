@@ -47,12 +47,7 @@ assert.deepEqual(second.base(), first.base());
 const expectedXip = pristineXip.slice();
 for (const s of restored.sectors) {
   const from = Math.max(s.at, 0x4000), end = Math.min(s.at + 4096, 0x4000 + expectedXip.length);
-  if (from < end) {
-    // The booted raw/XIP pair defines the SFC keystream (zero in plain regions).
-    const raw = first.base();
-    for (let at = from; at < end; at++)
-      expectedXip[at-0x4000] = s.data[at-s.at] ^ raw[at] ^ pristineXip[at-0x4000];
-  }
+  if (from < end) expectedXip.set(s.data.subarray(from - s.at, end - s.at), from - 0x4000);
 }
 assert.deepEqual(new Uint8Array(second.x.memory.buffer, second.x.fm1_xip(), second.x.fm1_xip_len()), expectedXip);
 // Invalid input is rejected atomically, including duplicate sectors and late restores.

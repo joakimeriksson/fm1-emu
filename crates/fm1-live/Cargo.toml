@@ -6,14 +6,13 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-fm1-host = { path = "../fm1-host" }
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
 ab_glyph = "0.2.32"
 minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"
-rtrb = "0.3"
+fm1-map = { path = "../fm1-map" }
 
 # --exclusive: WASAPI exclusive mode
 [target.'cfg(windows)'.dependencies]
@@ -22,3 +21,9 @@ wasapi = "0.26"
 # a file picker for the firmware (started with no arguments, F4)
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rfd = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+serde_json = "1"
+sha2 = "0.10"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSApplication", "NSMenu", "NSMenuItem", "NSCell"] }

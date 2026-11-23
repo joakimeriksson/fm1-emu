@@ -5,7 +5,10 @@
 // own list, web/firmwares-own.json (hand-edited: FM-1 SID, M-VAVE's own, ... the firmwares the Hub
 // does not list). For a firmware the Hub lists, what is ours is kept (the page's description and
 // the installer link, from our own list, else from the last web/firmwares.json; a licence from our
-// own list, else the Hub's, else the last file's) and the rest comes from the Hub. The Hub's catalog changes every few hours: run this when it has.
+// own list, else the Hub's, else the last file's) and the rest comes from the Hub. The minimum
+// clock (tools/clock_floors.py) comes from the last file, for every firmware: it names the package
+// it was measured on, so it can stay when the package changes. The Hub's catalog changes every
+// few hours: run this when it has.
 //   node tools/hub_catalog.mjs [--check] [--catalog=hub.json]
 // (--check: only say whether the file is current; --catalog: the Hub's catalog from a file)
 import { readFileSync, writeFileSync } from "node:fs";
@@ -22,7 +25,7 @@ const SKIP = {
   lsdjburrito: "boots to its instructions, but makes no audio until an LSDJ song is sent to it over USB from its web page, which the emulator's page cannot do",
 };
 // first in the list (the page's default first), then by id
-const FIRST = ["mvave", "felucca", "felucca-salt"];
+const FIRST = ["mvave-v15", "mvave", "felucca", "felucca-salt"];
 
 const arg = process.argv.find((a) => a.startsWith("--catalog="));
 const hub = arg ? JSON.parse(readFileSync(arg.slice(10))) : await (await fetch(HUB + "catalog.json")).json();
@@ -30,6 +33,7 @@ const cur = JSON.parse(readFileSync(OUT));
 const ownFile = JSON.parse(readFileSync(OWN));
 const own = ownFile.firmwares;
 const old = new Map([...cur.firmwares, ...own].map((f) => [f.id, f]));
+const last = new Map(cur.firmwares.map((f) => [f.id, f]));
 
 // Our id for a Hub firmware: OURS, else the id of the entry the Hub's id was recorded on ("hub"),
 // else one of our own list's by the same id or the same name (letters and digits only, so the Hub's
@@ -118,6 +122,10 @@ for (const f of own) {
     firmwares.push(rest);
   }
 }
+for (const f of firmwares) {
+  const { minMhz, minMhzPackage } = last.get(f.id) ?? {};
+  if (minMhz) Object.assign(f, { minMhz, minMhzPackage });
+}
 const rank = (f) => (FIRST.includes(f.id) ? FIRST.indexOf(f.id) : FIRST.length);
 firmwares.sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id));
 // the page picks a firmware by its id: two of one (two Hub firmwares matched to one of ours, a
@@ -143,7 +151,9 @@ const note = "Community firmwares for the M-VAVE FM-1: the FM-1 Firmware Hub's l
   "this repository's FM-1 SID, M-VAVE's own, a few from fm1-editor.com/firmware). Generated: edit " +
   "web/firmwares-own.json (the default too), not this file. The web page fetches each package when started and " +
   "unpacks it with web/fwsc.js; tools/fetch_firmwares.mjs does the same into reference/firmwares for " +
-  "fm1-live. \"hub\": the firmware's id on the Hub (its card: thefirmwarehub.com/#fw-<hub>). \"skipped\": Hub " +
+  "fm1-live. \"hub\": the firmware's id on the Hub (its card: thefirmwarehub.com/#fw-<hub>). \"minMhz\": the " +
+  "lowest clock it plays at without running out of time, measured on the package whose SHA-256 begins with " +
+  "\"minMhzPackage\" (tools/clock_floors.py). \"skipped\": Hub " +
   "firmwares not run here, by the Hub's id, with why; the page lists the Hub's other firmwares not in this file " +
   "after these, marked as not yet run here (web/fwsc.js hubNewcomers).";
 const json = `{\n  "note": ${JSON.stringify(note)},\n  "default": ${JSON.stringify(ownFile.default ?? cur.default)},\n` +
