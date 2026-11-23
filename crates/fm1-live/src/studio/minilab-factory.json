@@ -2,9 +2,19 @@
   "name": "MiniLab factory",
   "device": "Minilab3 MIDI",
   "pass_unmapped": true,
-  "keys_mode": "midi",
+  "keys_mode": "panel",
   "notes": "Factory Arturia program: absolute sound/navigation knobs and channel-10 note pads. See context/minilab.md.",
   "bindings": [
+    {
+      "src": {
+        "ch": 1,
+        "notes": [
+          0,
+          127
+        ]
+      },
+      "to": "keys"
+    },
     {
       "src": {
         "ch": 1,

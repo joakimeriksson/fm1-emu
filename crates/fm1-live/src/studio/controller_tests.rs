@@ -54,11 +54,9 @@ fn duplicate_holds_release_only_after_every_source() {
     ));
 }
 #[test]
-fn notes_pedals_and_unmapped_faders_pass_through() {
+fn pedals_and_unmapped_faders_pass_through() {
     let mut m = mapper();
     for msg in [
-        [0x90, 60, 100],
-        [0x80, 60, 0],
         [0xb0, 64, 127],
         [0xb0, 82, 100],
         [0xb1, 71, 65],
@@ -263,4 +261,44 @@ fn factory_knobs_put_master_before_navigation() {
         feed(&mut m, &[0xb0, 93, 127]).as_slice(),
         [Out::Adc { ch: 4, value: 1023 }]
     ));
+}
+
+#[test]
+fn minilab_keyboard_uses_panel_keys_with_velocity_and_release() {
+    for profile in crate::ctl::bundled_profiles() {
+        let control = crate::ctl::Ctl::new(Some(profile), 0, true);
+        let (tx, rx) = std::sync::mpsc::channel();
+        assert!(control.feed("Minilab3 MIDI", &[0x90, 60, 87], &tx));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            fm1_soc::Action::KeyVel { vel: 87 }
+        ));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            fm1_soc::Action::Key { id: 21, down: true }
+        ));
+        assert!(control.view.lock().unwrap().down[21]);
+        assert!(rx.try_recv().is_err());
+        control.feed("Minilab3 MIDI", &[0x80, 60, 0], &tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            fm1_soc::Action::Key {
+                id: 21,
+                down: false
+            }
+        ));
+        assert!(!control.view.lock().unwrap().down[21]);
+        assert!(rx.try_recv().is_err());
+        control.feed("Minilab3 MIDI", &[0x90, 60, 100], &tx);
+        while rx.try_recv().is_ok() {}
+        control.feed("Minilab3 MIDI", &[0x90, 60, 0], &tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            fm1_soc::Action::Key {
+                id: 21,
+                down: false
+            }
+        ));
+        assert!(rx.try_recv().is_err());
+    }
 }

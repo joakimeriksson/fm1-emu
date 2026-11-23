@@ -72,3 +72,7 @@ AGENTS.md now requires the fork policy before edits. The existing CI gate checks
 ## Factory knob order
 
 Moved Master from knob 8 to knob 5, followed by Select, Presets and Algorithm on knobs 6–8. Knobs 1–4, the main encoder, fader and pad bindings retain their assignments. The change is profile data only; the relative User program is unchanged. A routing regression covers every factory knob.
+
+## MiniLab keyboard routing
+
+Both bundled MiniLab profiles now route channel-1 notes through upstream panel-key mapping instead of firmware MIDI IN, matching on-screen key actions. A host-routing regression checks C4 pitch position, velocity, note-off and zero-velocity release without duplicate MIDI delivery. Audible crackle resolution still needs confirmation on the rebuilt app with the physical controller. No synthesis or upstream mapper code changed.

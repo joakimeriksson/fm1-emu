@@ -60,7 +60,7 @@ In each pad bank, set every pad to Output CC, MIDI channel 16 (fixed, not Global
 
 Tap Shift + Pad 2 to switch A/B, then release Shift before pressing a command pad. Avoid the separate Transport Bank mode: it invokes MiniLab's local/transport functions instead of these custom pads. A normal pad press sends no musical note. Hold a pad while turning a knob or pressing another control to use firmware button combinations. SAVE and REC are the firmware's actual buttons; holding REC can clear patterns in some firmware. They do not start the emulator's WAV recorder or write to a physical FM-1.
 
-Keep the four faders on their factory CCs (82, 83, 85, 17). They pass through as musical MIDI, as do keys, pitch/modulation strips, Hold, pedal and other unmapped messages. Their effects depend on the firmware. The main encoder duplicates SELECT, Shift-turn duplicates PRESETS and click duplicates HOME. Duplicate HOME/SEL sources stay held until all matching sources are released.
+Keep the four faders on their factory CCs (82, 83, 85, 17). They pass through as musical MIDI, as do pitch/modulation strips, Hold, pedal and other unmapped messages. Their effects depend on the firmware. The main encoder duplicates SELECT, Shift-turn duplicates PRESETS and click duplicates HOME. Duplicate HOME/SEL sources stay held until all matching sources are released.
 
 ## Select the profile
 
@@ -70,6 +70,6 @@ target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3
 
 The relative User program selection is explicit and persists through firmware changes and remembered macOS launches. It is not auto-selected because factory absolute knobs are incompatible with this User program. The standard performance port filter avoids MCU/HUI, DIN and DAW ports being mapped accidentally. F1 shows bindings; right-click uses upstream MIDI learn. User-learned profiles follow upstream storage behavior.
 
-Normal notes, pedal, modulation, pitch bend and unmapped faders pass to firmware MIDI. Pads decode channel 16 before any --midi-ch remap. Relative knobs use the upstream relative-64 mode. Duplicate HOME/SCL assignments stay held until all sources release. Panic and input disconnect release mapped holds. Reconnect discovers the selected input without restarting the app. With --map auto, profile choice is still made at startup.
+Channel-1 keyboard notes use the same panel key actions as the on-screen keyboard, including velocity and release. Both bundled profiles default to panel mode: MIDI F3 (53) is the first panel key; notes outside F3–G5 fold by octaves using upstream behavior. F2 cycles the upstream keyboard modes. Pedal, modulation, pitch bend and unmapped faders pass to firmware MIDI. Pads decode channel 16 before any --midi-ch remap. Relative knobs use the upstream relative-64 mode. Duplicate HOME/SCL assignments stay held until all sources release. Panic and input disconnect release mapped holds. Reconnect discovers the selected input without restarting the app. With --map auto, profile choice is still made at startup.
 
 This fork bundles the profile only in standalone. Browser and plugin retain upstream profiles/behavior. No controller settings are uploaded by the app. Real MiniLab User-program and bank-switch acceptance remains pending.
