@@ -636,7 +636,7 @@ test("the catalog's minimum clock: the advice offers no clock under it, and only
   assert.equal(p.api.perf.lowerClock(3), 60);
 });
 
-test("a firmware boots at the catalog's minimum for its package, the clocks under it off in the picker, and the next one at the clock the user picked", async () => {
+test("a firmware boots at the catalog's minimum for its package, the clocks under it off in the picker until another is picked, and the next one at the clock the user picked", async () => {
   const p = await page(); await p.api.startAudio();
   const booted = () => p.audio.messages.filter(m => m.type === 'boot').at(-1).mhz;
   const mhz = p.elements.get('mhz'), off = () => mhz.options.filter(o => o.disabled).map(o => Number(o.value));
@@ -648,7 +648,10 @@ test("a firmware boots at the catalog's minimum for its package, the clocks unde
   assert.deepEqual(off(), [60, 80, 100, 120]);
   assert.equal(mhz.title, 'This firmware needs at least 160 MHz; 100 MHz stays picked for the others');
   assert.match(p.location.search, /mhz=100/);
-  p.api.setFirmware('b'); await p.api.boot(); await settle();
+  p.elements.get('fw').value = 'b'; p.elements.get('fw').listeners.change();
+  assert.deepEqual(off(), [], "picked in the list, before its boot");
+  assert.equal(mhz.title, '');
+  await p.api.bootQueue; await settle();
   assert.equal(booted(), 100);
   assert.equal(Number(mhz.value), 100);
   assert.deepEqual(off(), []);
@@ -657,8 +660,13 @@ test("a firmware boots at the catalog's minimum for its package, the clocks unde
   assert.equal(booted(), 240);
   assert.deepEqual(off(), [60, 80, 100, 120]);
   assert.equal(mhz.title, 'This firmware needs at least 160 MHz');
+  const open = p.elements.get('open');
+  open.files = [{ name: 'mine.fwsc', arrayBuffer: async () => new Uint8Array(960).fill(7).buffer }];
+  open.listeners.change(); await Promise.resolve(); await Promise.resolve();
+  assert.deepEqual(off(), [], "a file of one's own, before its boot");
+  await p.api.bootQueue; await settle();
   // another build of the firmware: its minimum is not known
-  p.api.setMhz(100); p.api.fw.minMhzPackage = 'ffffffffffffffff'; await p.api.boot(); await settle();
+  p.api.setFirmware('a'); p.api.setMhz(100); p.api.fw.minMhzPackage = 'ffffffffffffffff'; await p.api.boot(); await settle();
   assert.equal(booted(), 100);
   assert.deepEqual(off(), []);
 });

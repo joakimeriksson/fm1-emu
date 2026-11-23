@@ -451,7 +451,7 @@ showFirmware();
 fwSel.addEventListener("change", () => {
   fw = byId.get(fwSel.value) || localFw;
   endTryOut();
-  loadedUrl = null;
+  loadedUrl = null; floorMhz = 0;
   if (!EMBED && !fw.link) store(DEV.key + "fw", fw.id);   // a link is not kept: the next visit has the last pick
   showFirmware();
   fwSel.blur();                 // back to playing from the keyboard
@@ -476,7 +476,7 @@ async function openLocal(file) {
     fw = mv;
     fwSel.value = mv.id;
     if (!EMBED) store(DEV.key + "fw", mv.id);
-    loadedUrl = null;
+    loadedUrl = null; floorMhz = 0;
     showFirmware();
     if (node) boot();
     else status.textContent = `${file.name} ready: click Start`;
@@ -489,7 +489,7 @@ async function openLocal(file) {
   fwSel.value = "local";
   fw = localFw;
   if (!EMBED) store(DEV.key + "fw", "local");
-  loadedUrl = null;
+  loadedUrl = null; floorMhz = 0;
   showFirmware();
   if (node) boot();
   else status.textContent = `${file.name} ready: click Start`;
@@ -1449,7 +1449,7 @@ document.getElementById("import-save").addEventListener("change", action(async (
   fw = localFw; fwSel.value = "local";
   if (!EMBED) store(DEV.key + "fw", "local");
   bank = null;
-  loadedUrl = null;
+  loadedUrl = null; floorMhz = 0;
   showFirmware();
   if (node) await boot({ imported: record });
   else status.textContent = `${record.name} backup ready: click Start`;
@@ -1507,7 +1507,7 @@ document.getElementById("open-saved-version").addEventListener("click", action(a
   opt.text = `${record.name} (saved version)`;
   fw = localFw; fwSel.value = "local";
   if (!EMBED) store(DEV.key + "fw", "local");
-  bank = null; loadedUrl = null; showFirmware();
+  bank = null; loadedUrl = null; floorMhz = 0; showFirmware();
   if (node) await boot();
   else status.textContent = `${record.name} saved version ready: click Start`;
 }));
