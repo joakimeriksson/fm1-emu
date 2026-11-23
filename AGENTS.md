@@ -30,11 +30,23 @@ Add Rust to the shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"`.
 - Firmware flash saves are not CPU/RAM snapshots. No hardware writes.
 - Use the base-8 system for new UI geometry; the ported instrument artwork retains its measured proportions.
 
+## Fork scope
+
+Before editing, read context/fork-policy.md. Product changes are limited to the visual UI, standalone macOS QOL and branding, and MiniLab mapping. Keep the existing app, icon sources/exports and mandatory rebuild workflow.
+
+- Prefer upstream behavior and APIs, then profile/theme data, then a small host adapter. Keep owned code under crates/fm1-live/src/studio/.
+- Do not modify the shared engine, firmware loader, mapper, browser runtime or plugin runtime to fix a local host issue. Report compatibility gaps and propose an upstreamable fix or an explicitly authorized scope decision.
+- Do not add hosts, libraries, hardware tools, editors, frameworks or configuration without a concrete requested use. Keep upstream targets, tests, licenses and README intact.
+- Run tools/check_upstream.sh before and after changes. It compares against UPSTREAM_REVISION, including untracked files. Never edit the pin or widen the allowlist merely to make it pass.
+- New scope or an additional upstream integration file needs explicit user authorization. Honor an authorization already given; do not ask again.
+- Every PR names its allowed scope, explains any upstream-file edit, and records tests and remaining manual acceptance.
+
 ## Context
 
 | Task | Read |
 |---|---|
 | Always | context/overview.md |
+| Before any change or upstream update | context/fork-policy.md |
 | Boundaries and host integration | context/architecture.md |
 | Visual or interaction changes | context/design-system.md |
 | App icons, platform artwork and bundle branding | context/icons.md |

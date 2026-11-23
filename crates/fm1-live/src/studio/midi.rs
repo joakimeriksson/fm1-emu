@@ -47,7 +47,8 @@ pub fn connect(wanted: &str, channel: u8, tx: mpsc::Sender<Action>, control: Arc
     }
     let wanted = wanted.to_lowercase();
     result.worker = Some(std::thread::spawn(move || {
-        let mut connections = HashMap::new();
+        let mut connections: HashMap<String, (midir::MidiInputConnection<()>, String)> =
+            HashMap::new();
         while !stop.load(Ordering::Relaxed) {
             if let Ok(probe) = midir::MidiInput::new("fm1-live discovery") {
                 let ports: Vec<_> = probe
@@ -72,10 +73,10 @@ pub fn connect(wanted: &str, channel: u8, tx: mpsc::Sender<Action>, control: Arc
                     .cloned()
                     .collect();
                 for id in disconnected {
-                    if let Some((connection, mapped)) = connections.remove(&id) {
+                    if let Some((connection, name)) = connections.remove(&id) {
                         // Close first so an in-flight callback cannot re-press after cleanup.
                         drop(connection);
-                        release(&control, &tx, mapped);
+                        release(&control, &tx, control.maps(&name));
                     }
                 }
                 for (id, port, name) in ports {
@@ -88,12 +89,15 @@ pub fn connect(wanted: &str, channel: u8, tx: mpsc::Sender<Action>, control: Arc
                     input.ignore(midir::Ignore::None);
                     let mapped = control.maps(&name);
                     let (sender, mapping) = (tx.clone(), control.clone());
+                    let input_name = name.clone();
                     match input.connect(
                         &port,
                         "fm1-live in",
                         move |_, msg, _| {
-                            if mapped && !msg.is_empty() && msg[0] != 0xf0 {
-                                mapping.feed(msg, &sender);
+                            if !msg.is_empty()
+                                && msg[0] != 0xf0
+                                && mapping.feed(&input_name, msg, &sender)
+                            {
                                 return;
                             }
                             for (i, &b) in msg.iter().enumerate() {
@@ -109,8 +113,12 @@ pub fn connect(wanted: &str, channel: u8, tx: mpsc::Sender<Action>, control: Arc
                     ) {
                         Ok(connection) => {
                             eprintln!("MIDI in: {name}");
-                            control.inputs.lock().unwrap().push(name);
-                            connections.insert(id, (connection, mapped));
+                            eprintln!(
+                                "Controller mapping: {}",
+                                if mapped { "enabled" } else { "raw MIDI" }
+                            );
+                            control.inputs.lock().unwrap().push(name.clone());
+                            connections.insert(id, (connection, name));
                         }
                         Err(e) => eprintln!("MIDI in: {name}: {e}"),
                     }
@@ -131,9 +139,9 @@ mod tests {
     #[test]
     fn disconnect_releases_panel_then_sustain_and_notes() {
         let profile = fm1_map::Profile::from_json(include_str!("minilab.json")).unwrap();
-        let control = crate::ctl::Ctl::new(Some(profile), 0);
+        let control = crate::ctl::Ctl::new(Some(profile), 0, true);
         let (tx, rx) = std::sync::mpsc::channel();
-        control.feed(&[0xbf, 21, 127], &tx);
+        control.feed("Minilab3 MIDI", &[0xbf, 21, 127], &tx);
         let _ = rx.recv().unwrap();
         super::release(&control, &tx, true);
         assert!(matches!(

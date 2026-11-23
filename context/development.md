@@ -62,3 +62,7 @@ The upstream README is retained with a fork notice, and its tests/licensing rema
 ## Icon maintenance
 
 Read [the icon contract](icons.md). Keep source and generated exports together; use `python3 tools/check_icon_artwork.py` and `python3 tools/package_icons.py` to validate and export them. `npm run build:web` uses the branding wrapper; direct `web/build.sh` keeps upstream output. Verify the app and every plugin bundle (including nested CLAP copies) contain the expected ICNS/catalog bytes and icon metadata before signature checks. Windows resource build hooks and Linux window artwork are preserved, with runtime presentation unverified on those platforms.
+
+## Scope gate
+
+Read [the fork policy](fork-policy.md) before every change. `tools/check_upstream.sh` checks all changed and untracked source paths, rejects upstream-file deletion, preserves the upstream README, and enforces the shared runtime boundary. CI uses the same gate. New scope and additional upstream hooks need explicit authorization; do not loosen the check to pass a patch.

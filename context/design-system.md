@@ -19,3 +19,5 @@ Menus: File (open, close), Audio (WAV recording), Instrument (reset), View (MIDI
 Inter Tight is bundled with its SIL OFL license; there is no font download. The complete approved icon sources and platform exports are retained under assets/icons/. The standalone and every macOS plugin bundle use Assets.car plus ICNS fallback; browser exports are applied during packaging. Read [the icon contract](icons.md) before changing artwork or packaging. Do not edit compiled assets manually. Build output stays under target/.
 
 The canvas retains upstream accessibility limits. Do not claim full keyboard or screen-reader accessibility from rendering tests. Real macOS menu, display scaling and physical-controller acceptance must be recorded separately.
+
+Controller menu: Automatic, MiniLab FM-1 User and Raw MIDI. A checkmark shows the configured selection. Switching releases old mapped holds and applies live without restarting firmware; launch preferences retain the choice. Automatic uses factory-compatible MiniLab bindings on its standard performance port.

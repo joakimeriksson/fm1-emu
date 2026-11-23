@@ -1521,11 +1521,10 @@ fn pick_firmware() -> Option<std::path::PathBuf> {
 /// F4: pick another firmware package; the arguments to start again on it. The run then ends as
 /// on Esc (the emulation stopped, a WAV being recorded finished, MIDI and audio let go of) and
 /// [`restart`] starts the new one.
-fn open_another() -> Option<Vec<String>> {
+fn open_another(now: &[String]) -> Option<Vec<String>> {
     #[cfg(any(windows, target_os = "macos"))]
     if let Some(path) = pick_firmware() {
-        let now: Vec<String> = std::env::args().skip(1).collect();
-        let mut args = carried_over(&now);
+        let mut args = carried_over(now);
         args.push("--fwsc".into());
         args.push(path.to_string_lossy().into_owned());
         return Some(args);
@@ -1682,6 +1681,8 @@ fn main() {
             }
         }
     }
+    #[allow(unused_mut)]
+    let mut launch_args: Vec<String> = std::env::args().skip(1).collect();
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
         Err(e) => {
@@ -1746,9 +1747,8 @@ fn main() {
     if let Some(p) = &profile {
         eprintln!("controller: {} (F1 shows what is bound where; right-click a control to learn)", p.name);
     }
-    let mut control = ctl::Ctl::new(profile, o.midi_ch);
+    let mut control = ctl::Ctl::new(profile, o.midi_ch, o.map == "auto");
     control.log = o.midi_log;
-    control.auto = o.map == "auto";
     let control = Arc::new(control);
     let _midi = midi_inputs(&o, &tx, &control);
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
@@ -1891,7 +1891,7 @@ fn main() {
     };
     #[cfg(target_os = "macos")]
     if let Some(firmware) = &o.fwsc {
-        if let Err(e) = studio::session::remember(&std::env::args().skip(1).collect::<Vec<_>>(), firmware) {
+        if let Err(e) = studio::session::remember(&launch_args, firmware) {
             eprintln!("Launch settings not saved: {e}");
         }
     }
@@ -1928,15 +1928,15 @@ fn main() {
     let mut space_rec = false;
     eprintln!("mouse: click/drag the keys (lower = harder; drag down on a held key = aftertouch), click buttons, drag or scroll the knobs (MASTER = volume)");
     eprintln!("keys: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z/X OCT, Space PLAY, Shift+Space REC, 1..0 buttons, arrows and , . for SELECT/PRESETS/ALGORITHM; F3 records a WAV (to Music/fm1-emu); F4 another firmware; Esc quits");
-    if control.on {
+    if control.enabled() {
         eprintln!("controller: right-click a control, then move or press one of yours (MIDI learn; right-click again cancels, Delete unbinds); F1 labels, F2 keys: panel / MIDI / auto");
     }
 
     let mut firmware_shortcut = studio::shortcuts::ReleaseShortcut::default();
     #[cfg(target_os = "macos")]
-    let _menus = studio::menus::install().unwrap_or_else(|e| {
+    let menus = studio::menus::install(&o.map).unwrap_or_else(|e| {
         eprintln!("Menus unavailable: {e}");
-        Vec::new()
+        studio::menus::Menus::default()
     });
     #[cfg(target_os = "macos")]
     let mut reset = false;
@@ -1951,14 +1951,30 @@ fn main() {
 
         #[cfg(target_os = "macos")]
         match win.is_menu_pressed() {
-            Some(studio::menus::OPEN) => next = open_another(),
+            Some(studio::menus::OPEN) => next = open_another(&launch_args),
             Some(studio::menus::CLOSE) => break,
             Some(studio::menus::RECORD) => toggle_record(&recorder, &o.name),
             Some(studio::menus::LABELS) => labels = !labels,
             Some(studio::menus::RESET) => {
                 if studio::menus::confirm_reset() {
                     reset = true;
-                    next = Some(std::env::args().skip(1).collect());
+                    next = Some(launch_args.clone());
+                }
+            }
+            Some(id) if studio::menus::controller_selection(id).is_some() => {
+                let selection = studio::menus::controller_selection(id).unwrap();
+                match ctl::choose(selection, &midi_input_names(&o)) {
+                    Ok(profile) => {
+                        control.configure(profile, selection == "auto", &tx);
+                        launch_args = ctl::controller_args(&launch_args, selection);
+                        menus.select_controller(selection);
+                        if let Some(firmware) = &o.fwsc {
+                            if let Err(e) = studio::session::remember(&launch_args, firmware) {
+                                say(format!("Controller selected, not saved: {e}"), &mut note, &mut note_at);
+                            }
+                        }
+                    }
+                    Err(e) => say(e, &mut note, &mut note_at),
                 }
             }
             _ => {}
@@ -2053,7 +2069,7 @@ fn main() {
 
         // ---- MIDI learn: right-click a control, then move or press one of the controller's
         let right = win.get_mouse_down(MouseButton::Right);
-        if right && !right_was && control.on {
+        if right && !right_was && control.enabled() {
             if let Some(c) = pos.and_then(|(mx, my)| panel::hit(mx, my)) {
                 let t = ctl::target_of(c);
                 let mut mp = control.mapper.lock().unwrap();
@@ -2108,7 +2124,7 @@ fn main() {
         for k in win.get_keys_pressed(KeyRepeat::No) {
             match k {
                 Key::F1 => labels = !labels,
-                Key::F2 if control.on => {
+                Key::F2 if control.enabled() => {
                     // (mapper, then view: the order the MIDI thread takes them in)
                     let mut mp = control.mapper.lock().unwrap();
                     let mut v = control.view.lock().unwrap();
@@ -2119,7 +2135,7 @@ fn main() {
                     drop(v);
                     say(format!("keys: {}", next.name()), &mut note, &mut note_at);
                 }
-                Key::Delete | Key::Backspace if control.on => {
+                Key::Delete | Key::Backspace if control.enabled() => {
                     let mut mp = control.mapper.lock().unwrap();
                     if let Some(t) = mp.learning() {
                         let t = if matches!(t, fm1_map::Target::Key(_)) { fm1_map::Target::Keys } else { t };
@@ -2173,7 +2189,7 @@ fn main() {
             }
         }
         if firmware_shortcut.update(win.is_key_down(Key::F4)) {
-            next = open_another();
+            next = open_another(&launch_args);
         }
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
@@ -2195,7 +2211,7 @@ fn main() {
             let st = panel::State { lcd: &fb, enc_clicks: &enc_clicks, pot, down: &shown_down, leds: &lit, turning: &turning };
             panel::draw(&mut buf, &base, &st, theme);
         }
-        if labels && control.on {
+        if labels && control.enabled() {
             control.draw_labels(&mut buf);
         }
         if let Some(w) = recorder.lock().unwrap().as_ref() {
@@ -2209,7 +2225,7 @@ fn main() {
         }
         if last_title.elapsed() >= Duration::from_millis(500) {
             let mut extra = String::new();
-            if control.on {
+            if control.enabled() {
                 let mp = control.mapper.lock().unwrap();
                 extra = format!(" | {} · keys: {}", mp.profile().name, mp.keys_mode().name());
             }

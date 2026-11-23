@@ -62,3 +62,9 @@ Live testing on 2026-11-23 found and fixed three host integration problems:
 The automation connection then returned cgWindowNotFound for both the instrument and Finder, including after resetting the connection. This prevented final visual checks of the last menu-order adjustment and Shift-click holds. The instrument process was still executing its renderer. Do not turn this tool limitation into a successful visual acceptance claim. Real MiniLab controls, audible output judged by the user, firmware-owned save/reset and complete session-state recall remain unverified.
 
 Plain .area input, including the user's previous SLOOP session, is rejected by this upstream baseline. Support from the earlier fork has not been ported and remains a migration blocker for that workflow before merging. The previous launch arguments were copied to ignored target/app-acceptance/ before selecting test firmware; original firmware and SLOOP flash were not changed.
+
+## MiniLab activation fix and scope enforcement
+
+Physical input monitoring captured absolute CC74 and channel-10 note 36 from the standard MiniLab port, confirming factory-style output. Automatic mode now selects factory-compatible profile data; the relative User program remains explicitly selectable in the native Controller menu. Profile changes apply live through upstream Mapper::set_profile, release holds and persist without restarting firmware. Five new regressions cover captured messages, both factory pad banks, late connection/port exclusion, live switching and launch preference preservation. All 35 standalone tests pass. Full physical bank/program acceptance remains pending after relaunch.
+
+AGENTS.md now requires the fork policy before edits. The existing CI gate checks the full delta and untracked files against a finite allowlist, rejects upstream-file deletion and preserves the upstream README. The shared runtime remains upstream-identical.

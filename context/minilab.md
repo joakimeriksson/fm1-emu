@@ -8,6 +8,10 @@ source_refs:
 ---
 # MiniLab 3 FM-1 User program
 
+The app defaults to a factory-compatible profile on the standard MiniLab MIDI port. Factory knobs use absolute values, and channel-10 pads 36–51 map to the same button order listed below. Absolute knobs stop at their MIDI endpoints.
+
+Use Controller → Automatic for factory settings, Controller → MiniLab FM-1 User for the configured relative program, or Controller → Raw MIDI to bypass mapping. Changes apply live, release old holds, and persist through firmware changes and Finder reopening. Other MiniLab ports remain raw.
+
 The dedicated program maps physical FM-1 controls, so each firmware keeps its own page meanings and button combinations. It requires a MiniLab User program and explicit selection in the emulator. The factory profile remains available with its previous assignments; do not select FM-1 User while sending factory absolute knob values.
 
 ## Configure the controller
@@ -52,7 +56,7 @@ Keep the four faders on their factory CCs (82, 83, 85, 17). They pass through as
 target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3 MIDI" --map "MiniLab FM-1 User"
 ```
 
-Selection is explicit and persists through firmware changes and remembered macOS launches. It is not auto-selected because factory absolute knobs are incompatible with this User program. The standard performance port filter avoids MCU/HUI, DIN and DAW ports being mapped accidentally. F1 shows bindings; right-click uses upstream MIDI learn. User-learned profiles follow upstream storage behavior.
+The relative User program selection is explicit and persists through firmware changes and remembered macOS launches. It is not auto-selected because factory absolute knobs are incompatible with this User program. The standard performance port filter avoids MCU/HUI, DIN and DAW ports being mapped accidentally. F1 shows bindings; right-click uses upstream MIDI learn. User-learned profiles follow upstream storage behavior.
 
 Normal notes, pedal, modulation, pitch bend and unmapped faders pass to firmware MIDI. Pads decode channel 16 before any --midi-ch remap. Relative knobs use the upstream relative-64 mode. Duplicate HOME/SCL assignments stay held until all sources release. Panic and input disconnect release mapped holds. Reconnect discovers the selected input without restarting the app. With --map auto, profile choice is still made at startup.
 

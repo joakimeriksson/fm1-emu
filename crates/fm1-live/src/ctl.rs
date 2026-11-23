@@ -9,7 +9,11 @@
 use crate::panel::{self, ENCS};
 use fm1_map::{KeysMode, Mapper, Out, Profile, Target};
 use fm1_soc::Action;
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Mutex, atomic::{AtomicBool, Ordering}};
+
+pub const MINILAB_USER: &str = "MiniLab FM-1 User";
+pub const MINILAB_FACTORY: &str = "MiniLab factory";
+const MINILAB_DEVICE: &str = "Minilab3 MIDI";
 
 /// What happened that the window shows or acts on.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,10 +45,10 @@ pub struct Ctl {
     /// the MIDI inputs in use, for the title
     pub inputs: Mutex<Vec<String>>,
     /// false: --map none, or auto with no profile made for an input: MIDI goes to the jack as it is
-    pub on: bool,
+    on: AtomicBool,
     /// --map auto: the profile only takes the inputs it was made for (its `device` in their
     /// names); a profile chosen by name or file takes every input --midi opens
-    pub auto: bool,
+    auto: AtomicBool,
     /// --midi-ch: what passes to the jack moved to this channel (1..16; 0: as sent)
     pub midi_ch: u8,
     /// --midi-log: print each message and what it became
@@ -52,27 +56,50 @@ pub struct Ctl {
 }
 
 impl Ctl {
-    pub fn new(profile: Option<Profile>, midi_ch: u8) -> Ctl {
+    pub fn new(profile: Option<Profile>, midi_ch: u8, auto: bool) -> Ctl {
         let on = profile.is_some();
+        let scoped = auto || profile.as_ref().is_some_and(|p| p.device == MINILAB_DEVICE);
         Ctl {
             midi_ch,
             log: false,
             mapper: Mutex::new(Mapper::new(profile.unwrap_or_default())),
             view: Mutex::new(View::default()),
             inputs: Mutex::new(Vec::new()),
-            on,
-            auto: false,
+            on: AtomicBool::new(on),
+            auto: AtomicBool::new(scoped),
         }
     }
 
-    /// Whether the input named `name` goes through the profile.
-    pub fn maps(&self, name: &str) -> bool {
-        self.on && (!self.auto || fm1_map::pick_named(std::slice::from_ref(self.mapper.lock().unwrap().profile()), name).is_some())
+    pub fn enabled(&self) -> bool {
+        self.on.load(Ordering::Relaxed)
     }
 
-    /// One message from a MIDI input (the lock order: mapper, then view).
-    pub fn feed(&self, msg: &[u8], tx: &mpsc::Sender<Action>) {
+    fn maps_profile(&self, mapper: &Mapper, name: &str) -> bool {
+        self.enabled() && (!self.auto.load(Ordering::Relaxed) ||
+            fm1_map::pick_named(std::slice::from_ref(mapper.profile()), name).is_some())
+    }
+
+    pub fn maps(&self, name: &str) -> bool {
+        self.maps_profile(&self.mapper.lock().unwrap(), name)
+    }
+
+    /// Switch routing without restarting firmware; release the old profile's holds first.
+    pub fn configure(&self, profile: Option<Profile>, auto: bool, tx: &mpsc::Sender<Action>) {
+        let on = profile.is_some();
+        let scoped = auto || profile.as_ref().is_some_and(|p| p.device == MINILAB_DEVICE);
+        let mut mapper = self.mapper.lock().unwrap();
+        let mut view = self.view.lock().unwrap();
+        mapper.set_profile(profile.unwrap_or_default(), &mut |out| apply(out, tx, &mut view, self.midi_ch));
+        mapper.learn(None);
+        view.events.clear();
+        self.auto.store(scoped, Ordering::Relaxed);
+        self.on.store(on, Ordering::Relaxed);
+    }
+
+    /// Check the current port/profile and decode under the same lock as live profile changes.
+    pub fn feed(&self, input: &str, msg: &[u8], tx: &mpsc::Sender<Action>) -> bool {
         let mut m = self.mapper.lock().unwrap();
+        if !self.maps_profile(&m, input) { return false; }
         let mut v = self.view.lock().unwrap();
         let ch = self.midi_ch;
         if msg.len() == 3 && msg[0] & 0xf0 == 0xb0 && matches!(msg[1], 120 | 123) {
@@ -80,7 +107,7 @@ impl Ctl {
         }
         if !self.log {
             m.feed(msg, &mut |o| apply(o, tx, &mut v, ch));
-            return;
+            return true;
         }
         let mut outs = Vec::new();
         m.feed(msg, &mut |o| {
@@ -92,6 +119,7 @@ impl Ctl {
             let what = if outs.is_empty() { "(dropped)".to_string() } else { outs.join(", ") };
             eprintln!("midi in {:<9} {:<22} -> {what}", bytes.join(" "), name_of(msg));
         }
+            true
     }
 
     /// The labels overlay, with the profile as it is now.
@@ -156,10 +184,12 @@ pub fn choose(want: &str, inputs: &[String]) -> Result<Option<Profile>, String> 
     if want == "none" {
         return Ok(None);
     }
-    let (mut all, errs) = fm1_map::all_profiles();
-    let bundled = Profile::from_json(include_str!("studio/minilab.json"))?;
-    if !all.iter().any(|p| p.name == bundled.name) {
-        all.push(bundled);
+    let (user, errs) = fm1_map::all_profiles();
+    let mut all = bundled_profiles();
+    for profile in user {
+        if let Some(existing) = all.iter_mut().find(|p| p.name == profile.name) {
+            *existing = profile;
+        } else { all.push(profile); }
     }
     for e in errs {
         eprintln!("controller profile: {e}");
@@ -168,13 +198,37 @@ pub fn choose(want: &str, inputs: &[String]) -> Result<Option<Profile>, String> 
         let s = std::fs::read_to_string(want).map_err(|e| format!("{want}: {e}"))?;
         return Profile::from_json(&s).map(Some).map_err(|e| format!("{want}: {e}"));
     }
+    choose_from(want, inputs, &all)
+}
+
+pub fn bundled_profiles() -> Vec<Profile> {
+    [include_str!("studio/minilab-factory.json"), include_str!("studio/minilab.json")]
+        .iter().map(|data| Profile::from_json(data).expect("bundled controller profile")).collect()
+}
+
+pub fn choose_from(want: &str, inputs: &[String], all: &[Profile]) -> Result<Option<Profile>, String> {
+    if want == "none" { return Ok(None); }
     if want != "auto" {
         return all.iter().find(|p| p.name.eq_ignore_ascii_case(want)).cloned().map(Some)
             .ok_or_else(|| format!("no controller profile {want:?} (have: {})", all.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
     }
-    // the first input with a profile made for it; else none (not the generic profile: a keyboard
-    // or a DAW's port plays the firmware's MIDI IN as it always has)
-    Ok(inputs.iter().find_map(|i| fm1_map::pick_named(&all, i)).cloned())
+    // The relative User program needs explicit selection; factory bindings match Finder defaults.
+    let automatic: Vec<_> = all.iter().filter(|p| !p.name.starts_with(MINILAB_USER)).cloned().collect();
+    Ok(inputs.iter().find_map(|input| fm1_map::pick_named(&automatic, input)).cloned()
+        .or_else(|| automatic.iter().find(|p| p.name == MINILAB_FACTORY).cloned()))
+}
+
+/// Replace a launch preference while preserving firmware, flash and input-port arguments.
+pub fn controller_args(args: &[String], selection: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--map" { i += 2; continue; }
+        result.push(args[i].clone());
+        i += 1;
+    }
+    result.extend(["--map".into(), selection.into()]);
+    result
 }
 
 /// A message, for people: "note on ch1 C3 (48) vel 90".
