@@ -1573,8 +1573,9 @@ impl Cpu {
         let sets = line.fast.is_some_and(|f| f.sets_flags());
         let s = x.pre.syntax;
         Some(FlagUse {
-            reads: reads_psr_flags(&insn),
+            reads: flags_read(insn.entry.syntax),
             writes: sets || (line.fast.is_none() && writes_psr_flags(s)),
+            all: writes_psr_flags(s),
             dropped: sets && !line.careful && line.fast.is_some_and(jit_drops_flags),
             psr_push: s.starts_with("[--sp] = {psr"),
             psr_pop: s.starts_with("{psr") && s.ends_with("= [sp++]"),
@@ -7136,20 +7137,36 @@ const FLAG_VISITS: usize = 4 * FLAG_SCAN;
 /// Does this instruction read the psr flags: a carry add or subtract, a psr read or push, `ifeq` /
 /// `ifne` (`flags_read_later`'s readers)?
 fn reads_psr_flags(i: &Instruction) -> bool {
-    let s = i.entry.syntax;
-    s.contains("+ c") || s.contains("- !c") || s.contains("= psr") || s.contains("psr,") || s.contains("{psr")
-        || s.starts_with("ifeq") || s.starts_with("ifne")
+    flags_read(i.entry.syntax) != 0
+}
+
+/// The psr flags an instruction of this form reads: a carry add or subtract C, `ifeq` / `ifne` Z, a
+/// psr read or push all four; 0: none.
+fn flags_read(s: &str) -> u32 {
+    if s.contains("+ c") || s.contains("- !c") {
+        F_C
+    } else if s.starts_with("ifeq") || s.starts_with("ifne") {
+        F_Z
+    } else if s.contains("= psr") || s.contains("psr,") || s.contains("{psr") {
+        F_N | F_Z | F_C | F_V
+    } else {
+        0
+    }
 }
 
 /// What an instruction does with the psr flags as the block path runs it (`Cpu::flag_audit`).
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
 pub struct FlagUse {
-    /// it reads them (`flags_read_later`'s readers)
-    pub reads: bool,
+    /// the ones it reads, as psr bits (`flags_read`); 0: none
+    pub reads: u32,
     /// it writes them: a micro-op that `Fast::sets_flags`, or an instruction without one that does
     /// (`writes_psr_flags`)
     pub writes: bool,
+    /// it writes all four whatever they were (`writes_psr_flags`: an add or subtract, `testset`, a
+    /// write of psr). The other writers leave some as they were: the logic forms C and V, a shift V,
+    /// and C too when its count is 0.
+    pub all: bool,
     /// it is a micro-op that writes them, off the careful path (no `flags_live`), and one a JIT
     /// compiles inline without them (`jit_drops_flags`): compiled code leaves the flags as they were
     pub dropped: bool,

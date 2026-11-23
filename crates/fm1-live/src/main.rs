@@ -320,29 +320,36 @@ struct Machine {
     flag_audit: Option<FlagAudit>,
 }
 
-/// FM1_FLAG_AUDIT: while the reference loop steps cpu0, every instruction that reads the psr flags is
-/// matched with the instruction they came from. Compiled code runs some flag-writing micro-ops off the
-/// careful path without their flags (`flags_read_later` found no reader within its window), so a read
-/// whose flags came from one of those would see stale flags there: `stale` lists them. A psr push and
-/// its pop carry the flags' origin across (an interrupt's prologue and epilogue, a context switch): a
-/// read after the pop counts against the instruction that wrote them before the push. Also the reads
-/// by distance from their writer, and the `ifeq` / `ifne` whose flags did not come from the
-/// instruction just before.
+/// FM1_FLAG_AUDIT: while the reference loop steps cpu0, every instruction that reads psr flags is
+/// matched, flag by flag, with the instruction each one came from. Compiled code runs some flag-writing
+/// micro-ops off the careful path without their flags (`flags_read_later` found no reader within its
+/// window), so a read of a flag that came from one of those would see a stale one there: `stale` lists
+/// them. A flag comes from the last instruction that changed it or that writes all four (an add or
+/// subtract, `testset`, a write of psr): one that writes only some (a logic form N and Z; a shift C too,
+/// unless its count is 0) and left a flag at the value it had is passed over, so a carry read after
+/// `add; and; ...; + c` counts against the add however far back it is. That errs to the listed side: a
+/// shift that wrote the carry it already held leaves it with the writer before. A psr push and its pop
+/// carry the origins across (an interrupt's prologue and epilogue, a context switch): a read after the
+/// pop counts against the instructions that wrote the flags before the push. Also the reads by distance
+/// from their writer (the farthest of the flags read), and the `ifeq` / `ifne` whose Z did not come from
+/// the instruction just before.
 #[derive(Default)]
 struct FlagAudit {
-    /// the flags' origin: writer pc, compiled without its flags, syntax; instructions since
-    last: Option<(u32, bool, &'static str)>,
-    since: u64,
-    /// the origin a psr push saved, by the sp it left
-    saved: std::collections::HashMap<u32, (Option<(u32, bool, &'static str)>, u64)>,
+    /// each flag's origin (psr bits 0..3: V, C, Z, N): writer pc, compiled without its flags, syntax;
+    /// instructions since
+    last: [Option<(u32, bool, &'static str)>; 4],
+    since: [u64; 4],
+    /// the origins a psr push saved, by the sp it left
+    #[allow(clippy::type_complexity)]
+    saved: std::collections::HashMap<u32, ([Option<(u32, bool, &'static str)>; 4], [u64; 4])>,
     /// what each pc does with the flags (`Cpu::flag_audit`)
     uses: std::collections::HashMap<u32, Option<fm1_core::FlagUse>>,
     steps: u64,
     reads: u64,
     /// reads by distance from their writer: 1, 2..8, 9..32, 33..256, more
     dist: [u64; 5],
-    /// (writer pc, reader pc) -> (reads, farthest, writer syntax, reader syntax)
-    stale: std::collections::BTreeMap<(u32, u32), (u64, u64, &'static str, &'static str)>,
+    /// (writer pc, reader pc, flag) -> (reads, farthest, writer syntax, reader syntax)
+    stale: std::collections::BTreeMap<(u32, u32, char), (u64, u64, &'static str, &'static str)>,
     /// `ifeq` / `ifne`: right after their writer; else (writer syntax, distance) -> reads
     if_next: u64,
     if_other: std::collections::BTreeMap<(&'static str, u64), u64>,
@@ -355,7 +362,7 @@ impl FlagAudit {
 
     fn step(&mut self, pc: u32, u: Option<fm1_core::FlagUse>, flags: (u32, u32), sp: (u32, u32)) {
         self.steps += 1;
-        self.since += 1;
+        self.since.iter_mut().for_each(|s| *s += 1);
         let Some(u) = u else { return };
         if u.psr_push {
             self.saved.insert(sp.1, (self.last, self.since));
@@ -367,35 +374,40 @@ impl FlagAudit {
             }
             return;
         }
-        if u.reads {
+        if u.reads != 0 {
             self.reads += 1;
-            let k = match self.since { 0..=1 => 0, 2..=8 => 1, 9..=32 => 2, 33..=256 => 3, _ => 4 };
-            self.dist[k] += 1;
-            if let Some((w, dropped, ws)) = self.last {
+            let read = (0..4).filter(|b| u.reads >> b & 1 != 0);
+            let far = read.clone().map(|b| self.since[b]).max().unwrap_or(0);
+            self.dist[match far { 0..=1 => 0, 2..=8 => 1, 9..=32 => 2, 33..=256 => 3, _ => 4 }] += 1;
+            for b in read {
+                let Some((w, dropped, ws)) = self.last[b] else { continue };
                 if dropped {
-                    let e = self.stale.entry((w, pc)).or_insert((0, 0, ws, u.syntax));
+                    let e = self.stale.entry((w, pc, ['V', 'C', 'Z', 'N'][b])).or_insert((0, 0, ws, u.syntax));
                     e.0 += 1;
-                    e.1 = e.1.max(self.since);
+                    e.1 = e.1.max(self.since[b]);
                 }
                 if u.syntax.starts_with("ifeq") || u.syntax.starts_with("ifne") {
-                    if self.since == 1 {
+                    if self.since[b] == 1 {
                         self.if_next += 1;
                     } else {
-                        *self.if_other.entry((ws, self.since.min(1000))).or_insert(0) += 1;
+                        *self.if_other.entry((ws, self.since[b].min(1000))).or_insert(0) += 1;
                     }
                 }
             }
         }
-        // (a write of the value the flags held shows only when the form says it writes them)
-        if u.writes || flags.0 & 15 != flags.1 & 15 {
-            self.last = Some((pc, u.dropped, u.syntax));
-            self.since = 0;
+        // (a writer of some flags is the origin of those it changed: a write of the value a flag held
+        // shows only for the forms that write all four)
+        for b in 0..4 {
+            if (u.writes && u.all) || (flags.0 ^ flags.1) >> b & 1 != 0 {
+                self.last[b] = Some((pc, u.dropped, u.syntax));
+                self.since[b] = 0;
+            }
         }
     }
 
     fn report(&self) -> String {
-        let stale: Vec<String> = self.stale.iter().map(|((w, r), (n, far, ws, rs))| {
-            format!("{{\"writer\": \"{w:#010x}\", \"reader\": \"{r:#010x}\", \"reads\": {n}, \"farthest\": {far}, \"writer_syntax\": {ws:?}, \"reader_syntax\": {rs:?}}}")
+        let stale: Vec<String> = self.stale.iter().map(|((w, r, flag), (n, far, ws, rs))| {
+            format!("{{\"writer\": \"{w:#010x}\", \"reader\": \"{r:#010x}\", \"flag\": \"{flag}\", \"reads\": {n}, \"farthest\": {far}, \"writer_syntax\": {ws:?}, \"reader_syntax\": {rs:?}}}")
         }).collect();
         let other: Vec<String> = self.if_other.iter().map(|((ws, d), n)| {
             format!("{{\"writer_syntax\": {ws:?}, \"distance\": {d}, \"reads\": {n}}}")
