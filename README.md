@@ -1,4 +1,4 @@
-> **FM-1 Studio standalone fork**: native Mac panel styling, app menus, session recall, and a MiniLab User profile. See [fork development](context/development.md) for builds, scope, and upstream updates, and [MiniLab setup](context/minilab.md) for controller configuration. The upstream README follows unchanged.
+> **FM-1 Studio standalone fork**: native Mac panel styling, app menus, session recall, and a MiniLab User profile. See [fork development](context/development.md) for builds, scope, and upstream updates, and [MiniLab setup](context/minilab.md) for controller configuration. Rebuild all local targets after changes using that checklist; keep plugin installation disabled. The upstream README follows unchanged.
 
 # FM-1 emulator
 

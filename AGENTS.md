@@ -41,4 +41,6 @@ Add Rust to the shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"`.
 | MiniLab setup and routing | context/minilab.md |
 | Verified state and remaining acceptance | context/status.md |
 
+After every change or merge, rebuild all local targets before handoff: macOS app, CLAP/AU/VST3, upstream browser assets and native CLI. Keep plugin installation disabled; report any failed or unavailable target. Follow the checklist in context/development.md.
+
 Keep affected context and README accurate in the same change. Reconcile using `.agents/skills/ez-context/SKILL.md`; read the design system for every UI change. Run `npm run check:context` after documentation edits. Build/test evidence never establishes physical-controller, DAW or hardware acceptance.

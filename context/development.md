@@ -17,6 +17,21 @@ npm run check:context
 tools/package_macos_app.sh
 ```
 
+## Rebuild after changes
+
+Rebuild every local target after each change or merge before handoff. Stop on a failed command and report unavailable targets. Incremental builds are sufficient; do not delete caches.
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+set -e
+tools/package_macos_app.sh
+NO_INSTALL=1 tools/build_plugin.sh
+npm run build:web
+cargo build --release --locked -p fm1-live -p fm1-emu
+```
+
+Verify each app/CLAP/AU/VST3 bundle with `codesign --verify --deep --strict`. Output is under target/apps/, target/plugin/, target/release/ and web/dist/. The old browser Studio is deliberately absent; build:web produces upstream browser assets only. Never install plugins as a build side effect. A build does not establish interactive app, browser, DAW or hardware acceptance.
+
 No npm install is needed. The app is target/apps/FM-1 Studio.app, ad-hoc signed for local use. Packaging does not install anything, register the bundle with macOS, download firmware or claim notarization. Open a local .fwsc through the file picker. CLI example:
 
 ```sh
