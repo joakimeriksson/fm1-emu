@@ -62,6 +62,8 @@ Add Rust to the current shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"
 
 ## Maintenance
 
+After every change, rebuild all local targets before reporting completion: macOS app, CLAP/AU/VST3 bundles, browser/Studio assets and native CLI. Follow the full rebuild checklist in context/development.md; keep plugin installation disabled and report any failed or unavailable target.
+
 Keep `context/`, this router and the root README up to date **in the same change as the implementation**, before reporting the task complete. This applies to features, bug fixes, architecture, scope, build commands and user workflows.
 
 - Reconcile using `/ez-context` (the local skill is `.agents/skills/ez-context/SKILL.md`). Update only affected docs; add a focused doc and routing entry when a new subsystem needs one.

@@ -75,6 +75,8 @@ The proposed visual language uses an eight-pixel layout grid, warm paper surface
 
 ## Development and verification
 
+After every change or merge, rebuild the macOS app, all plugin bundles, browser/Studio assets and native CLI before testing. Follow the [full rebuild checklist](context/development.md#rebuild-after-changes); keep plugin installation disabled.
+
 ```sh
 # Optional published firmware fixture (downloaded into ignored reference/)
 node tools/fetch_firmwares.mjs felucca
