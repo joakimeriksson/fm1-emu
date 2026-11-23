@@ -7,7 +7,7 @@ source_refs:
 ---
 # Status
 
-Fresh upstream baseline: `7042b5127ce4e509ca5041f2cdb657e8e59488b9`. Existing master remains the reference implementation. This branch contains the standalone customization only; browser/plugin/core changes from the earlier fork are not carried forward.
+Fresh upstream baseline: `7042b5127ce4e509ca5041f2cdb657e8e59488b9`. The lean standalone is the canonical product; earlier implementations remain in Git history. It contains the standalone customization only; browser/plugin/core changes from the earlier fork are not carried forward.
 
 Implemented: fixed large-screen graphite panel, pressed and Shift-held controls, upstream MIDI learn overlays, native app menus/shortcuts, release-gated F4, remembered Mac launch settings and per-firmware flash, reset backup, MiniLab User profile via upstream fm1-map, input reconnection and disconnect cleanup.
 
@@ -27,7 +27,7 @@ The first native run lacked the optional Felucca fixture; the later run used a l
 
 Remaining manual acceptance is narrowed by the interactive checks below: final menu layout/recording shortcut/Shift-click checks, reset/restart inside the app, physical MiniLab User program/relative controls/bank switching, and live controller reconnection. Deterministic tests cover mapper behavior and disconnect cleanup, not the physical controller. Windows/Linux and unchanged upstream browser/plugin hosts were not runtime-tested. This branch does not establish perceptual audio equivalence or a latency guarantee.
 
-Global hotkeys and a persistent status bar item are outside the initial scope. Existing installed applications/plugins and the old master worktree remain unchanged.
+Global hotkeys and a persistent status bar item are outside the initial scope. Existing installed applications/plugins remain unchanged.
 
 
 ## Retained app identity and rebuild contract
@@ -61,7 +61,7 @@ Live testing on 2026-11-23 found and fixed three host integration problems:
 
 The automation connection then returned cgWindowNotFound for both the instrument and Finder, including after resetting the connection. This prevented final visual checks of the last menu-order adjustment and Shift-click holds. The instrument process was still executing its renderer. Do not turn this tool limitation into a successful visual acceptance claim. Real MiniLab controls, audible output judged by the user, firmware-owned save/reset and complete session-state recall remain unverified.
 
-Plain .area input, including the user's previous SLOOP session, is rejected by this upstream baseline. Support from the earlier fork has not been ported and remains a migration blocker for that workflow before merging. The previous launch arguments were copied to ignored target/app-acceptance/ before selecting test firmware; original firmware and SLOOP flash were not changed.
+Plain .area input, including the user's previous SLOOP session, is rejected by this upstream baseline. Support from the earlier fork has not been ported and remains an unsupported workflow. On 2026-11-23 the user explicitly authorized merging and making the lean implementation canonical with this limitation disclosed. The previous launch arguments were copied to ignored target/app-acceptance/ before selecting test firmware; original firmware and SLOOP flash were not changed.
 
 ## MiniLab activation fix and scope enforcement
 
@@ -80,3 +80,7 @@ Both bundled MiniLab profiles now route channel-1 notes through upstream panel-k
 ## Automatic controller default
 
 Finder session recall and opening another firmware now replace the previous controller selection with Automatic. Manual selection remains live for the current run; explicit command-line profile selection remains supported. Firmware and saved flash arguments are preserved.
+
+## Canonical checkout cutover
+
+The user authorized merging the lean branch and consolidating into the existing fm-1 main checkout. Preserve upstream ancestry with a merge commit. Retain old branch history and local firmware/session files before removing linked worktrees. Rebuild all targets in the canonical checkout; pending physical/audio acceptance remains pending after the cutover.
