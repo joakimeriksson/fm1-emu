@@ -1,0 +1,18 @@
+name: Standalone fork
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  standalone:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tools/check_upstream.sh
+      - run: python3 tools/check_context.py
+      - run: cargo test --release --locked -p fm1-live -p fm1-map -p fm1-core -p fm1-soc
+      - run: tools/package_macos_app.sh

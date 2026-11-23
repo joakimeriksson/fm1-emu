@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "check:context": "python3 tools/check_context.py"
+  }
+}

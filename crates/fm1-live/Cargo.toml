@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 fm1-core = { path = "../fm1-core" }
 fm1-soc = { path = "../fm1-soc" }
+ab_glyph = "0.2.32"
 minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"
@@ -20,3 +21,7 @@ wasapi = "0.26"
 # a file picker for the firmware (started with no arguments, F4)
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 rfd = "0.15"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+serde_json = "1"
+sha2 = "0.10"

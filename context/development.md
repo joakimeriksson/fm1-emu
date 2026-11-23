@@ -1,0 +1,43 @@
+---
+load_when: "builds, upstream updates, scope and verification"
+last_verified: 2026-11-23
+source_refs:
+  - UPSTREAM_REVISION
+  - tools/package_macos_app.sh
+  - tools/check_upstream.sh
+  - .github/workflows/standalone.yml
+---
+# Development
+
+```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo test --release --locked -p fm1-live -p fm1-map -p fm1-core -p fm1-soc
+tools/check_upstream.sh
+npm run check:context
+tools/package_macos_app.sh
+```
+
+No npm install is needed. The app is target/apps/FM-1 Studio.app, ad-hoc signed for local use. Packaging does not install anything, register the bundle with macOS, download firmware or claim notarization. Open a local .fwsc through the file picker. CLI example:
+
+```sh
+target/release/fm1-live --fwsc reference/firmwares/felucca.fwsc --midi "Minilab3 MIDI" --map "MiniLab FM-1 User"
+```
+
+Firmware stays ignored under reference/. Tests with optional upstream fixtures can skip internally when files are missing; report actual firmware smoke runs separately. Default native audio remains upstream's implementation and latency policy. The previous fork's audio refactor is not ported without a separate comparison against this newer engine. This branch makes no new audio-latency guarantee.
+
+## Updating upstream
+
+1. Start with a clean worktree. Follow the account rules and run gh-whoami.
+2. Fetch upstream/master and create an update branch from the maintained product branch.
+3. Record the candidate hash, then merge that exact upstream commit. Resolve only the small host adapters and any genuine custom interface changes. Do not replace upstream engine files with old versions.
+4. Update UPSTREAM_REVISION to the merged candidate. Run tools/check_upstream.sh; protected engine, mapping, shared panel, browser and plugin sources must exactly match the candidate.
+5. Run native tests, context checks and app packaging. Smoke-test a real firmware, MIDI mapping, open/cancel, recording, reset backup and Finder recall. Check upstream API changes against custom renderer/overlay geometry.
+6. Commit and push the update branch, then open a PR. Do not rebase or force-push the public product history. No automatic production merges.
+
+The boundary check also requires the recorded baseline to be an ancestor of HEAD. New upstream changes can still require adapter work; the goal is a small, inspectable difference, not a conflict-free promise.
+
+## Migration scope
+
+Carry forward visual styling, standalone menus/shortcuts, session recall, Shift-click holds and the MiniLab User program. Leave browser Studio/library, hardware tools, custom plugin UI/state and speculative transport/editor features out. Keep upstream-supported targets intact. Runtime fixes are considered individually; prefer upstream fixes and avoid importing old engine code.
+
+The upstream README is retained with a fork notice, and its tests/licensing remain intact. Custom files live under studio/ wherever practical. Keep native adapter edits focused rather than reformatting upstream files.

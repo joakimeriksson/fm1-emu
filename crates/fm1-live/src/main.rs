@@ -48,7 +48,8 @@ mod fit;
 mod exclusive;
 mod ctl;
 mod labels;
-mod panel;
+mod studio;
+use studio::panel;
 mod wav;
 mod panel_smk;
 use std::collections::VecDeque;
@@ -1445,52 +1446,9 @@ fn midi_input_names(o: &Opts) -> Vec<String> {
 
 /// Connect the MIDI inputs `--midi` asks for: their messages go through the controller profile
 /// (crates/fm1-map) to the panel and the MIDI IN jack, or with `--map none` to the jack as they
-/// are. The connections live as long as the returned value.
-fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> Vec<midir::MidiInputConnection<()>> {
-    let mut conns = Vec::new();
-    if o.midi == "none" {
-        return conns;
-    }
-    let probe = match midir::MidiInput::new("fm1-live") {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("MIDI in: {e}");
-            return conns;
-        }
-    };
-    for port in probe.ports() {
-        let Ok(name) = probe.port_name(&port) else { continue };
-        if o.midi != "all" && !name.to_lowercase().contains(&o.midi.to_lowercase()) {
-            continue;
-        }
-        let Ok(mut input) = midir::MidiInput::new("fm1-live") else { continue };
-        input.ignore(midir::Ignore::None);
-        let (tx, ch, mapping) = (tx.clone(), o.midi_ch, control.clone());
-        // (--map auto: only the controller the profile is for; a DAW's port plays as it comes)
-        let mapped = control.maps(&name);
-        let got = input.connect(&port, "fm1-live in", move |_, msg, _| {
-            if mapped && !msg.is_empty() && msg[0] != 0xf0 {
-                mapping.feed(msg, &tx);
-                return;
-            }
-            for (i, &b) in msg.iter().enumerate() {
-                let b = if i == 0 && ch != 0 && (0x80..0xf0).contains(&b) { (b & 0xf0) | (ch - 1) } else { b };
-                let _ = tx.send(Action::Midi { b });
-            }
-        }, ());
-        match got {
-            Ok(c) => {
-                eprintln!("MIDI in: {name}{}", if mapped { " (through the controller profile)" } else { "" });
-                control.inputs.lock().unwrap().push(name);
-                conns.push(c);
-            }
-            Err(e) => eprintln!("MIDI in: {name}: {e}"),
-        }
-    }
-    if conns.is_empty() {
-        eprintln!("MIDI in: no inputs{}", if o.midi == "all" { String::new() } else { format!(" matching {:?}", o.midi) });
-    }
-    conns
+/// are. The discovery worker and connections stop when the returned value is dropped.
+fn midi_inputs(o: &Opts, tx: &mpsc::Sender<Action>, control: &Arc<ctl::Ctl>) -> studio::midi::Inputs {
+    studio::midi::connect(&o.midi, o.midi_ch, tx.clone(), control.clone())
 }
 
 /// Pixels of vertical mouse drag per encoder click.
@@ -1666,8 +1624,12 @@ fn main() {
     // script: the usage, as before)
     #[cfg(any(windows, target_os = "macos"))]
     if std::env::args().len() == 1 && double_clicked() {
-        if let Some(path) = pick_firmware() {
-            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).arg("--fwsc").arg(&path).status());
+        #[cfg(target_os = "macos")]
+        let recalled = studio::session::recalled();
+        #[cfg(not(target_os = "macos"))]
+        let recalled: Option<Vec<String>> = None;
+        if let Some(args) = recalled.or_else(|| pick_firmware().map(|p| vec!["--fwsc".into(),p.to_string_lossy().into_owned()])) {
+            let run = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(&args).status());
             // a firmware that would not load: its error stays readable, not gone with the console
             let failed = match run {
                 Ok(st) if st.success() => None,
@@ -1682,7 +1644,8 @@ fn main() {
         }
         return;
     }
-    let Some(o) = parse() else {
+    #[allow(unused_mut)]
+    let Some(mut o) = parse() else {
         eprintln!("{USAGE}");
         std::process::exit(2);
     };
@@ -1704,6 +1667,15 @@ fn main() {
             return std::thread::spawn(move || { let _p = high_priority(); bench(&o2, ms, theme) }).join().unwrap();
         }
         return bench(&o, ms, theme);
+    }
+    #[cfg(target_os = "macos")]
+    if o.flash.is_none() {
+        if let Some(firmware) = &o.fwsc {
+            match studio::session::memory(firmware) {
+                Ok(path) => o.flash = Some(path),
+                Err(e) => eprintln!("Session memory unavailable: {e}"),
+            }
+        }
     }
     let mut m = match Machine::new(&o) {
         Ok(m) => m,
@@ -1912,6 +1884,12 @@ fn main() {
             return;
         }
     };
+    #[cfg(target_os = "macos")]
+    if let Some(firmware) = &o.fwsc {
+        if let Err(e) = studio::session::remember(&std::env::args().skip(1).collect::<Vec<_>>(), firmware) {
+            eprintln!("Launch settings not saved: {e}");
+        }
+    }
     win.set_target_fps(60);
     if let Some((x, y)) = at {
         win.set_position(x, y);
@@ -1925,6 +1903,8 @@ fn main() {
     let mut turning = [0u32; 8];
     let mut scroll_acc = [0f32; 8];
     let mut grab: Option<Ctl> = None;
+    let mut latched = [false; 41];
+    let mut latch_vel = [100; 41];
     let mut was_pressed = false;
     let mut mouse_vel = 0u8;                    // the key under the mouse: how hard (its height; lower = harder)
     let (mut last_y, mut drag_acc) = (0f32, 0f32);
@@ -1946,6 +1926,14 @@ fn main() {
         eprintln!("controller: right-click a control, then move or press one of yours (MIDI learn; right-click again cancels, Delete unbinds); F1 labels, F2 keys: panel / MIDI / auto");
     }
 
+    let mut firmware_shortcut = studio::shortcuts::ReleaseShortcut::default();
+    #[cfg(target_os = "macos")]
+    let _menus = studio::menus::install(&mut win).unwrap_or_else(|e| {
+        eprintln!("Menus unavailable: {e}");
+        Vec::new()
+    });
+    #[cfg(target_os = "macos")]
+    let mut reset = false;
     // F4 picked another firmware: what to start once this run has ended
     let mut next: Option<Vec<String>> = None;
     while win.is_open() && !win.is_key_down(Key::Escape) && next.is_none() {
@@ -1955,6 +1943,20 @@ fn main() {
             let _ = tx.send(Action::Enc { enc: ENCS[i].1, clicks });
         };
 
+        #[cfg(target_os = "macos")]
+        match win.is_menu_pressed() {
+            Some(studio::menus::OPEN) => next = open_another(),
+            Some(studio::menus::CLOSE) => break,
+            Some(studio::menus::RECORD) => toggle_record(&recorder, &o.name),
+            Some(studio::menus::LABELS) => labels = !labels,
+            Some(studio::menus::RESET) => {
+                if studio::menus::confirm_reset() {
+                    reset = true;
+                    next = Some(std::env::args().skip(1).collect());
+                }
+            }
+            _ => {}
+        }
         // ---- mouse
         let pos = mouse_pos(&win).map(|(x, y)| fit.to_panel(x, y));
         let pressed = win.get_mouse_down(MouseButton::Left);
@@ -1965,6 +1967,17 @@ fn main() {
                 drag_acc = 0.0;
                 if let Some(Ctl::Key(k)) = grab {
                     mouse_vel = panel::key_vel(k, my);
+                }
+                if let Some(Ctl::Key(id) | Ctl::Btn(id)) = grab {
+                    let id = id as usize;
+                    if win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift) {
+                        latched[id] = !latched[id];
+                        latch_vel[id] = mouse_vel;
+                        grab = None;
+                    } else if latched[id] {
+                        latched[id] = false;
+                        grab = None;
+                    }
                 }
             } else if pressed {
                 match grab {
@@ -2117,13 +2130,13 @@ fn main() {
         }
 
         // ---- held keys and buttons: computer keyboard + mouse
-        let mut want = [false; 41];
+        let mut want = latched;
         // Space is REC when Shift was held as it went down, until it comes up (Shift let go first or not)
         if win.is_key_pressed(Key::Space, KeyRepeat::No) {
             space_rec = win.is_key_down(Key::LeftShift) || win.is_key_down(Key::RightShift);
         }
         let shift = space_rec;
-        for k in win.get_keys() {
+        for k in win.get_keys().into_iter().filter(|_| !win.is_key_down(Key::LeftSuper) && !win.is_key_down(Key::RightSuper)) {
             if let Some(id) = piano(k).or_else(|| button(k, shift)) {
                 want[id as usize] = true;
             }
@@ -2137,7 +2150,7 @@ fn main() {
                 if want[id] && id >= 14 {
                     // the mouse's key at its height, the computer keyboard's at 100
                     let mouse = matches!(grab, Some(Ctl::Key(k)) if k as usize == id);
-                    let _ = tx.send(Action::KeyVel { vel: if mouse { mouse_vel } else { 100 } });
+                    let _ = tx.send(Action::KeyVel { vel: if mouse { mouse_vel } else if latched[id] { latch_vel[id] } else { 100 } });
                 }
                 let _ = tx.send(Action::Key { id: id as u8, down: want[id] });
             }
@@ -2150,9 +2163,11 @@ fn main() {
                 Key::Up => turn(1, 1, &mut enc_clicks, &mut turning),
                 Key::Comma => turn(2, -1, &mut enc_clicks, &mut turning),
                 Key::Period => turn(2, 1, &mut enc_clicks, &mut turning),
-                Key::F4 => next = open_another(),
                 _ => {}
             }
+        }
+        if firmware_shortcut.update(win.is_key_down(Key::F4)) {
+            next = open_another();
         }
         if win.is_key_pressed(Key::F3, KeyRepeat::No) {
             toggle_record(&recorder, &o.name);
@@ -2211,6 +2226,15 @@ fn main() {
     }
     // F4: the new firmware, now that this one has stopped, with the window, the MIDI inputs
     // (WinMM's are one program's at a time) and the audio device let go of first
+    #[cfg(target_os = "macos")]
+    if reset {
+        if let Some(path) = &o.flash {
+            if let Err(e) = studio::session::archive(std::path::Path::new(path)) {
+                eprintln!("Reset cancelled: {e}");
+                return;
+            }
+        }
+    }
     if let Some(args) = next {
         drop(win);
         drop(_midi);

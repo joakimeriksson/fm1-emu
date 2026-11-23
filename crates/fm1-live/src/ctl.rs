@@ -75,6 +75,9 @@ impl Ctl {
         let mut m = self.mapper.lock().unwrap();
         let mut v = self.view.lock().unwrap();
         let ch = self.midi_ch;
+        if msg.len() == 3 && msg[0] & 0xf0 == 0xb0 && matches!(msg[1], 120 | 123) {
+            m.release_all(&mut |o| apply(o, tx, &mut v, ch));
+        }
         if !self.log {
             m.feed(msg, &mut |o| apply(o, tx, &mut v, ch));
             return;
@@ -153,7 +156,11 @@ pub fn choose(want: &str, inputs: &[String]) -> Result<Option<Profile>, String> 
     if want == "none" {
         return Ok(None);
     }
-    let (all, errs) = fm1_map::all_profiles();
+    let (mut all, errs) = fm1_map::all_profiles();
+    let bundled = Profile::from_json(include_str!("studio/minilab.json"))?;
+    if !all.iter().any(|p| p.name == bundled.name) {
+        all.push(bundled);
+    }
     for e in errs {
         eprintln!("controller profile: {e}");
     }
