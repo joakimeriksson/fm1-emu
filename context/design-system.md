@@ -4,7 +4,7 @@ last_verified: 2026-11-23
 source_refs:
   - crates/fm1-live/src/studio/panel.rs
   - crates/fm1-live/src/studio/menus.rs
-  - assets/macos/*
+  - assets/icons/**
 ---
 # Design system
 
@@ -16,6 +16,6 @@ Mouse key height retains upstream velocity/pressure behavior. Shift-click holds 
 
 Menus: File (open, close), Audio (WAV recording), Instrument (reset), View (MIDI labels). Cmd+O opens, Cmd+W closes, Cmd+Shift+R records. Reset names the consequence and requires confirmation; existing saved flash is archived after shutdown. These are application menus, not a status item or global shortcut service.
 
-Inter Tight is bundled with its SIL OFL license; there is no font download. Approved macOS ICNS and compiled Assets.car are retained as distribution resources. Artwork source/editing remains in the original fork's icon workflow; do not edit compiled assets manually. Build output stays under target/.
+Inter Tight is bundled with its SIL OFL license; there is no font download. The complete approved icon sources and platform exports are retained under assets/icons/. The standalone and every macOS plugin bundle use Assets.car plus ICNS fallback; browser exports are applied during packaging. Read [the icon contract](icons.md) before changing artwork or packaging. Do not edit compiled assets manually. Build output stays under target/.
 
 The canvas retains upstream accessibility limits. Do not claim full keyboard or screen-reader accessibility from rendering tests. Real macOS menu, display scaling and physical-controller acceptance must be recorded separately.

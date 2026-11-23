@@ -2,6 +2,6 @@
   "private": true,
   "scripts": {
     "check:context": "python3 tools/check_context.py",
-    "build:web": "bash web/build.sh"
+    "build:web": "bash tools/build_web.sh"
   }
 }

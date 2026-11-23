@@ -22,8 +22,8 @@ Add Rust to the shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"`.
 ## Constraints
 
 - Execute original firmware binaries. Do not replace the upstream engine or synthesis.
-- Custom scope: standalone visual panel, macOS application menus/shortcuts, session preferences and MiniLab mapping. Preserve upstream targets and tests.
-- Keep machine, mapping engine, shared panel, browser and plugin sources identical to UPSTREAM_REVISION. Change host adapters only where required; see context/architecture.md.
+- Custom scope: standalone Mac app, complete icon sources/exports and build branding, visual panel, macOS application menus/shortcuts, session preferences and MiniLab mapping. Preserve upstream targets and tests.
+- Keep machine, mapping engine, shared panel, browser and plugin runtime sources identical to UPSTREAM_REVISION. Change host adapters only where required; see context/architecture.md.
 - Do not install plugins or alter existing applications during builds.
 - Keep parsing, file I/O and UI work outside audio callbacks.
 - Never commit firmware, user memory, backups, machine-specific paths or generated build output.
@@ -37,10 +37,11 @@ Add Rust to the shell when needed: `export PATH="$HOME/.cargo/bin:$PATH"`.
 | Always | context/overview.md |
 | Boundaries and host integration | context/architecture.md |
 | Visual or interaction changes | context/design-system.md |
+| App icons, platform artwork and bundle branding | context/icons.md |
 | Builds, tests, scope and upstream updates | context/development.md |
 | MiniLab setup and routing | context/minilab.md |
 | Verified state and remaining acceptance | context/status.md |
 
-After every change or merge, rebuild all local targets before handoff: macOS app, CLAP/AU/VST3, upstream browser assets and native CLI. Keep plugin installation disabled; report any failed or unavailable target. Follow the checklist in context/development.md.
+After every change or merge, including documentation-only edits, rebuild the standalone macOS app and all other local targets before handoff: macOS app, CLAP/AU/VST3, upstream browser assets and native CLI. Keep plugin installation disabled; report any failed or unavailable target. Follow the checklist in context/development.md.
 
 Keep affected context and README accurate in the same change. Reconcile using `.agents/skills/ez-context/SKILL.md`; read the design system for every UI change. Run `npm run check:context` after documentation edits. Build/test evidence never establishes physical-controller, DAW or hardware acceptance.

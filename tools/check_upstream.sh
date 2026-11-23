@@ -9,5 +9,8 @@ git diff --exit-code "$revision" -- \
   crates/fm1-emu crates/fm1-gdbstub crates/fm1-web crates/fm1-plugin web \
   crates/fm1-live/src/panel.rs crates/fm1-live/src/labels.rs \
   crates/fm1-live/src/fit.rs crates/fm1-live/src/wav.rs \
-  crates/fm1-live/src/panel_smk.rs crates/fm1-live/src/exclusive.rs
-printf '%s\n' 'PASS: shared upstream sources match UPSTREAM_REVISION'
+  crates/fm1-live/src/panel_smk.rs crates/fm1-live/src/exclusive.rs \
+  ':(exclude)crates/fm1-plugin/build.rs' \
+  ':(exclude)crates/fm1-plugin/wrap/CMakeLists.txt' \
+  ':(exclude)crates/fm1-plugin/wrap/icon.rc.in'
+printf '%s\n' 'PASS: shared upstream runtime sources match UPSTREAM_REVISION'

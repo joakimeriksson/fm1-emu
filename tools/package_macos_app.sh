@@ -5,11 +5,11 @@ cd "$(dirname "$0")/.."
 cargo build --release --locked -p fm1-live
 app_bundle="target/apps/FM-1 Studio.app"
 mkdir -p "$app_bundle/Contents/MacOS" "$app_bundle/Contents/Resources"
-cp assets/macos/FM1.icns "$app_bundle/Contents/Resources/FM1.icns"
-cp assets/macos/Assets.car "$app_bundle/Contents/Resources/Assets.car"
+cp assets/icons/FM1.icns "$app_bundle/Contents/Resources/FM1.icns"
+cp assets/icons/macos/Assets.car "$app_bundle/Contents/Resources/Assets.car"
 cp target/release/fm1-live "$app_bundle/Contents/MacOS/fm1-live"
 # Give Launch Services a new bundle revision when compiled artwork changes.
-icon_digest=$(shasum -a 256 assets/macos/Assets.car | cut -c1-4)
+icon_digest=$(shasum -a 256 assets/icons/macos/Assets.car | cut -c1-4)
 bundle_version="1.$((16#${icon_digest:0:2} % 100)).$((16#${icon_digest:2:2} % 100))"
 cat > "$app_bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -29,4 +29,11 @@ cat > "$app_bundle/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 codesign --force --sign - "$app_bundle"
-echo "Built $app_bundle (local ad-hoc signature)."
+# Rebuilt bundles can retain Finder/Dock's previous generic icon registration.
+# Refresh only this local app; never reset global icon caches or restart Finder/Dock.
+touch "$app_bundle"
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [ -x "$lsregister" ]; then
+  "$lsregister" -f "$PWD/$app_bundle" || echo "Warning: macOS app registration refresh failed." >&2
+fi
+echo "Built $app_bundle (local ad-hoc signature; standalone Studio panel)."

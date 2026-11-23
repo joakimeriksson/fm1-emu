@@ -25,6 +25,10 @@ else
   cp target/release/fm1-live$exe target/release/fm1-emu$exe "$out/$name/"
 fi
 
+mkdir -p "$out/$name/icons"
+cp assets/icons/FM1.ico assets/icons/FM1.icns assets/icons/png/fm1-256.png assets/icons/png/fm1-512.png "$out/$name/icons/"
+case $platform in linux-*) cp assets/icons/fm1-studio.desktop "$out/$name/" ;; esac
+
 case $platform in
   macos-universal)
     speed="It compiles the firmware to native code (AArch64 on Apple silicon, x86-64 on Intel) and

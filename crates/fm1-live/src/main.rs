@@ -1890,6 +1890,7 @@ fn main() {
             eprintln!("Launch settings not saved: {e}");
         }
     }
+    studio::app_icon::apply(&mut win);
     win.set_target_fps(60);
     if let Some((x, y)) = at {
         win.set_position(x, y);
@@ -2281,6 +2282,7 @@ fn window_smk(o: &Opts, tx: &mpsc::Sender<Action>, lcd: &Mutex<Vec<u16>>, leds: 
         Ok(w) => w,
         Err(e) => return eprintln!("window: {e}"),
     };
+    studio::app_icon::apply(&mut win);
     win.set_target_fps(60);
     let base = panel_smk::base();
     let mut buf = vec![0u32; w * h];

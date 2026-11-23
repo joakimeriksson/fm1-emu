@@ -8,3 +8,4 @@ pub mod panel;
 #[cfg(target_os = "macos")]
 pub mod session;
 pub mod shortcuts;
+pub mod app_icon;

@@ -14,5 +14,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: tools/check_upstream.sh
       - run: python3 tools/check_context.py
+      - run: python3 tools/check_icon_artwork.py
       - run: cargo test --release --locked -p fm1-live -p fm1-map -p fm1-core -p fm1-soc
       - run: tools/package_macos_app.sh

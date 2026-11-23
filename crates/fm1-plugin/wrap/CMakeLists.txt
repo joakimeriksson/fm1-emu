@@ -64,3 +64,10 @@ target_add_vst3_wrapper(
         BUNDLE_VERSION "${PROJECT_VERSION}"
         WINDOWS_FOLDER_VST3 TRUE
         MACOS_EMBEDDED_CLAP_LOCATION "${FM1_CLAP}")
+
+if (WIN32)
+    enable_language(RC)
+    get_filename_component(FM1_ICON_PATH "${CMAKE_CURRENT_LIST_DIR}/../../../assets/icons/FM1.ico" ABSOLUTE)
+    configure_file(icon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/fm1-icon.rc" @ONLY)
+    target_sources(fm1_vst3 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fm1-icon.rc")
+endif ()
