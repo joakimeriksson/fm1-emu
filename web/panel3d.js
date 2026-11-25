@@ -2,7 +2,7 @@
 // firmware's screen on its LCD and its LEDs on the keys and buttons. Only a view: main.js keeps the
 // machine's input; this module answers what is under a point (as the flat panel's panel_hit does)
 // and draws what main.js hands it each frame. The wheel or a pinch on the empty panel zooms towards
-// the point under it; dragging it tilts the synth, or when zoomed in moves it (Shift: the other);
+// the point under it; dragging it up or down tilts the synth a little, or when zoomed in moves it (Shift: the other);
 // a double click shows the whole synth again.
 // The model: tools/model3d (an original drawing, no product photo).
 const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/+esm";
@@ -105,8 +105,9 @@ export async function panel3d(flat) {
   try { cam = { ...cam, ...JSON.parse(localStorage.getItem(CAM_KEY) || "{}") }; } catch { /* no storage: the default view */ }
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   function place() {
-    cam.tilt = clamp(cam.tilt, 0, 1.1);
-    cam.turn = clamp(cam.turn, -0.7, 0.7);
+    // a little tilt only: further, or turned sideways, the keys get harder to hit for nothing
+    cam.tilt = clamp(cam.tilt, 0, 0.5);
+    cam.turn = 0;
     cam.zoom = clamp(cam.zoom, 0.35, 1.2);
     cam.x = clamp(cam.x, box.min.x, box.max.x);
     cam.y = clamp(cam.y, box.min.y, box.max.y);
@@ -176,8 +177,7 @@ export async function panel3d(flat) {
       cam.y += dy * span;
       place();
     } else {
-      cam.turn -= dx * 0.005;
-      cam.tilt += dy * 0.005;
+      cam.tilt += dy * 0.004;
       place();
     }
     empty.set(e.pointerId, [e.clientX, e.clientY]);
