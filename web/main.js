@@ -124,6 +124,8 @@ const wasm = await needed("the emulator", async () => loaded(await fetch("fm1_we
 const ui = (await needed("the emulator", () => WebAssembly.instantiate(wasm, { env: { fm1_jit_compile: () => 0 } }))).instance.exports;
 // the panel drawn: 0 the FM-1's, 1 the SMK-37's (setBoard; the canvas takes its size)
 let W = 0, H = 0, board = -1;
+// the 3D view when it shows (panel3d.js), and what follows a change of board (set below)
+let view3d = null, boardChanged = null;
 // --above: what sits over the panel in the player (its title, the screen's controls, a warning)
 // when the player is scrolled to the top of the window, as by the Play link. From the player, not
 // the page's top: the opening and the header above the player scroll away. The big screen does
@@ -168,6 +170,7 @@ function setBoard(b) {
   document.documentElement.dataset.board = b ? "smk37" : "fm1";
   down.fill(0);
   encClicks.fill(0);
+  boardChanged?.();
 }
 setBoard(DEV.board);
 
@@ -555,6 +558,7 @@ function showLcd() {
   const out = recolour ? lcdOut : lcdRaw;
   if (recolour) for (let i = 0; i < out.length; i++) out[i] = recolour[lcdRaw[i]];
   new Uint16Array(ui.memory.buffer, ui.panel_lcd(), 240 * 240).set(out);
+  view3d?.lcd(out);
   if (big.hidden) return;
   if (!rgba) {
     rgba = new Uint32Array(65536);         // (ImageData's bytes: R, G, B, A, little-endian)
@@ -573,6 +577,7 @@ bigBtn.addEventListener("click", () => setBig(big.hidden));
 colourSel.addEventListener("change", () => setColours(colourSel.value));
 
 // ---------------------------------------------------------------- drawing
+let leds = null;                           // the latest LED levels (the 3D view's)
 function draw() {
   const mem = () => ui.memory.buffer;
   if (frame) {
@@ -583,6 +588,7 @@ function draw() {
       showLcd();
     }
     new Float32Array(mem(), ui.panel_leds(), 41).set(frame.leds);
+    leds = frame.leds;
     if (frame.pads) for (let p = 0; p < 16; p++) ui.panel_set(5, p, frame.pads[p]);
   }
   for (let i = 0; i < 64; i++) ui.panel_set(0, i, down[i]);
@@ -593,6 +599,11 @@ function draw() {
     if (turning[i]) turning[i]--;
   }
   if (board === 1) for (let i = 0; i < 23; i++) ui.panel_set(4, i, analog[i]);
+  if (view3d) {
+    view3d.draw({ down, leds, encClicks, pot });
+    requestAnimationFrame(draw);
+    return;
+  }
   const p = ui.panel_draw();
   const img = new ImageData(new Uint8ClampedArray(mem(), p, W * H * 4), W, H);
   ctx.putImageData(img, 0, 0);
@@ -638,35 +649,39 @@ const at = (e) => {
   const r = canvas.getBoundingClientRect();
   return [(e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height)];
 };
+// what is under the pointer (panel_hit's numbers), and its height for a knob's drag: on the flat
+// panel in its pixels, in the 3D view in the page's
+const hitOf = (e) => (view3d ? view3d.hit(e.clientX, e.clientY) : ui.panel_hit(...at(e)));
+const yOf = (e) => (view3d ? e.clientY : at(e)[1]);
 const holds = new Uint8Array(64);          // pointers holding each key / button
 function press(id) { if (holds[id]++ === 0) setKey(id, true); }
 function unpress(id) { if (holds[id] && --holds[id] === 0) setKey(id, false); }
 const pointers = new Map();                // pointerId -> { grab, lastY, acc, held }
-canvas.addEventListener("pointerdown", (e) => {
-  const [x, y] = at(e);
-  const p = { grab: ui.panel_hit(x, y), lastY: y, acc: 0, held: -1 };
+function onDown(e) {
+  const y = yOf(e);
+  const p = { grab: hitOf(e), lastY: y, acc: 0, held: -1 };
   pointers.set(e.pointerId, p);
-  canvas.setPointerCapture(e.pointerId);
+  e.currentTarget.setPointerCapture(e.pointerId);
   if (p.grab >= 100 && p.grab < 200) {
     p.held = p.grab - 100;
     // SMK-37: a key hit further down sounds harder
     if (board === 1 && p.held < NKEY) setVelocity(ui.panel_hit_y());
     press(p.held);
   } else if (board === 1 && p.grab >= 200) slide(p, y);
-});
+}
 // SMK-37: a pad pressed (harder the lower it is hit), a fader or a wheel dragged
 function slide(p, y) {
   if (p.grab < 300) setAnalog(p.grab - 200, 700);
   else if (p.grab < 400) setAnalog(16 + p.grab - 300, ui.panel_slide(p.grab - 300, y));
   else setAnalog(p.grab === 400 ? 20 : 21, ui.panel_slide(p.grab === 400 ? 4 : 5, y));
 }
-canvas.addEventListener("pointermove", (e) => {
+function onMove(e) {
   const p = pointers.get(e.pointerId);
   if (!p || p.grab < 0) return;
-  const [x, y] = at(e);
+  const y = yOf(e);
   const keys = board === 1 ? [0, NKEY] : [14, 41];
   if (p.grab >= 100 && p.grab < 200 && p.held >= keys[0] && p.held < keys[1]) {
-    const h = ui.panel_hit(x, y);              // glissando over the note keys
+    const h = hitOf(e);                        // glissando over the note keys
     if (h >= 100 + keys[0] && h < 100 + keys[1] && h - 100 !== p.held) {
       unpress(p.held);
       p.held = h - 100;
@@ -683,7 +698,7 @@ canvas.addEventListener("pointermove", (e) => {
     setPot(pot + (p.lastY - y) * 4);
   }
   p.lastY = y;
-});
+}
 const release = (e) => {
   const p = pointers.get(e.pointerId);
   if (!p) return;
@@ -692,13 +707,9 @@ const release = (e) => {
   if (board === 1 && p.grab === 400) setAnalog(20, PITCH_REST);                   // the pitch wheel springs back
   pointers.delete(e.pointerId);
 };
-canvas.addEventListener("pointerup", release);
-canvas.addEventListener("pointercancel", release);
-canvas.addEventListener("lostpointercapture", release);
 let wheelAcc = 0;
-canvas.addEventListener("wheel", (e) => {
-  const [x, y] = at(e);
-  const h = ui.panel_hit(x, y);
+function onWheel(e) {
+  const h = hitOf(e);
   if (board === 1 && h >= 300 && h < 304) {          // SMK-37: a fader scrolled
     e.preventDefault();
     setAnalog(16 + h - 300, analog[16 + h - 300] - e.deltaY * 2);
@@ -710,7 +721,51 @@ canvas.addEventListener("wheel", (e) => {
   wheelAcc -= e.deltaY;
   while (wheelAcc >= 40) { wheelAcc -= 40; turn(h, 1); }
   while (wheelAcc <= -40) { wheelAcc += 40; turn(h, -1); }
-}, { passive: false });
+}
+// the panel's input, on the flat panel and on the 3D view's canvas when it shows
+function listen(el) {
+  el.addEventListener("pointerdown", onDown);
+  el.addEventListener("pointermove", onMove);
+  el.addEventListener("pointerup", release);
+  el.addEventListener("pointercancel", release);
+  el.addEventListener("lostpointercapture", release);
+  el.addEventListener("wheel", onWheel, { passive: false });
+}
+listen(canvas);
+
+// ---------------------------------------------------------------- the 3D view (FM-1 only)
+// The FM-1 as a 3D model (web/panel3d.js, three.js from a CDN), in place of the flat panel; the
+// flat panel again if it cannot load. Remembered for this browser.
+const btn3d = document.getElementById("view3d");
+async function set3d(on) {
+  on = on && board === 0;
+  btn3d.hidden = board !== 0;
+  btn3d.setAttribute("aria-pressed", String(on));
+  if (!on) { view3d?.remove(); view3d = null; return; }
+  if (view3d) return;
+  btn3d.disabled = true;
+  try {
+    const { panel3d } = await import("./panel3d.js");
+    if (btn3d.getAttribute("aria-pressed") !== "true" || view3d) return;
+    view3d = await panel3d(canvas);
+    listen(view3d.canvas);
+    if (haveLcd) showLcd();
+  } catch (error) {
+    btn3d.setAttribute("aria-pressed", "false");
+    status.textContent = `3D view not loaded (${error.message}): the flat panel`;
+  } finally {
+    btn3d.disabled = false;
+  }
+}
+btn3d.addEventListener("click", () => {
+  const on = !view3d;
+  store("fm1.view3d", on ? "1" : "");
+  set3d(on);
+});
+// ?view=3d / ?view=flat: that view this once (a link to it), not kept
+const want3d = () => (params.has("view") ? params.get("view") === "3d" : stored("fm1.view3d") === "1");
+set3d(want3d());
+boardChanged = () => set3d(want3d());   // the SMK-37 has no 3D model: its flat panel
 
 // computer keyboard: A W S E D F T G Y H U J K O L P ; ' = C4..F5, Z X OCT- OCT+, Space PLAY,
 // Shift+Space REC, 1..0 FX SCL ENV LFO EDIT GLO HOME SAVE ARP SEQ, arrows / , . encoders. SMK-37:
