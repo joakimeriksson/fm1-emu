@@ -141,58 +141,65 @@ is slower. `FM1_LCD_TIMED=1` (fm1-live, fm1-emu) times the LCD alone; `FM1_LCD_I
 instant under `FM1_STRICT`. A firmware that boots under it boots later (its first frames take
 their time). `fm1-live --shot` then reports the LCD's share of the run.
 
-### Remote control (`--cdp`)
+The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
+target), the whole site with `tools/build_site.sh`.
 
-`fm1-live --cdp PORT` serves a thin HTML page on `http://localhost:PORT` and a WebSocket on
-the same port. The page shows the LCD; the WebSocket pushes RGBA frames and accepts JSON-RPC
-commands, so Playwright, a Python script or any WebSocket client can drive the emulator
-without a display.
+### Remote control (`--remote`)
+
+`fm1-live --remote PORT` lets another program play and read the running emulator: a WebSocket on
+`ws://127.0.0.1:PORT` takes JSON-RPC calls, and `http://127.0.0.1:PORT` is a small page that shows
+the LCD. A test can press a button, read what the firmware drew, and act on it. The window, the
+audio and the MIDI inputs go on as without the flag; `--headless` leaves them out (no window, no
+sound: for a test run, or a computer with no display), and `--remote 0` takes a free port and
+prints it.
+
+It listens on 127.0.0.1 only. `--host ADDR` listens on another of the computer's addresses
+(`--host 0.0.0.0`: all of them); there is no password, so whoever can reach that address can then
+play and read the emulator. A page of another web site cannot connect: a request has to name the
+computer by its address or as `localhost`, and a browser's WebSocket has to come from the remote's
+own page.
 
 ```python
-import json, websocket
+import json, websocket                    # pip install websocket-client
 
-ws = websocket.create_connection("ws://127.0.0.1:9222")
+ws = websocket.create_connection("ws://127.0.0.1:8137")
 
-# wait for the first LCD frame (binary, 240×240×4 RGBA bytes)
-while True:
-    frame = ws.recv()
-    if isinstance(frame, bytes):
-        print(f"LCD frame: {len(frame)} bytes")
-        break
+def call(method, **params):
+    ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+    return json.loads(ws.recv())["result"]
 
-# press a button (id 12) and read the LCD revision
-ws.send(json.dumps({"jsonrpc": "2.0", "id": 1,
-                     "method": "FM1.pressButton", "params": {"id": 12}}))
-ws.recv()  # ack
-
-ws.send(json.dumps({"jsonrpc": "2.0", "id": 2,
-                     "method": "FM1.lcdRevision", "params": {}}))
-print(json.loads(ws.recv()))  # {"jsonrpc":"2.0","id":2,"result":{"revision":…}}
-
+before = call("FM1.lcdHash")["hash"]
+call("FM1.pressButton", id=7)             # GLO
+while call("FM1.lcdHash")["hash"] == before:
+    pass                                  # until the firmware has drawn its page
+print(call("FM1.getInfo"))
 ws.close()
 ```
 
-**JSON-RPC methods** (all return `{"jsonrpc":"2.0","id":…,"result":…}`):
-
-| Method | Params | Returns |
+| Method | Params | Result |
 |---|---|---|
-| `FM1.pressButton` | `{"id": N}` | `{}` — press and release after 100 ms |
+| `FM1.pressButton` | `{"id": N, "ms": 100}` | `{}`: key or button N down now, up after `ms` emulated ms (100 when left out) |
 | `FM1.turnEncoder` | `{"encoder": N, "clicks": ±N}` | `{}` |
-| `FM1.sendMidi` | `{"data": [0x90, 60, 100]}` | `{}` |
-| `FM1.getLcd` | `{"x","y","w","h"}` (defaults: full 240×240) | `{"data": "<base64 RGBA>"}` |
-| `FM1.lcdRevision` | `{}` | `{"revision": N}` |
-| `FM1.lcdHash` | `{"x","y","w","h"}` | `{"hash": N}` |
-| `FM1.getInfo` | `{}` | `{"firmware","status","uptime_ms","halted"}` |
-| `FM1.getLeds` | `{}` | `{"leds": [41 floats, 0.0–1.0]}` |
-| `FM1.getAudioMetrics` | `{}` | `{"audio_frames","audio_halves"}` |
-| `FM1.getEngineState` | `{}` | `{"halted","ms"}` |
+| `FM1.sendMidi` | `{"data": [144, 60, 100]}` | `{}`: the bytes into the MIDI IN jack |
+| `FM1.getLcd` | `{"x", "y", "w", "h"}` (left out: the whole LCD) | `{"x", "y", "w", "h", "data": "<base64 RGBA>"}` |
+| `FM1.lcdHash` | as `FM1.getLcd` | `{"hash": N}`: changes when any pixel of that part does |
+| `FM1.lcdRevision` | | `{"revision": N}`: counts the firmware's writes to the LCD |
+| `FM1.getLeds` | | `{"leds": […]}`: how lit each LED is, 0 to 1, as the window draws them (41 on an FM-1, 19 on an SMK-37) |
+| `FM1.getAudioMetrics` | | `{"frames", "peak", "audio_halves"}`: stereo frames played since boot, and the largest sample (0 to 32768) since the last call |
+| `FM1.getInfo` | | `{"firmware", "board", "mhz", "status", "uptime_ms", "halted"}` |
+| `FM1.getEngineState` | | `{"halted", "ms"}` |
+| `FM1.streamLcd` | `{"on": true}` | `{}`: from then on the LCD as a binary message (240 × 240 RGBA) when it has changed, 30 a second at most, and `{"type": "status", "text": …}` twice a second |
 
-Raw input events are also accepted as plain JSON (not wrapped in JSON-RPC):
-`{"type":"key","id":12,"down":true}`, `{"type":"enc","enc":3,"clicks":5}`,
-`{"type":"midi","data":[0x90,60,100]}`.
+A call that cannot be done answers `{"error": {"code", "message"}}` in place of `result`: -32602
+for a parameter (an id the board does not have, a part outside the LCD), -32601 for a method there
+is not, -32000 once the firmware has halted. On an FM-1 the buttons are ids 0 to 13 (OCT-, OCT+, FX,
+SCL, ENV, LFO, EDIT, GLO, HOME, SAVE, ARP, SEQ, PLAY, REC), the keys 14 to 40 (F3 to G5; 21 is C4),
+and the encoders 0 to 6 (SELECT, ALGORITHM, KNOB1 to KNOB4, PRESETS).
 
-The page builds with `web/build.sh` (Rust to WebAssembly; needs the `wasm32-unknown-unknown`
-target), the whole site with `tools/build_site.sh`.
+Input events, with no answer, hold a key for as long as the sender likes:
+`{"type": "key", "id": 21, "down": true}` (and later `false`), `{"type": "enc", "enc": 3, "clicks": 5}`,
+`{"type": "midi", "data": [144, 60, 100]}`. The page uses them: `btn.PLAY()`, `enc.KNOB1(2)` and
+`remoteRpc('FM1.getInfo')` in its console.
 
 ## In your DAW: AU and VST3
 

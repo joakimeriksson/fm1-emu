@@ -5,10 +5,10 @@
   canvas { image-rendering: pixelated; }
   #status { color: #aaa; font: 13px monospace; margin: 4px; }
 </style></head><body>
-<canvas id="panel" width="1280" height="820"></canvas>
+<canvas id="panel" width="480" height="480"></canvas>
 <div id="status">booting</div>
 <script>
-const W = 1280, H = 820, LCD_X = 370, LCD_Y = 42, LCD_W = 240, LCD_H = 240, SCALE = 2;
+const LCD_W = 240, LCD_H = 240, SCALE = 2, W = LCD_W * SCALE, H = LCD_H * SCALE;
 const canvas = document.getElementById('panel');
 const ctx = canvas.getContext('2d');
 const status = document.getElementById('status');
@@ -20,6 +20,7 @@ let ws;
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
+  ws.onopen = function() { rpc('FM1.streamLcd', {on: true}); };
   ws.onmessage = function(ev) {
     if (ev.data instanceof ArrayBuffer) {
       const rgba = new Uint8ClampedArray(ev.data);
@@ -29,7 +30,7 @@ function connect() {
         const tc = tmp.getContext('2d');
         tc.putImageData(img, 0, 0);
         ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(tmp, LCD_X, LCD_Y, LCD_W * SCALE, LCD_H * SCALE);
+        ctx.drawImage(tmp, 0, 0, W, H);
       }
     } else {
       try {
@@ -44,13 +45,16 @@ connect();
 
 let rpcId = 1;
 function rpc(method, params) {
-  return new Promise(function(resolve) {
+  return new Promise(function(resolve, reject) {
     const id = rpcId++;
     const handler = function(ev) {
       if (typeof ev.data === 'string') {
         try {
           const r = JSON.parse(ev.data);
-          if (r.id === id) { ws.removeEventListener('message', handler); resolve(r.result); }
+          if (r.id === id) {
+            ws.removeEventListener('message', handler);
+            if (r.error) reject(new Error(r.error.message)); else resolve(r.result);
+          }
         } catch(e) {}
       }
     };
@@ -87,18 +91,18 @@ window.Button = Button;
 window.Encoder = Encoder;
 window.btn = btn;
 window.enc = enc;
-window.cdpRpc = rpc;
+window.remoteRpc = rpc;
 window.getLcdRevision = function() { return rpc('FM1.lcdRevision'); };
-window.getLcdHash = function(x, y, w, h) { return rpc('FM1.lcdHash', {x:x||0, y:y||0, w:w||240, h:h||240}); };
+window.getLcdHash = function(x, y, w, h) { return rpc('FM1.lcdHash', {x:x||0, y:y||0, w:w, h:h}); };
 window.getInfo = function() { return rpc('FM1.getInfo'); };
 window.getLeds = function() { return rpc('FM1.getLeds'); };
-window.cdpApi = function() {
+window.remoteApi = function() {
   return {buttons: Button, encoders: Encoder,
           pages: ['HOME','FX','SCL','ENV','LFO','EDIT','GLO','ARP','SEQ'],
           knobs: ['KNOB1','KNOB2','KNOB3','KNOB4'],
           nav: ['SELECT','PRESETS','ALGORITHM'],
           rpc: ['FM1.getInfo','FM1.getLcd','FM1.lcdHash','FM1.lcdRevision',
                 'FM1.getLeds','FM1.getAudioMetrics','FM1.getEngineState',
-                'FM1.pressButton','FM1.turnEncoder','FM1.sendMidi']};
+                'FM1.pressButton','FM1.turnEncoder','FM1.sendMidi','FM1.streamLcd']};
 };
 </script></body></html>

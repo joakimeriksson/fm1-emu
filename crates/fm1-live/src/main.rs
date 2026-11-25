@@ -48,8 +48,8 @@ mod fit;
 mod exclusive;
 mod ctl;
 mod labels;
-mod cdp;
 mod panel;
+mod remote;
 mod wav;
 mod panel_smk;
 use std::collections::VecDeque;
@@ -175,8 +175,12 @@ struct Opts {
     map: String,
     /// --midi-log: each MIDI message from the inputs and what the controller profile made of it
     midi_log: bool,
-    /// --cdp PORT: serve a thin HTML page + WebSocket for remote LCD + control
-    cdp: Option<u16>,
+    /// --remote PORT: another program plays and reads this run (remote.rs); port 0: one the system picks
+    remote: Option<u16>,
+    /// --host ADDR: the address --remote listens on (127.0.0.1 when not given)
+    host: Option<std::net::IpAddr>,
+    /// --headless: no window, no sound and no MIDI inputs; --remote is the way in
+    headless: bool,
 }
 
 /// The firmware catalog web/firmwares.json as (id, name, version, package path): each package is
@@ -223,6 +227,12 @@ fn check_opts(o: &Opts) -> Result<(), String> {
     if o.record.is_some() && o.shot.is_none() {
         return Err("--record needs --shot (it records that run)".into());
     }
+    if o.remote.is_none() && (o.host.is_some() || o.headless) {
+        return Err("--host and --headless need --remote PORT (the address it listens on; a run with nothing but it)".into());
+    }
+    if o.remote.is_some() && (o.shot.is_some() || o.bench.is_some()) {
+        return Err("--remote is for the live run: --shot and --bench take their input from FM1_BENCH_KEYS".into());
+    }
     Ok(())
 }
 
@@ -231,7 +241,7 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
                        record: None, lcd_only: false, name: "Felucca".into(), fwsc: None, syx: None, midi: "all".into(), midi_ch: 0,
                        flaky_core1: None, cpu1_survives: false, seed: None, flash: None, usb: false, theme: "default".into(),
                        flash_part: fm1_soc::FlashPart::P25q80, latency_ms: AUDIO_TARGET_DEFAULT_MS, buffer: None, exclusive: false,
-                       map: "auto".into(), midi_log: false, cdp: None };
+                       map: "auto".into(), midi_log: false, remote: None, host: None, headless: false };
     let mut i = 1;
     while i < a.len() {
         if a[i] == "--usb" {
@@ -246,6 +256,11 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
         }
         if a[i] == "--midi-log" {
             o.midi_log = true;
+            i += 1;
+            continue;
+        }
+        if a[i] == "--headless" {
+            o.headless = true;
             i += 1;
             continue;
         }
@@ -300,7 +315,11 @@ fn parse_args(a: Vec<String>) -> Option<Opts> {
             "--latency" => o.latency_ms = a.get(i + 1)?.parse::<f64>().ok().filter(|v| (1.0..=500.0).contains(v))?,
             "--buffer" => o.buffer = Some(a.get(i + 1)?.parse().ok().filter(|v| (16..=8192).contains(v))?),
             "--map" => o.map = a.get(i + 1)?.clone(),
-            "--cdp" => o.cdp = Some(a.get(i + 1)?.parse().ok()?),
+            "--remote" => o.remote = Some(a.get(i + 1)?.parse().ok()?),
+            "--host" => o.host = Some(match a.get(i + 1)?.as_str() {
+                "localhost" => std::net::Ipv4Addr::LOCALHOST.into(),
+                addr => addr.parse().ok()?,
+            }),
             _ => return None,
         }
         i += 2;
@@ -322,6 +341,8 @@ struct Machine {
     /// FM1_FLAG_AUDIT=file (with FM1_NO_BLOCKS=1): every flag read against the writer it got its
     /// flags from (`FlagAudit`)
     flag_audit: Option<FlagAudit>,
+    /// --remote: what the firmware has played, for FM1.getAudioMetrics
+    heard: remote::Heard,
 }
 
 /// FM1_FLAG_AUDIT: while the reference loop steps cpu0, every instruction that reads psr flags is
@@ -474,7 +495,7 @@ impl Machine {
         let watch_call = std::env::var("FM1_WATCH_LEDPUT").ok().and_then(|v| v.parse().ok()).map(|ms| (0x0201_ad60u32, ms));
         let blocks = blocks && watch_call.is_none();
         let flag_audit = std::env::var_os("FM1_FLAG_AUDIT").map(|_| FlagAudit::default());
-        Ok(Self { m, skip_log, blocks, watch_call, watch_hits: 0, flag_audit })
+        Ok(Self { m, skip_log, blocks, watch_call, watch_hits: 0, flag_audit, heard: Default::default() })
     }
 
     /// Run n instructions of cpu0, and of cpu1 alongside once it is running
@@ -1533,7 +1554,11 @@ options: [--mhz 240] [--syx BANK.syx] [--midi all|none|NAME] [--midi-ch N] [--fl
          [--flaky-core1 RATE [--seed N]] [--cpu1-survives] [--version] [--help]
 window: right-click a control, then move or press one of your controller's: MIDI learn (right-click
         again: cancel, Delete: unbind); F1 labels, F2 keys: panel / MIDI / auto; F3 records a WAV
-remote:   --cdp PORT   serve a thin HTML page + WebSocket on PORT for remote LCD + control (JSON-RPC)
+remote:   --remote PORT  another program plays and reads this run: JSON-RPC over a WebSocket on PORT,
+                         and a page with the LCD at http://127.0.0.1:PORT (README: Remote control)
+          --host ADDR    with --remote: listen on ADDR, not 127.0.0.1 (0.0.0.0: every interface). There is
+                         no password: whoever reaches the address can play and read the emulator
+          --headless     with --remote: no window, no sound, no MIDI inputs
 headless: --bench MS   run MS emulated ms as fast as it goes, report the speed
           --shot MS    run MS ms, then write the panel to work/panel.ppm
           --record DIR with --shot: a PPM frame every 16 ms (62.5 fps) as DIR/000000.ppm…, and the audio
@@ -1732,14 +1757,12 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Some(port) = o.cdp {
-        return cdp::serve(&mut m, port);
-    }
     let mut pot = m.soc.periph.adc_value[4];
 
     let ring = Arc::new(AudioRing { q: Mutex::new(VecDeque::new()), started: AtomicBool::new(false), underruns: AtomicU64::new(0), dead: AtomicBool::new(false) });
     #[cfg(windows)]
     let exclusive_on = o.exclusive
+        && !o.headless
         && match exclusive::start(ring.clone()) {
             Ok(msg) => {
                 eprintln!("{msg}");
@@ -1757,7 +1780,7 @@ fn main() {
         }
         false
     };
-    let _stream = if exclusive_on {
+    let _stream = if exclusive_on || o.headless {
         None
     } else {
         match start_audio(ring.clone(), o.buffer) {
@@ -1777,7 +1800,7 @@ fn main() {
     let (tx, rx) = mpsc::channel::<Action>();
     // the MIDI inputs, through the controller profile (--map) to the panel and the MIDI IN jack
     // (the profiles are the FM-1's panel: an SMK-37 firmware takes MIDI as it comes)
-    let names = midi_input_names(&o);
+    let names = if o.headless { Vec::new() } else { midi_input_names(&o) };
     let profile = match ctl::choose(&o.map, &names) {
         Ok(p) if board == fm1_soc::Board::Fm1 => p,
         Ok(_) => None,
@@ -1793,7 +1816,28 @@ fn main() {
     control.log = o.midi_log;
     control.auto = o.map == "auto";
     let control = Arc::new(control);
-    let _midi = midi_inputs(&o, &tx, &control);
+    let _midi = if o.headless { Vec::new() } else { midi_inputs(&o, &tx, &control) };
+    // --remote: its server (threads of its own), and what they ask of the machine, for the emulation thread
+    let jobs = o.remote.map(|port| {
+        let host = o.host.unwrap_or(std::net::Ipv4Addr::LOCALHOST.into());
+        match remote::start(host, port, &o.name, board, leds.clone(), status.clone()) {
+            Ok((mut addr, jobs)) => {
+                // (listening on every interface: this computer's own is the one to show)
+                if addr.ip().is_unspecified() {
+                    addr.set_ip(if addr.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+                }
+                eprintln!("remote: http://{addr} (the LCD, in a browser) and ws://{addr} (JSON-RPC)");
+                if !host.is_loopback() {
+                    eprintln!("remote: listening on {host}: every computer that reaches it can play and read this emulator");
+                }
+                jobs
+            }
+            Err(e) => {
+                eprintln!("--remote: cannot listen on {host} port {port}: {e}");
+                std::process::exit(1);
+            }
+        }
+    });
     let (usb_tx, usb_rx) = mpsc::channel::<Vec<u8>>();
     let usb_on = o.usb;
     // F3: a WAV of what the firmware plays, written as the emulation makes it
@@ -1819,6 +1863,9 @@ fn main() {
             while !quit.load(Ordering::Relaxed) {
                 while let Ok(a) = rx.try_recv() {
                     m.soc.periph.apply(&a);
+                }
+                if let Some(jobs) = &jobs {
+                    jobs.run(&mut m);
                 }
                 if usb_on {
                     usb_ports.service(&mut m, &usb_rx, &usb_tx);
@@ -1867,6 +1914,9 @@ fn main() {
                             eprintln!("recording: {e}");
                         }
                     }
+                    if jobs.is_some() {
+                        m.heard.add(&m.m.soc.periph.audio);
+                    }
                     let mut q = ring.q.lock().unwrap();
                     q.extend(m.soc.periph.audio.drain(..));
                     ring.started.store(true, Ordering::Relaxed);
@@ -1909,6 +1959,14 @@ fn main() {
         })
     };
 
+    if o.headless {
+        // no window to close: it runs until it is killed, or until the machine halts
+        let _ = emu.join();
+        if status.lock().unwrap().starts_with("halted") {
+            std::process::exit(1);
+        }
+        return;
+    }
     if board == fm1_soc::Board::Smk37 {
         window_smk(&o, &tx, &lcd, &leds, &pads, &status);
         quit.store(true, Ordering::Relaxed);
@@ -2561,6 +2619,27 @@ mod tests {
         assert!(check_opts(&o).is_err());
         let o = parse_args(args(&["--record", "-", "--shot", "100"])).unwrap();
         assert!(check_opts(&o).is_ok());
+    }
+
+    #[test]
+    fn the_remote_listens_on_this_computer_unless_told_and_its_options_need_it() {
+        let o = parse_args(args(&["--remote", "8137"])).unwrap();
+        assert_eq!((o.remote, o.host, o.headless), (Some(8137), None, false));
+        assert!(check_opts(&o).is_ok());
+        let o = parse_args(args(&["--remote", "0", "--host", "0.0.0.0", "--headless"])).unwrap();
+        assert_eq!((o.remote, o.host, o.headless), (Some(0), Some("0.0.0.0".parse().unwrap()), true));
+        assert!(check_opts(&o).is_ok());
+        assert_eq!(parse_args(args(&["--remote", "1", "--host", "localhost"])).unwrap().host, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(parse_args(args(&["--remote", "1", "--host", "::1"])).unwrap().host, Some("::1".parse().unwrap()));
+        // an address, not a name; a port that is one
+        assert!(parse_args(args(&["--remote", "1", "--host", "example.com"])).is_none());
+        assert!(parse_args(args(&["--remote", "70000"])).is_none());
+        assert!(parse_args(args(&["--remote"])).is_none());
+        // --host and --headless are the remote's; the remote is the live run's
+        assert!(check_opts(&parse_args(args(&["--host", "0.0.0.0"])).unwrap()).is_err());
+        assert!(check_opts(&parse_args(args(&["--headless"])).unwrap()).is_err());
+        assert!(check_opts(&parse_args(args(&["--remote", "1", "--shot", "100"])).unwrap()).is_err());
+        assert!(check_opts(&parse_args(args(&["--remote", "1", "--bench", "100"])).unwrap()).is_err());
     }
 
     #[test]

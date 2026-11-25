@@ -147,7 +147,8 @@ jobs:
           sudo apt-get install -y -qq libasound2-dev pkg-config
 
       # (the two programs' own tests too: this job has the ALSA headers fm1-live builds against;
-      # two of fm1-live's boot Felucca and skip themselves without its package, so it must be there)
+      # those of fm1-live's that boot Felucca, the remote's among them, skip themselves without its
+      # package, so it must be there)
       - name: Firmware for fm1-live's tests
         run: |
           node tools/fetch_firmwares.mjs felucca
