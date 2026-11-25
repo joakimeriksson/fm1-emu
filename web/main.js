@@ -737,17 +737,19 @@ listen(canvas);
 // The FM-1 as a 3D model (web/panel3d.js, three.js from a CDN), in place of the flat panel; the
 // flat panel again if it cannot load. Remembered for this browser.
 const btn3d = document.getElementById("view3d");
+let loading3d = null;
 async function set3d(on) {
   on = on && board === 0;
   btn3d.hidden = board !== 0;
   btn3d.setAttribute("aria-pressed", String(on));
   if (!on) { view3d?.remove(); view3d = null; return; }
-  if (view3d) return;
+  if (view3d || loading3d) return;          // (shown, or on its way: one view only)
   btn3d.disabled = true;
   try {
-    const { panel3d } = await import("./panel3d.js");
-    if (btn3d.getAttribute("aria-pressed") !== "true" || view3d) return;
-    view3d = await panel3d(canvas);
+    loading3d = import("./panel3d.js").then(({ panel3d }) => panel3d(canvas));
+    const view = await loading3d;
+    if (btn3d.getAttribute("aria-pressed") !== "true") { view.remove(); return; }
+    view3d = view;
     listen(view3d.canvas);
     if (haveLcd) showLcd();
   } catch (error) {
@@ -755,6 +757,7 @@ async function set3d(on) {
     status.textContent = `3D view not loaded (${error.message}): the flat panel`;
   } finally {
     btn3d.disabled = false;
+    loading3d = null;
   }
 }
 btn3d.addEventListener("click", () => {

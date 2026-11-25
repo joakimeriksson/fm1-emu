@@ -7,6 +7,7 @@
 // The model: tools/model3d (an original drawing, no product photo).
 const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/+esm";
 const GLTF_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/loaders/GLTFLoader.js/+esm";
+const ROOM_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/environments/RoomEnvironment.js/+esm";
 
 // what each part of the model is, in panel_hit's numbers: 0..6 an encoder (the flat panel's
 // order), 7 the MASTER pot, 100 + matrix id a button or key
@@ -19,21 +20,29 @@ const ASPECT = 1280 / 820;                 // the flat panel's, so the page's la
 const CAM_KEY = "fm1.view3d.cam";
 
 export async function panel3d(flat) {
-  const [THREE, { GLTFLoader }] = await Promise.all([import(THREE_URL), import(GLTF_URL)]);
+  const [THREE, { GLTFLoader }, { RoomEnvironment }] = await Promise.all([import(THREE_URL), import(GLTF_URL), import(ROOM_URL)]);
   const canvas = document.createElement("canvas");
   canvas.id = "panel3d";
   canvas.setAttribute("aria-label", "FM-1 front panel, in 3D");
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.75;
   const gltf = await new GLTFLoader().loadAsync(new URL("fm1.glb", import.meta.url).href);
   const root = gltf.scene;
 
   const scene = new THREE.Scene();
   scene.add(root);
-  scene.add(new THREE.AmbientLight(0xffffff, 1.3));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.8);
+  // a soft room around it (the model's metal and plastic want reflections), a key light and a fill
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+  scene.environmentIntensity = 0.35;
+  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
   sun.position.set(-0.08, 0.25, 0.4);
   scene.add(sun);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.5);
+  fill.position.set(0.2, -0.1, 0.3);
+  scene.add(fill);
   const camera = new THREE.PerspectiveCamera(28, ASPECT, 0.005, 5);
 
   // the parts, by what they are
@@ -51,7 +60,9 @@ export async function panel3d(flat) {
   BUTTONS.forEach((n, id) => {
     part(`button_${n}`, 100 + id);
     const p = byId.get(100 + id);
-    if (p && p.node.material) { p.mat = own(p.node); p.tint = new THREE.Color(id === 12 ? GREEN : AMBER); }
+    // its cap's top (the model's button_<name>_top) glows with its LED
+    const cap = root.getObjectByName(`button_${n}_top`) || p?.node;
+    if (p && cap?.material) { p.mat = own(cap); p.tint = new THREE.Color(id === 12 ? GREEN : AMBER); }
   });
   const key = (name, id) => {
     part(name, 100 + id);
@@ -226,9 +237,9 @@ export async function panel3d(flat) {
           if (p.led) {
             const glow = held ? 1 : led;
             p.led.color.copy(p.ledOff).lerp(amber, glow);
-            p.led.emissiveIntensity = glow * 1.6;
+            p.led.emissiveIntensity = glow * 0.8;
           }
-          if (p.mat) { p.mat.emissive = p.tint; p.mat.emissiveIntensity = led * 0.6; }
+          if (p.mat) { p.mat.emissive = p.tint; p.mat.emissiveIntensity = led * 1.0; }
           dirty = true;
         }
       }

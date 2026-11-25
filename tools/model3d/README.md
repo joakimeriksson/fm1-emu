@@ -5,7 +5,8 @@ original drawing made with Pillow (no product photo, no firmware artwork), on si
 Rebuild: `pip install numpy trimesh pillow`, DejaVu Sans installed, `python build.py`, then copy
 `fm1.glb` to `web/`.
 
-- Metres, +Z the front, +Y up. Sizes are approximate, not measured; the LCD is larger than the real
+- v4: knurled knobs, bevelled caps, whole key caps as LEDs, a 40%-wide LCD. Metres, +Z the front, +Y up.
+  Sizes are approximate, not measured; the LCD is larger than the real
   one on purpose, for the firmwares' small text.
 - Nodes panel3d.js reads: `knob_{master,select,presets,algorithm,knob1..knob4}`,
   `button_{oct_down,oct_up,fx,sel,env,lfo,edit,glo,home,save,arp,seq,play_stop,rec}`,
