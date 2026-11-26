@@ -36,7 +36,7 @@ for n,x,y in knobs: label(x,y-46,n.upper(),9)
 for n,x,y,txt in buttons:
     if n=='play_stop': label(x,y-4,'PLAY',6); label(x,y+4,'STOP',6)
     else: label(x,y,txt,8)
-label(423,500,'FM-1',16); im.save(P/'panel.jpg',quality=82,subsampling=0)
+label(423,496,'FM-1',12); im.save(P/'panel.jpg',quality=82,subsampling=0)
 atlas=t.visual.material.PBRMaterial(name='original printed graphite',baseColorTexture=Image.open(P/'panel.jpg'),roughnessFactor=.72,metallicFactor=.08)
 shape('enclosure',(423,256),722,510,43,-.023,0,9,body,atlas,atlas=True)
 shape('keyboard_well',(423,405),678,160,25,.00005,.001,3,recess)

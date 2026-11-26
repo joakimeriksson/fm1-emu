@@ -2,8 +2,8 @@
 
 The web page's 3D view (web/panel3d.js) draws `web/fm1.glb`. `build.py` makes it: the panel is an
 original drawing made with Pillow (no product photo, no firmware artwork), on simple extruded shapes.
-Rebuild: `pip install numpy trimesh pillow`, DejaVu Sans installed, `python build.py`, then copy
-`fm1.glb` to `web/`.
+Rebuild: `pip install numpy trimesh pillow`, then `python build.py` with DejaVuSans.ttf installed or
+beside it (matplotlib ships one: mpl-data/fonts/ttf), and copy `fm1.glb` to `web/`.
 
 - v4: knurled knobs, bevelled caps, whole key caps as LEDs, a 40%-wide LCD. Metres, +Z the front, +Y up.
   Sizes are approximate, not measured; the LCD is larger than the real
