@@ -27,7 +27,7 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
 cp target/wasm/wasm32-unknown-unknown/release/fm1_web.wasm "$OUT/"
-cp web/index.html web/style.css web/main.js web/persistence.js web/tryout.js web/worklet.js web/jit.js web/fwsc.js web/firmwares.json web/og.png "$OUT/"
+cp web/index.html web/style.css web/main.js web/panel3d.js web/fm1.glb web/persistence.js web/tryout.js web/worklet.js web/jit.js web/fwsc.js web/firmwares.json web/og.png "$OUT/"
 # the technical report the pages link to: the paper (docs/paper), under the name its links have
 cp docs/paper/fm1-paper.pdf "$OUT/fm1-emu-report.pdf"
 # the SMK-37's page: its own index, catalog and preview, the same code and wasm beside them
