@@ -1,9 +1,10 @@
 // The FM-1 in 3D (the "3D" toggle beside the screen controls): fm1.glb drawn with three.js, the
 // firmware's screen on its LCD and its LEDs on the keys and buttons. Only a view: main.js keeps the
 // machine's input; this module answers what is under a point (as the flat panel's panel_hit does)
-// and draws what main.js hands it each frame. The wheel or a pinch on the empty panel zooms towards
-// the point under it; dragging it up or down tilts the synth a little, or when zoomed in moves it (Shift: the other);
-// a double click shows the whole synth again.
+// and draws what main.js hands it each frame. A pinch (a trackpad's too) or Ctrl / Cmd + the wheel
+// zooms towards the point under it; a plain wheel scrolls the page, as anywhere else. A double click
+// on the empty panel zooms in there, or out to the whole synth when zoomed in. Dragging the empty
+// panel up or down tilts the synth a little, or when zoomed in moves it (Shift: the other).
 // The model: tools/model3d (an original drawing, no product photo).
 const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/+esm";
 const GLTF_URL = "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/loaders/GLTFLoader.js/+esm";
@@ -189,10 +190,15 @@ export async function panel3d(flat) {
   canvas.addEventListener("wheel", (e) => {
     const h = hit(e.clientX, e.clientY);
     if (h >= 0 && h <= 7) return;                     // a knob: main.js turns it
+    if (!e.ctrlKey && !e.metaKey) return;             // the page scrolls (a trackpad's pinch: ctrlKey)
     e.preventDefault();
     zoomAt(e.clientX, e.clientY, Math.exp(e.deltaY * 0.0015));
   }, { passive: false });
-  canvas.addEventListener("dblclick", (e) => { if (hit(e.clientX, e.clientY) < 0) fit(); });
+  canvas.addEventListener("dblclick", (e) => {
+    if (hit(e.clientX, e.clientY) >= 0) return;
+    if (cam.zoom < 0.95) fit();
+    else zoomAt(e.clientX, e.clientY, 0.5);
+  });
   function fit() { cam = home(); place(); keep(); }
 
   // ------------------------------------------------------------ size and drawing
