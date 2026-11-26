@@ -5,8 +5,9 @@ original drawing made with Pillow (no product photo, no firmware artwork), on si
 Rebuild: `pip install numpy trimesh pillow`, then `python build.py` with DejaVuSans.ttf installed or
 beside it (matplotlib ships one: mpl-data/fonts/ttf), and copy `fm1.glb` to `web/`.
 
-- v4: knurled knobs, bevelled caps, whole key caps as LEDs, a 40%-wide LCD. Metres, +Z the front, +Y up.
-  Sizes are approximate, not measured; the LCD is larger than the real
+- v7: the FM-1 and FM1-EMU marks on the face, the upper keys' legends (OP1..OP6, PIT, GLO, MONO,
+  POLY) as printed on the hardware, a lower profile, whole key caps as LEDs, a 40%-wide LCD.
+  Metres, +Z the front, +Y up. Sizes are approximate, not measured; the LCD is larger than the real
   one on purpose, for the firmwares' small text.
 - Nodes panel3d.js reads: `knob_{master,select,presets,algorithm,knob1..knob4}`,
   `button_{oct_down,oct_up,fx,sel,env,lfo,edit,glo,home,save,arp,seq,play_stop,rec}`,

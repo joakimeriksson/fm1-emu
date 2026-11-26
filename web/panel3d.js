@@ -28,22 +28,36 @@ export async function panel3d(flat) {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 0.75;
+  renderer.toneMappingExposure = 0.8;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   const gltf = await new GLTFLoader().loadAsync(new URL("fm1.glb", import.meta.url).href);
   const root = gltf.scene;
 
   const scene = new THREE.Scene();
   scene.add(root);
-  // a soft room around it (the model's metal and plastic want reflections), a key light and a fill
+  // the model's studio (its studio.js, without its backdrop and floor: the page has its own): a soft
+  // room for reflections, a warm key light that casts the controls' shadows, a cool fill and a rim
   const pmrem = new THREE.PMREMGenerator(renderer);
   scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = 0.35;
-  const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-  sun.position.set(-0.08, 0.25, 0.4);
+  scene.environmentIntensity = 0.3;
+  pmrem.dispose();
+  root.traverse((o) => { if (o.isMesh) { o.castShadow = o.name !== "lcd"; o.receiveShadow = true; } });
+  const sun = new THREE.DirectionalLight(0xfff3e7, 2.0);
+  sun.position.set(-0.18, 0.24, 0.4);
+  sun.castShadow = true;
+  Object.assign(sun.shadow.camera, { left: -0.22, right: 0.22, top: 0.22, bottom: -0.22, near: 0.01, far: 1 });
+  sun.shadow.mapSize.set(1024, 1024);
+  sun.shadow.bias = -0.00015;
+  sun.shadow.normalBias = 0.00015;
+  sun.shadow.radius = 4;
   scene.add(sun);
-  const fill = new THREE.DirectionalLight(0xffffff, 0.5);
-  fill.position.set(0.2, -0.1, 0.3);
+  const fill = new THREE.DirectionalLight(0xc9d9ff, 0.85);
+  fill.position.set(0.25, -0.05, 0.3);
   scene.add(fill);
+  const rim = new THREE.DirectionalLight(0xe1eaff, 1.2);
+  rim.position.set(0.1, 0.32, 0.08);
+  scene.add(rim);
   const camera = new THREE.PerspectiveCamera(28, ASPECT, 0.005, 5);
 
   // the parts, by what they are
@@ -243,7 +257,7 @@ export async function panel3d(flat) {
           if (p.led) {
             const glow = held ? 1 : led;
             p.led.color.copy(p.ledOff).lerp(amber, glow);
-            p.led.emissiveIntensity = glow * 0.8;
+            p.led.emissiveIntensity = glow * 2.2;
           }
           if (p.mat) { p.mat.emissive = p.tint; p.mat.emissiveIntensity = led * 1.0; }
           dirty = true;
