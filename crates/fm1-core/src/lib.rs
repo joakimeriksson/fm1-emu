@@ -6572,7 +6572,7 @@ mod tests {
             let x = rnd();
             let w = [1u8, 2, 4][x as usize % 3];
             let (target, cond) = (0x0200_0040, conds[x as usize / 8 % conds.len()]);
-            let tail = match x % 23 {
+            let tail = match x % 24 {
                 0 => Fast::Ld { d: r(), b: Base::Reg(r()), off: x >> 24, w, signed: x & 8 != 0 },
                 1 => Fast::St { s: r(), b: Base::Reg(r()), off: x >> 24, w },
                 2 => Fast::LdPost { d: r(), b: r(), w, signed: x & 8 != 0, inc: x >> 26 },
@@ -6591,6 +6591,7 @@ mod tests {
                 15 => Fast::DecBr { r: r(), cond, v: x >> 20, target },
                 16 => Fast::Ld { d: r(), b: Base::Sp, off: x >> 26, w, signed: false },
                 17 => Fast::St { s: r(), b: Base::Sp, off: x >> 26, w },
+                18 => Fast::Raw { route: 21, raw: (rnd() & 0xffff_0000) | 0xe100 | PAIR_OPS[x as usize / 32 % PAIR_OPS.len()] },
                 _ => reg_op(rnd(), &r),
             };
             // (as build_block: a pair that cannot be glued, the second reads what the head writes)
@@ -6629,6 +6630,82 @@ mod tests {
             }
         }
         assert!(order_matters > swapped / 2, "{order_matters} of {swapped}");
+    }
+
+    /// The low bytes of the 64-bit pair ops' words (`.. e1`, `exec_raw`'s arm 21): the shifts and rotates by a
+    /// count and by a register, the pair shifted into one register, the multiplies and the divide.
+    const PAIR_OPS: [u32; 10] = [0xd0, 0xd4, 0xd8, 0xdc, 0xde, 0xdf, 0xf8, 0xfc, 0xfe, 0xf6];
+
+    /// The 64-bit pair ops' registers (`Fast::regs_rw`) against the executor: one changes no register it is not
+    /// said to write, and what it leaves in those and in the flags depends on no register it is not said to read;
+    /// those it writes are the ones `raw_dest` gives the pair rule. Then gluing's rule with one as a pair's
+    /// head: a second instruction that reads and writes nothing the head writes leaves, run after it, what the
+    /// pair rule (`exec_fast_paired`, as `step` runs pairs) leaves: registers, flags, sp, memory.
+    #[test]
+    fn the_pair_ops_registers_are_the_ones_they_use() {
+        let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1du64);
+        let rnd = || { let mut s = seed.get(); s ^= s << 13; s ^= s >> 7; s ^= s << 17; seed.set(s); s as u32 };
+        let value = || match rnd() % 4 { 0 => rnd() % 70, 1 => 0u32.wrapping_sub(rnd() % 70), _ => rnd() };
+        let word = |i: usize| (rnd() & 0xffff_0000) | 0xe100 | PAIR_OPS[i % PAIR_OPS.len()];
+        for i in 0..20_000 {
+            let raw = word(i);
+            let f = Fast::Raw { route: 21, raw };
+            let (reads, writes) = f.regs_rw().unwrap();
+            // (the registers the pair rule holds back for one of these, from its word: `pair_hold`'s `dest`)
+            assert_eq!(raw_dest(21, raw as u64).iter().filter(|d| d.1 != 0).fold(0, |a, d| a | 1 << d.0), writes, "{f:x?}");
+            for _ in 0..8 {
+                let (mut a, mut b, mut ram) = (Cpu::new(0), Cpu::new(0), FlatRam::new(vec![0; 16]));
+                for r in 0..16 {
+                    a.regs[r] = value();
+                    b.regs[r] = if reads >> r & 1 != 0 { a.regs[r] } else { value() };
+                }
+                a.flags = rnd() & 15;
+                b.flags = a.flags;
+                let before = (a.regs, b.regs);
+                assert_eq!((a.exec_fast(&mut ram, f, 4), b.exec_fast(&mut ram, f, 4)), (None, None));
+                for r in 0..16 {
+                    if writes >> r & 1 == 0 {
+                        assert!(a.regs[r] == before.0[r] && b.regs[r] == before.1[r], "{f:x?} wrote r{r}");
+                    } else {
+                        assert_eq!(a.regs[r], b.regs[r], "{f:x?}: r{r} from a register it does not read");
+                    }
+                }
+                assert_eq!(a.flags, b.flags, "{f:x?}: the flags from a register it does not read");
+            }
+        }
+        let mut glued = 0;
+        while glued < 4000 {
+            let (r, x) = (|| (rnd() % 16) as u8, rnd());
+            let head = Fast::Raw { route: 21, raw: word(x as usize) };
+            let tail = match x >> 8 & 7 {
+                0 => Fast::Ld { d: r(), b: Base::Sp, off: x >> 26, w: 4, signed: false },
+                1 => Fast::St { s: r(), b: Base::Sp, off: x >> 26, w: 4 },
+                2 => Fast::Ld { d: r(), b: Base::Reg(r()), off: x >> 24, w: 4, signed: false },
+                3 => Fast::St { s: r(), b: Base::Reg(r()), off: x >> 24, w: 2 },
+                4 => Fast::Mov { d: r(), s: r() },
+                5 => Fast::Alu3 { d: r(), a: r(), b: r(), op: Op::Add },
+                6 => Fast::Raw { route: 21, raw: word(rnd() as usize) },
+                _ => Fast::MovI { d: r(), v: x },
+            };
+            let (hw, (tr, tw)) = (head.regs_rw().unwrap().1, tail.regs_rw().unwrap());
+            if hw & (tr | tw) != 0 {
+                continue; // (as build_block: not glued)
+            }
+            glued += 1;
+            let mut mem = vec![0u8; 0x8000];
+            mem.iter_mut().for_each(|b| *b = rnd() as u8);
+            let (mut pair, mut pair_ram, mut plain, mut plain_ram) = (Cpu::new(0), FlatRam::new(mem.clone()), Cpu::new(0), FlatRam::new(mem));
+            for i in 0..16 {
+                pair.regs[i] = match rnd() % 4 { 0 => rnd() % 70, 1 => 0x1000 + rnd() % 0x4000, _ => rnd() };
+            }
+            (pair.flags, pair.sp) = (rnd() & 15, 0x6000 + rnd() % 0x100);
+            (plain.regs, plain.flags, plain.sp) = (pair.regs, pair.flags, pair.sp);
+            let _ = pair.exec_fast_paired(&mut pair_ram, head, true, 4);
+            assert_eq!(pair.exec_fast_paired(&mut pair_ram, tail, false, 8), None);
+            assert!(pair.pair_pending.is_none());
+            assert_eq!((plain.exec_fast(&mut plain_ram, head, 4), plain.exec_fast(&mut plain_ram, tail, 8)), (None, None));
+            assert!((pair.regs, pair.flags, pair.sp) == (plain.regs, plain.flags, plain.sp) && pair_ram.mem == plain_ram.mem, "{head:x?} then {tail:x?}");
+        }
     }
 
     /// The eight register-base block moves (`eb 00..70`: bit 4 the base written back, bit 5 a
@@ -7374,6 +7451,24 @@ impl Fast {
             Fast::PopRegs { mask } => (0, mask),
             Fast::PushSregs { .. } | Fast::PopSregs { .. } | Fast::Rti => (0, 0),
             Fast::AddC { d, a, b, .. } => (m(a) | m(b), m(d)),
+            // the 64-bit pair ops (`exec_raw`'s arm 21, whose forms these are): the pair at bits 29..31,
+            // or the one register a pair is shifted into (`de` / `df`), from the pair at bits 21..23,
+            // the registers at bits 20..23 and 24..27, or itself. SHRUB's filters and voices are
+            // pairs with one of these as the head and a load or store after it: glued, compiled
+            // code runs them (they were a third of what its two cores ran interpreted)
+            Fast::Raw { route: 21, raw } => {
+                let (p, q, a, b) = (((raw >> 29) & 7) as u8, ((raw >> 21) & 7) as u8, (raw >> 20) as u8, (raw >> 24) as u8);
+                let pair = |p: u8| m(2 * p) | m(2 * p + 1);
+                match raw & 0xff {
+                    0xd0 | 0xd4 => (pair(p), pair(p)),
+                    0xd8 | 0xdc => (pair(p) | m(b), pair(p)),
+                    0xde => (pair(q), m((raw >> 28) as u8)),
+                    0xdf => (pair(q) | m(b), m((raw >> 28) as u8)),
+                    0xf8 => (m(a) | m(b), pair(p)),
+                    0xfc | 0xfe => (m(a) | m(b) | pair(p), pair(p)),
+                    _ => (pair(q) | m(b), pair(p)),
+                }
+            }
             Fast::IfBlk { .. } | Fast::SetIe { .. } | Fast::IcfgWr { .. } | Fast::Raw { .. } | Fast::Swap { .. } => return None,
         })
     }
