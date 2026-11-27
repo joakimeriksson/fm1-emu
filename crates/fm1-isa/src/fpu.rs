@@ -55,11 +55,13 @@ pub static FPU: &[IsaEntry] = &[
     e!("fpu_ftof_floor", "R = ftof(R) (floor)", 0x00ff_ffff, 0x00ff_e53f),
     e!("fpu_itof", "R = itof(R)", 0x00ff_ffff, 0x008f_e53f),
     e!("fpu_utof", "R = utof(R)", 0x00ff_ffff, 0x009f_e53f),
-    e!("iff_r_eq_r_goto_i", "iff (R == R) goto #i", 0x0800_ff70, 0x0800_e800),
-    e!("iff_r_uge_r_goto_i", "iff (R u>= R) goto #i", 0x0800_ff70, 0x0800_e900),
-    e!("iff_r_ugt_r_goto_i", "iff (R u> R) goto #i", 0x0800_ff70, 0x0800_ec00),
-    e!("iff_r_ge_r_goto_i", "iff (R >= R) goto #i", 0x0800_ff70, 0x0800_ed00),
-    e!("iff_r_gt_r_goto_i", "iff (R > R) goto #i", 0x0800_ff70, 0x0800_ee00),
+    // the 4-byte float compare-branches: second-word bits 11..10 = 10 (bits 27..26 here). With 11 the vendor
+    // objdump (-mcpu=r4 only) shows a 64-bit pair compare; an FM-1 raises the illegal-instruction exception.
+    e!("iff_r_eq_r_goto_i", "iff (R == R) goto #i", 0x0c00_ff70, 0x0800_e800),
+    e!("iff_r_uge_r_goto_i", "iff (R u>= R) goto #i", 0x0c00_ff70, 0x0800_e900),
+    e!("iff_r_ugt_r_goto_i", "iff (R u> R) goto #i", 0x0c00_ff70, 0x0800_ec00),
+    e!("iff_r_ge_r_goto_i", "iff (R >= R) goto #i", 0x0c00_ff70, 0x0800_ed00),
+    e!("iff_r_gt_r_goto_i", "iff (R > R) goto #i", 0x0c00_ff70, 0x0800_ee00),
     e!("iff_r_eq_r_blk", "iff (R == R) {", 0x0080_ff70, 0x0080_e810),
     e!("iff_r_uge_r_blk", "iff (R u>= R) {", 0x0080_ff70, 0x0080_e910),
     e!("iff_r_ugt_r_blk", "iff (R u> R) {", 0x0080_ff70, 0x0080_ec10),
