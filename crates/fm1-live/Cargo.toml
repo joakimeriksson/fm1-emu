@@ -12,6 +12,8 @@ minifb = "0.28"
 cpal = "0.15"
 midir = "0.10"
 fm1-map = { path = "../fm1-map" }
+tungstenite = "0.24"
+serde_json = "1"
 
 # --exclusive: WASAPI exclusive mode
 [target.'cfg(windows)'.dependencies]
